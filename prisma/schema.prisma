@@ -1,0 +1,233 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String    @id @default(uuid())
+  email        String    @unique
+  name         String
+  avatarUrl    String?
+  passwordHash String
+  role         UserRole  @default(AGENT)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  accounts      Account[]
+  comments      ThreadComment[]
+  mentionsMade  ThreadMention[]  @relation("MentionedUser")
+  reactions     CommentReaction[]
+  notifications Notification[]
+  signatures    Signature[]
+  threadAccess  ThreadAccess[]
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  AGENT
+}
+
+model Account {
+  id           String          @id @default(uuid())
+  userId       String
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider     AccountProvider
+  email        String
+  displayName  String?
+  accessToken  String
+  refreshToken String?
+  tokenExpiry  DateTime?
+  scopes       String[]
+  isActive     Boolean         @default(true)
+  syncCursor   String?
+  lastSyncAt   DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  emails  Email[]
+  threads Thread[]
+
+  @@unique([provider, email])
+}
+
+enum AccountProvider {
+  GMAIL
+  MICROSOFT
+  APPLE_IMAP
+}
+
+model Thread {
+  id                String   @id @default(uuid())
+  accountId         String
+  account           Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  providerThreadId  String
+  subject           String
+  snippet           String?
+  isRead            Boolean  @default(false)
+  isStarred         Boolean  @default(false)
+  isArchived        Boolean  @default(false)
+  isTrashed         Boolean  @default(false)
+  labels            String[]
+  participantEmails String[]
+  messageCount      Int      @default(0)
+  lastMessageAt     DateTime
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  emails   Email[]
+  comments ThreadComment[]
+  mentions ThreadMention[]
+  access   ThreadAccess[]
+
+  @@unique([accountId, providerThreadId])
+  @@index([accountId, lastMessageAt(sort: Desc)])
+  @@index([accountId, isArchived, isTrashed])
+}
+
+model Email {
+  id                String   @id @default(uuid())
+  accountId         String
+  account           Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  threadId          String
+  thread            Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  providerMessageId String   @unique
+  internetMessageId String?
+  inReplyTo         String?
+  references        String[]
+  fromAddress       String
+  fromName          String?
+  toAddresses       Json
+  ccAddresses       Json?
+  bccAddresses      Json?
+  subject           String
+  bodyText          String?
+  bodyHtml          String?
+  snippet           String?
+  isRead            Boolean  @default(false)
+  isStarred         Boolean  @default(false)
+  isDraft           Boolean  @default(false)
+  labels            String[]
+  hasAttachments    Boolean  @default(false)
+  receivedAt        DateTime
+  sentAt            DateTime?
+  createdAt         DateTime @default(now())
+
+  attachments Attachment[]
+
+  @@index([threadId, receivedAt])
+  @@index([accountId, receivedAt(sort: Desc)])
+}
+
+model Attachment {
+  id                     String   @id @default(uuid())
+  emailId                String
+  email                  Email    @relation(fields: [emailId], references: [id], onDelete: Cascade)
+  filename               String
+  mimeType               String
+  size                   Int
+  contentId              String?
+  providerAttachmentId   String
+  createdAt              DateTime @default(now())
+}
+
+model Signature {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name      String
+  bodyHtml  String
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ThreadComment {
+  id         String    @id @default(uuid())
+  threadId   String
+  thread     Thread    @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  authorId   String
+  author     User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  bodyHtml   String
+  bodyText   String
+  isResolved Boolean   @default(false)
+  resolvedBy String?
+  resolvedAt DateTime?
+  isEdited   Boolean   @default(false)
+  editedAt   DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  mentions  ThreadMention[]
+  reactions CommentReaction[]
+}
+
+model ThreadMention {
+  id              String        @id @default(uuid())
+  commentId       String
+  comment         ThreadComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  threadId        String
+  thread          Thread        @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  mentionedUserId String
+  mentionedUser   User          @relation("MentionedUser", fields: [mentionedUserId], references: [id], onDelete: Cascade)
+  createdAt       DateTime      @default(now())
+
+  @@unique([commentId, mentionedUserId])
+}
+
+model CommentReaction {
+  id        String        @id @default(uuid())
+  commentId String
+  comment   ThreadComment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emoji     String
+  createdAt DateTime      @default(now())
+
+  @@unique([commentId, userId, emoji])
+}
+
+model ThreadAccess {
+  id          String      @id @default(uuid())
+  threadId    String
+  thread      Thread      @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessLevel AccessLevel @default(VIEWER)
+  grantedAt   DateTime    @default(now())
+
+  @@unique([threadId, userId])
+}
+
+enum AccessLevel {
+  VIEWER
+  COLLABORATOR
+  OWNER
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      NotificationType
+  title     String
+  body      String?
+  data      Json?
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  @@index([userId, isRead, createdAt(sort: Desc)])
+}
+
+enum NotificationType {
+  NEW_EMAIL
+  MENTION
+  COMMENT
+  ASSIGNMENT
+  SLA_WARNING
+  SLA_BREACH
+}
