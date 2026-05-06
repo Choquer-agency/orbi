@@ -6,6 +6,10 @@ import {
   getMicrosoftAuthUrl,
   exchangeMicrosoftCode,
 } from '../../services/oauth/microsoft-oauth.js';
+import { addGmailSyncJob } from '../../queues/gmail-sync.queue.js';
+import { addGmailHistoricalSyncJob } from '../../queues/gmail-historical-sync.queue.js';
+import { addMicrosoftSyncJob } from '../../queues/microsoft-sync.queue.js';
+import { addMicrosoftHistoricalSyncJob } from '../../queues/microsoft-historical-sync.queue.js';
 import { env } from '../../config/env.js';
 
 export default async function accountRoutes(app: FastifyInstance) {
@@ -32,11 +36,12 @@ export default async function accountRoutes(app: FastifyInstance) {
 
   // Gmail OAuth: initiate
   app.get('/api/accounts/oauth/gmail', { preHandler: [authenticate] }, async (request, reply) => {
-    const { desktop } = request.query as { desktop?: string };
+    const { platform, desktop } = request.query as { platform?: string; desktop?: string };
+    const resolvedPlatform = platform || (desktop === 'true' ? 'desktop' : 'web');
     const state = app.jwt.sign({
       userId: request.user.userId,
-      desktop: desktop === 'true',
-    });
+      platform: resolvedPlatform,
+    } as any);
     const url = getGmailAuthUrl(state);
     return { data: { url } };
   });
@@ -45,9 +50,9 @@ export default async function accountRoutes(app: FastifyInstance) {
   app.get('/api/accounts/oauth/gmail/callback', async (request, reply) => {
     const { code, state } = request.query as { code: string; state: string };
 
-    let payload: { userId: string; desktop: boolean };
+    let payload: { userId: string; platform: string; desktop?: boolean };
     try {
-      payload = app.jwt.verify<{ userId: string; desktop: boolean }>(state);
+      payload = app.jwt.verify<{ userId: string; platform: string; desktop?: boolean }>(state);
     } catch {
       return reply.status(400).send({ error: 'Invalid state parameter' });
     }
@@ -81,7 +86,17 @@ export default async function accountRoutes(app: FastifyInstance) {
       },
     });
 
-    if (payload.desktop) {
+    // Trigger initial sync after connecting Gmail
+    const connectedAccount = await app.prisma.account.findFirst({
+      where: { provider: 'GMAIL', email: result.email },
+      select: { id: true },
+    });
+    if (connectedAccount) {
+      addGmailSyncJob({ accountId: connectedAccount.id, maxResults: 100 }).catch(() => {});
+    }
+
+    const plat = payload.platform || (payload.desktop ? 'desktop' : 'web');
+    if (plat === 'desktop' || plat === 'capacitor') {
       return reply.redirect(`orbi-mail://oauth/callback?provider=gmail&success=true`);
     }
     return reply.redirect(`${env.FRONTEND_URL}/oauth/callback?provider=gmail&success=true`);
@@ -92,11 +107,12 @@ export default async function accountRoutes(app: FastifyInstance) {
     '/api/accounts/oauth/microsoft',
     { preHandler: [authenticate] },
     async (request, reply) => {
-      const { desktop } = request.query as { desktop?: string };
+      const { platform, desktop } = request.query as { platform?: string; desktop?: string };
+      const resolvedPlatform = platform || (desktop === 'true' ? 'desktop' : 'web');
       const state = app.jwt.sign({
         userId: request.user.userId,
-        desktop: desktop === 'true',
-      });
+        platform: resolvedPlatform,
+      } as any);
       const url = getMicrosoftAuthUrl(state);
       return { data: { url } };
     },
@@ -106,9 +122,9 @@ export default async function accountRoutes(app: FastifyInstance) {
   app.get('/api/accounts/oauth/microsoft/callback', async (request, reply) => {
     const { code, state } = request.query as { code: string; state: string };
 
-    let payload: { userId: string; desktop: boolean };
+    let payload: { userId: string; platform: string; desktop?: boolean };
     try {
-      payload = app.jwt.verify<{ userId: string; desktop: boolean }>(state);
+      payload = app.jwt.verify<{ userId: string; platform: string; desktop?: boolean }>(state);
     } catch {
       return reply.status(400).send({ error: 'Invalid state parameter' });
     }
@@ -142,7 +158,17 @@ export default async function accountRoutes(app: FastifyInstance) {
       },
     });
 
-    if (payload.desktop) {
+    // Trigger initial sync after connecting Microsoft
+    const connectedMsAccount = await app.prisma.account.findFirst({
+      where: { provider: 'MICROSOFT', email: result.email },
+      select: { id: true },
+    });
+    if (connectedMsAccount) {
+      addMicrosoftSyncJob({ accountId: connectedMsAccount.id, maxResults: 100 }).catch(() => {});
+    }
+
+    const msPlat = payload.platform || (payload.desktop ? 'desktop' : 'web');
+    if (msPlat === 'desktop' || msPlat === 'capacitor') {
       return reply.redirect(`orbi-mail://oauth/callback?provider=microsoft&success=true`);
     }
     return reply.redirect(`${env.FRONTEND_URL}/oauth/callback?provider=microsoft&success=true`);
@@ -186,6 +212,25 @@ export default async function accountRoutes(app: FastifyInstance) {
     };
   });
 
+  // Update account (rename / set display name)
+  app.patch('/api/accounts/:id', { preHandler: [authenticate] }, async (request, reply) => {
+    const { id } = request.params as { id: string };
+    const { displayName } = request.body as { displayName?: string };
+
+    const account = await app.prisma.account.findFirst({
+      where: { id, userId: request.user.userId },
+    });
+    if (!account) return reply.status(404).send({ error: 'Account not found' });
+
+    const updated = await app.prisma.account.update({
+      where: { id },
+      data: { displayName: displayName || null },
+      select: { id: true, provider: true, email: true, displayName: true, isActive: true },
+    });
+
+    return { data: updated };
+  });
+
   // Delete account
   app.delete('/api/accounts/:id', { preHandler: [authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string };
@@ -214,7 +259,68 @@ export default async function accountRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Account not found' });
     }
 
-    // TODO: Enqueue sync job via BullMQ
-    return { data: { message: 'Sync queued' } };
+    if (account.provider === 'GMAIL') {
+      await addGmailSyncJob({ accountId: account.id });
+    } else if (account.provider === 'MICROSOFT') {
+      await addMicrosoftSyncJob({ accountId: account.id });
+    }
+    return { data: { message: 'Sync queued', provider: account.provider } };
   });
+
+  // Trigger full historical sync
+  app.post(
+    '/api/accounts/:id/historical-sync',
+    { preHandler: [authenticate] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+
+      const account = await app.prisma.account.findFirst({
+        where: { id, userId: request.user.userId },
+      });
+
+      if (!account) {
+        return reply.status(404).send({ error: 'Account not found' });
+      }
+
+      if (account.provider !== 'GMAIL' && account.provider !== 'MICROSOFT') {
+        return reply.status(400).send({ error: 'Historical sync is only supported for Gmail and Microsoft accounts' });
+      }
+
+      if (account.historicalSyncStatus === 'IN_PROGRESS') {
+        return reply.status(409).send({ error: 'Historical sync already in progress' });
+      }
+
+      if (account.provider === 'GMAIL') {
+        await addGmailHistoricalSyncJob({ accountId: account.id });
+      } else {
+        await addMicrosoftHistoricalSyncJob({ accountId: account.id });
+      }
+      return { data: { message: 'Historical sync started' } };
+    },
+  );
+
+  // Get sync status for an account
+  app.get(
+    '/api/accounts/:id/sync-status',
+    { preHandler: [authenticate] },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+
+      const account = await app.prisma.account.findFirst({
+        where: { id, userId: request.user.userId },
+        select: {
+          historicalSyncStatus: true,
+          historicalSyncProgress: true,
+          historicalSyncCompletedAt: true,
+          lastSyncAt: true,
+        },
+      });
+
+      if (!account) {
+        return reply.status(404).send({ error: 'Account not found' });
+      }
+
+      return { data: account };
+    },
+  );
 }

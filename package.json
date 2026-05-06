@@ -12,7 +12,15 @@
     "db:generate": "npx prisma generate --schema=prisma/schema.prisma",
     "db:seed": "npx tsx prisma/seed.ts",
     "db:studio": "npx prisma studio --schema=prisma/schema.prisma",
-    "lint": "eslint packages/*/src --ext .ts,.tsx"
+    "lint": "eslint packages/*/src --ext .ts,.tsx",
+    "dev:ios": "concurrently \"npm run dev -w packages/backend\" \"npm run dev -w packages/frontend -- --host\"",
+    "build:ios": "npm run build -w packages/shared && cd packages/frontend && npx vite build --mode ios",
+    "sync:ios": "npm run build:ios && cd packages/ios && npx cap sync ios",
+    "open:ios": "cd packages/ios && npx cap open ios",
+    "build:electron-frontend": "npm run build -w packages/shared && cd packages/frontend && npx vite build --mode electron",
+    "package:mac": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin",
+    "package:mac:arm64": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=arm64",
+    "package:mac:x64": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=x64"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",

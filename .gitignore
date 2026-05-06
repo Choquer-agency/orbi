@@ -10,3 +10,5 @@ prisma/*.db
 prisma/migrations/*/migration_lock.toml
 coverage/
 .vite/
+.claude/settings.local.json
+*.tsbuildinfo

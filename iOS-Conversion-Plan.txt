@@ -1,0 +1,1175 @@
+ORBI MAIL: iOS APP CONVERSION PLAN
+====================================
+
+CONTEXT
+-------
+Orbi Mail is currently an Electron + React desktop app. The goal is to create an iOS app
+that users can download on Apple Silicon Macs via the App Store. The app should feel native
+to iOS -- proper app icon, real-time updates, haptic feedback, push notifications, iOS
+navigation patterns, and seamless integration with the Apple ecosystem.
+
+APPROACH: CAPACITOR
+-------------------
+Wraps the existing React frontend in a native iOS shell. This is the right choice because:
+- The frontend already has extensive mobile support (MobileBottomNav, MobileComposeSheet,
+  swipe gestures, 899px breakpoint, safe area handling)
+- Already uses SF Pro fonts, iOS-style tab bar, touch-action: manipulation
+- Full rewrite (React Native or SwiftUI) would take months; Capacitor gets a working app in days
+- Capacitor bridges native APIs (haptics, push, Keychain, Face ID) directly
+
+TARGET: iOS 14+ (Capacitor 6 minimum), iPhone + iPad + Apple Silicon Mac (via "Designed for iPad")
+
+
+================================================================================
+PHASE 1: iOS APP SHELL (GET IT RUNNING)
+================================================================================
+Goal: A working iOS app that loads the Orbi Mail UI, connects to the backend, and can be
+run in Xcode Simulator and on a real device.
+
+1A. CREATE packages/ios/ WORKSPACE PACKAGE
+-------------------------------------------
+Structure:
+  packages/ios/
+    package.json            -- @capacitor/core, @capacitor/cli, @capacitor/ios,
+                               @capacitor/app, @capacitor/status-bar,
+                               @capacitor/splash-screen, @capacitor/keyboard,
+                               @capacitor/network
+    capacitor.config.ts     -- appId: com.orbimail.app, appName: Orbi Mail,
+                               webDir: ../frontend/dist
+    ios/                    -- Generated Xcode project (npx cap add ios)
+
+- capacitor.config.ts: server.url in dev mode points to local network IP
+  (e.g. http://192.168.x.x:5173) for hot reload; production uses bundled dist/
+- Dev URL strategy: use an environment variable or a capacitor.config.dev.ts override
+  so each developer's local IP is not hardcoded. Example approach:
+    const devServerUrl = process.env.CAP_DEV_SERVER_URL;
+    server: devServerUrl ? { url: devServerUrl, cleartext: true } : undefined
+- Add packages/ios to root package.json workspaces array
+- Add root scripts: dev:ios, build:ios, sync:ios, open:ios
+
+STATUS: DONE -- packages/ios/ exists, Capacitor configured, pods installed
+
+1B. PLATFORM DETECTION + DYNAMIC API URL
+-----------------------------------------
+New file: packages/frontend/src/lib/platform.ts
+  - Detects Capacitor native platform
+  - Exports getPlatform(), isNative(), isIOS(), isElectron(), isWeb()
+  - Exports API_URL (reads VITE_API_URL on native, empty string on web)
+
+Update: packages/frontend/src/lib/api.ts (line 1)
+  - Change: const API_BASE = '/api'
+  - To:     const API_BASE = `${API_URL}/api`
+
+Update: packages/frontend/src/hooks/useSocket.ts (line 23)
+  - Change: io('/', { ... })
+  - To:     io(API_URL || '/', { ... })
+
+STATUS: DONE -- platform.ts exists with proper detection
+
+1C. BACKEND CORS UPDATE
+------------------------
+Update: packages/backend/src/app.ts
+  - Add Capacitor origins to CORS:
+    origin: [env.FRONTEND_URL, 'capacitor://localhost', 'ionic://localhost']
+  - Allow requests with no origin header (mobile apps, server-to-server)
+
+STATUS: DONE -- app.ts has dynamic CORS_ORIGINS with no-origin passthrough
+
+1D. APP ICON GENERATION
+------------------------
+Source: packages/frontend/public/favicon.svg (orange geometric "O", #FF7E16)
+
+- Render SVG to 1024x1024 PNG on white/#FAF9F5 background
+- Generate all required iOS sizes: 20, 29, 40, 58, 60, 76, 80, 87, 120, 152, 167, 180, 1024pt
+- Place in packages/ios/ios/App/App/Assets.xcassets/AppIcon.appiconset/
+- Do NOT round corners -- iOS applies them automatically
+- Create Contents.json manifest for the asset catalog
+
+STATUS: DONE -- icons exist in asset catalog
+
+1E. LAUNCH SCREEN
+-----------------
+- Centered Orbi logo on #FAF9F5 background
+- Configure in packages/ios/ios/App/App/Base.lproj/LaunchScreen.storyboard
+- Use Capacitor SplashScreen plugin: auto-hide after app loads
+  (launchAutoHide: false in config, manually hide after React mount)
+
+STATUS: DONE -- SplashScreen configured in capacitor.config.ts
+
+1F. INFO.PLIST ESSENTIALS
+--------------------------
+- CFBundleDisplayName: Orbi Mail
+- CFBundleIdentifier: com.orbimail.app
+- UIStatusBarStyle: UIStatusBarStyleDarkContent
+- UIViewControllerBasedStatusBarAppearance: YES
+- ITSAppUsesNonExemptEncryption: NO (standard HTTPS encryption, exempt from export compliance)
+- CFBundleURLTypes: Add mailto scheme handler so Orbi opens when users tap email links
+    <key>CFBundleURLSchemes</key>
+    <string>mailto</string>
+
+1G. VITE BUILD CONFIG
+---------------------
+Update: packages/frontend/vite.config.ts
+- Add VITE_API_URL env variable support
+- Set base: './' when building for iOS (relative asset paths, via --mode ios)
+
+STATUS: DONE -- vite.config.ts has mode === 'ios' check for relative base
+
+1H. CONDITIONAL CAPACITOR IMPORT
+---------------------------------
+- Add @capacitor/core as optional dependency in packages/frontend/package.json
+- platform.ts uses try/catch or dynamic import to handle missing Capacitor gracefully
+  (so web/Electron builds aren't broken)
+- All native plugin imports (Haptics, StatusBar, etc.) must use dynamic import()
+  wrapped in try/catch so the frontend builds and runs without Capacitor
+
+1I. NETWORK CONNECTIVITY MONITORING
+-------------------------------------
+Install: @capacitor/network
+New file: packages/frontend/src/hooks/useNetworkStatus.ts
+  - Listen to Network.addListener('networkStatusChange', ...)
+  - Export reactive isOnline state
+  - On web: fall back to navigator.onLine + online/offline events
+  - Show offline banner in AppLayout when disconnected
+  - Disable send/compose buttons when offline
+  - Queue failed API requests for retry when back online (optional enhancement)
+
+1J. WEBVIEW LIFECYCLE HANDLING
+-------------------------------
+  - Listen for Capacitor App plugin's 'appStateChange' event:
+    - On resume (isActive: true): invalidate stale React Query caches, reconnect Socket.io
+    - On background: pause non-critical network requests
+  - Listen for 'webViewTerminated' event (iOS kills WKWebView under memory pressure):
+    - When fired, the WebView is blank. Call window.location.reload() to restore the app.
+  - Implement in AppLayout.tsx alongside other lifecycle hooks
+
+1K. OAUTH FLOW HANDLING FOR CAPACITOR
+---------------------------------------
+  - Gmail and Microsoft OAuth redirects don't work inside WKWebView (blocked by providers)
+  - Use @capacitor/browser to open OAuth flows in an in-app Safari browser:
+    - Browser.open({ url: oauthUrl }) to start the flow
+    - Handle the callback via Universal Links or custom URL scheme (com.orbimail.app://oauth)
+    - @capacitor/app's appUrlOpen event receives the callback
+  - Update frontend OAuth hooks to detect native platform and use Browser plugin instead
+    of window.location.href redirects
+
+
+================================================================================
+PHASE 2: iOS-NATIVE FEEL
+================================================================================
+Goal: The app feels like a real iOS app -- haptics, pull-to-refresh, smooth transitions,
+dark mode, proper keyboard handling.
+
+2A. HAPTIC FEEDBACK
+-------------------
+New file: packages/frontend/src/lib/haptics.ts
+  - Wraps @capacitor/haptics with isNative guard
+  - Exports: haptic.light(), haptic.medium(), haptic.success(), haptic.error()
+  - No-op on web/Electron (silent fallback)
+
+Add haptics to:
+  - ThreadItem.tsx -- swipe threshold crossing (medium), swipe complete (success)
+  - MobileBottomNav.tsx -- tab switch (light)
+  - ComposeInline.tsx / MobileComposeSheet.tsx -- send button (success), send failure (error)
+  - Archive/trash/star actions throughout the app (light)
+  - Pull-to-refresh threshold crossing (light)
+  - Error states: failed send, network error, auth failure (error)
+  - Long-press context menu trigger (medium)
+
+2B. PULL-TO-REFRESH ON THREAD LIST
+------------------------------------
+Update: packages/frontend/src/components/thread-list/ThreadList.tsx
+  - Add pull-to-refresh gesture on mobile
+  - On pull: invalidate threads query + haptic light
+  - Visual: spinner at top that fades out after refresh
+
+Important: Disable iOS rubber-band/overscroll on the main container to prevent conflicts
+  with pull-to-refresh gesture:
+  - Add overscroll-behavior: none to the scroll container's CSS
+  - Keep overscroll enabled ONLY on the thread list where pull-to-refresh is active
+  - In capacitor.config.ts, consider setting ios.scrollEnabled or using CSS:
+      html, body { overscroll-behavior: none; }
+      .thread-list-scroll { overscroll-behavior-y: auto; }
+
+2C. iOS KEYBOARD HANDLING
+--------------------------
+Install: @capacitor/keyboard (already in capacitor.config.ts with resize: 'ionic')
+
+  - Listen to keyboardWillShow / keyboardWillHide events
+  - Adjust MobileComposeSheet to account for keyboard height
+  - Add formatting toolbar above keyboard for TipTap (bold, italic, link)
+    - Pin as a fixed bar at the bottom of the viewport, above the keyboard
+    - Use keyboard height from Keyboard events to position it correctly
+    - This acts as a virtual inputAccessoryView since WKWebView doesn't expose the native one
+  - TipTap bubble menu: test that it doesn't get pushed off-screen when keyboard shows.
+    If it does, switch to the pinned toolbar approach instead.
+  - Test on devices with different keyboard heights (iPhone SE vs. iPhone 15 Pro Max)
+
+2D. SAFE AREA AUDIT
+---------------------
+  - Audit ALL full-screen views for proper env(safe-area-inset-*) handling:
+    - Top: notch/Dynamic Island on iPhone, status bar on iPad
+    - Bottom: home indicator on notchless iPhones, tab bar clearance
+    - Left/Right: landscape mode on notched devices (if supported)
+  - Key areas to verify:
+    - AppLayout.tsx main container
+    - MobileBottomNav.tsx bottom tabs
+    - MobileComposeSheet.tsx (especially with keyboard open)
+    - EmailViewer.tsx full-width content
+    - Thread list scroll container
+    - Login page
+  - Add CSS custom properties for safe areas if not already present:
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+
+2E. VIEW TRANSITIONS
+---------------------
+Update: packages/frontend/src/components/layout/AppLayout.tsx
+  - Slide-left/slide-right AnimatePresence transitions between mobileActiveView states
+  - Left-edge swipe-back gesture on viewer (Framer Motion drag="x")
+  - Gesture cancellation: if user starts swipe-back but releases before threshold,
+    animate back to original position using dragSnapToOrigin or onDragEnd with velocity check
+  - Transition durations: 250-300ms to match iOS system animations
+  - Disable transitions when prefers-reduced-motion is set
+
+2F. DARK MODE
+-------------
+Update: packages/frontend/src/index.css
+  - Add @media (prefers-color-scheme: dark) block with dark theme tokens:
+    Surface: #1A1A1A, Surface warm: #242424, Border: #333
+    Text primary: #F5F5F5, secondary: #999, tertiary: #666
+    Keep brand orange #FF7E16 as primary accent
+  - StatusBar plugin syncs bar style with theme
+
+Additional dark mode considerations:
+  - HTML email rendering: sanitized email HTML often has inline styles with hardcoded white
+    backgrounds and dark text. Options:
+    a) Inject a dark mode stylesheet into the email content container that inverts
+       backgrounds (filter: invert(1) hue-rotate(180deg) on the email body)
+    b) Wrap email content in a container that stays light-themed (simpler, less jarring)
+    c) Best approach: detect dominant background color in email HTML, only apply dark
+       override if the email has a white/light background
+  - Email images: embedded images with white/transparent backgrounds look harsh in dark mode.
+    Consider a subtle filter: brightness(0.9) on images within email bodies.
+  - TipTap editor: style cursor color, placeholder text, selection highlight, and toolbar
+    icons for dark mode.
+  - App icon: the icon itself is fine (orange on white/cream), but verify it looks good
+    on dark mode home screen wallpapers.
+
+2G. STATUS BAR STYLING
+-----------------------
+Install: @capacitor/status-bar
+  - Set background to match surface color (#FAF9F5 light / #1A1A1A dark)
+  - Initialize in AppLayout.tsx on mount
+  - Listen for prefers-color-scheme changes and update dynamically
+  - On scroll: optionally transition status bar background from transparent (over header)
+    to solid (when content scrolls behind it)
+
+2H. CONTEXT MENUS / LONG-PRESS
+-------------------------------
+  - Radix ContextMenu already supports long-press on touch -- verify behavior in WKWebView
+  - Add iOS-style backdrop blur to context menu overlays:
+      backdrop-filter: blur(20px) saturate(180%)
+  - Consider @capacitor/action-sheet for destructive actions (delete, block sender)
+  - Verify haptic fires on long-press trigger (medium haptic)
+
+2I. NATIVE SHARE SHEET
+-----------------------
+Install: @capacitor/share
+  - Add share button to EmailViewer toolbar on mobile
+  - Opens native iOS share sheet with email subject/content
+  - Share data: { title: subject, text: preview text, url: thread deep link }
+
+2J. iOS DATE PICKERS
+---------------------
+  - Replace custom date selectors in SnoozePopover.tsx and ScheduleSendMenu.tsx
+    with native iOS date wheel picker via @capacitor-community/date-picker on native
+  - Fall back to existing web pickers on non-native
+  - Match date picker theme to light/dark mode
+
+2K. OFFLINE STATE UI
+---------------------
+  - Show persistent offline banner at top of app when network is unavailable
+    (uses useNetworkStatus hook from 1I)
+  - Thread list: show cached threads from React Query cache with "Last updated X min ago" label
+  - Compose: allow drafting emails offline, queue send for when network returns
+  - Email viewer: show cached email content, disable reply/forward buttons
+  - Graceful error messages: "You're offline. This action will complete when you reconnect."
+  - This is critical for App Store review -- Apple tests with airplane mode
+
+2L. TEXT SELECTION & COPY BEHAVIOR
+-----------------------------------
+  - WKWebView text selection feels different from native UIKit text selection
+  - Verify copy/paste works correctly in:
+    - Email viewer (selecting email content)
+    - TipTap compose editor (copy/paste formatted text)
+    - Thread list (long-press to copy subject/sender)
+  - Customize the selection menu if needed (add "Copy Email Address", "Copy Subject" actions)
+  - Test paste of rich content (HTML) into TipTap from other apps
+
+
+================================================================================
+PHASE 3: PUSH NOTIFICATIONS & BACKGROUND FEATURES
+================================================================================
+Goal: Users get push notifications for new emails, badge counts update,
+and the app stays synced.
+
+3A. DATABASE: DEVICE TOKEN MODEL
+----------------------------------
+Update: prisma/schema.prisma
+  - New DeviceToken model: id, userId, token (unique), platform, createdAt, updatedAt
+  - Relation: User has many DeviceTokens
+  - Run migration
+
+3B. BACKEND: DEVICE REGISTRATION ROUTES
+-----------------------------------------
+New file: packages/backend/src/routes/devices/index.ts
+  - POST /api/devices/register -- save device token + platform (authenticated)
+  - DELETE /api/devices/unregister -- remove current device token on logout
+  - Register route in app.ts
+
+STATUS: DONE -- deviceRoutes and pushHealthRoutes registered in app.ts
+
+3C. BACKEND: APNs PUSH SERVICE
+--------------------------------
+New file: packages/backend/src/services/push-notification.ts
+  - Use @parse/node-apn (maintained APNs library, community fork of original apn)
+    - Alternative: use APNs HTTP/2 API directly with Node's built-in http2 module
+      to avoid the dependency (fewer moving parts, but more code)
+  - Initialize provider with .p8 key credentials (token-based auth, NOT certificate-based)
+  - Export sendPushNotification(userId, { title, body, data, badge })
+  - Query DeviceToken table and send via APNs
+
+APNs environment handling:
+  - Development: api.sandbox.push.apple.com (for Xcode debug builds / TestFlight)
+  - Production: api.push.apple.com (for App Store builds)
+  - Determine from NODE_ENV or a dedicated APNS_PRODUCTION env var
+  - IMPORTANT: TestFlight builds use the PRODUCTION APNs environment, not sandbox
+
+Push payload constraints:
+  - Maximum 4KB per notification payload
+  - Truncate email subject + sender name + snippet to stay under limit
+  - Structure: { aps: { alert: { title, body }, badge, sound, thread-id }, data: { threadId } }
+
+Error handling:
+  - 410 Gone: device token is invalid/unregistered. DELETE the DeviceToken record immediately.
+    Failing to do this causes your token table to grow unbounded with stale tokens.
+  - 429 TooManyRequests: implement exponential backoff with jitter (1s, 2s, 4s, max 60s)
+  - 403 Forbidden: .p8 key is invalid or expired. Log alert, don't retry.
+
+New env vars in packages/backend/src/config/env.ts:
+  - APNS_KEY_ID (optional)
+  - APNS_TEAM_ID (optional)
+  - APNS_KEY_PATH (optional, path to .p8 file)
+  - APNS_BUNDLE_ID (optional, default: com.orbimail.app)
+  - APNS_PRODUCTION (optional, boolean, default: false)
+
+3D. BACKEND: TRIGGER PUSH FROM WORKERS
+----------------------------------------
+Update workers that create notifications:
+  - packages/backend/src/workers/gmail-sync.worker.ts
+  - packages/backend/src/workers/microsoft-sync.worker.ts
+
+After Socket.io emit, also call sendPushNotification() with:
+  - Title: sender name
+  - Body: email subject snippet (truncated to ~100 chars)
+  - Data: { threadId } for deep navigation
+  - Badge: current unread count
+  - thread-id: thread ID (for iOS notification grouping -- groups notifications per thread)
+
+Batching strategy:
+  - If a sync pulls multiple new emails at once (e.g., first sync, catching up after offline),
+    do NOT fire individual notifications for each email
+  - Batch into a single summary notification: "5 new emails from 3 senders"
+  - Threshold: if more than 3 new emails in a single sync cycle, use summary
+  - Below threshold: send individual notifications with thread-id grouping
+
+Silent push for background sync:
+  - In addition to visible notifications, send content-available: 1 silent pushes
+    to trigger background data refresh (badge update, cache warming)
+  - Silent pushes have a lower priority and are throttled by iOS (~2-3 per hour)
+
+3E. FRONTEND: PUSH NOTIFICATION HOOK
+--------------------------------------
+New file: packages/frontend/src/hooks/usePushNotifications.ts
+  - Request permission on native platform
+  - Register for push, send device token to backend
+  - Handle foreground notifications (in-app toast, NOT a system notification)
+  - Handle notification tap -> navigate to specific thread using data.threadId
+  - Unregister on logout (call DELETE /api/devices/unregister)
+  - Call from AppLayout.tsx alongside useSocket()
+
+Permission UX (CRITICAL):
+  - Do NOT request push permission on first app launch
+  - Apple reports ~60% denial rate for first-launch permission prompts
+  - Instead, show a pre-permission "soft prompt" screen that explains the value:
+    "Get notified when new emails arrive. You can change this anytime in Settings."
+    [Enable Notifications] [Not Now]
+  - Only trigger the native iOS permission dialog when user taps "Enable Notifications"
+  - If user taps "Not Now", respect it. Show the prompt again after 3 app sessions or
+    when they first receive an email while backgrounded (natural trigger moment)
+  - Store prompt state in secure storage so it persists across sessions
+
+3F. BADGE COUNT MANAGEMENT
+----------------------------
+  - On app background: set badge to current unread count via Badge.set({ count })
+  - Backend includes badge count in every push payload
+  - Clear badge when app comes to foreground: Badge.clear()
+  - Use @capacitor/app's appStateChange event to detect foreground/background transitions
+
+3G. SECURE TOKEN STORAGE (KEYCHAIN)
+-------------------------------------
+Install: capacitor-secure-storage-plugin
+
+New file: packages/frontend/src/lib/secureStorage.ts
+  - Wraps Capacitor SecureStorage for get/set/remove
+  - Provides Zustand-compatible StateStorage adapter
+  - Includes one-time migration from localStorage -> Keychain for upgrading users
+
+Update: packages/frontend/src/stores/authStore.ts
+  - On native: use Keychain-backed storage instead of localStorage
+  - Prevents iOS from clearing JWT when OS reclaims WebView storage
+
+STATUS: DONE -- secureStorage.ts exists with Keychain adapter, migration logic,
+and localStorage fallback. authStore.ts already uses it.
+
+3H. BACKGROUND APP REFRESH
+----------------------------
+Update Info.plist: UIBackgroundModes: ['fetch', 'remote-notification']
+  - On background fetch: hit /api/notifications/unread-count, update badge
+  - iOS controls frequency (~15-30 min for actively used apps, hours for rarely used ones)
+
+Important caveats:
+  - iOS aggressively throttles background fetch for apps that aren't used frequently.
+    An app opened once a week may get background fetch opportunities only every few hours.
+  - Set expectations: badge counts may be stale until a push notification arrives.
+  - Prefer APNs content-available silent pushes over background fetch for badge updates.
+    Silent pushes are more reliable and immediate (triggered by your backend, not iOS scheduler).
+  - Register for background fetch as a fallback, but don't rely on it as the primary mechanism.
+
+3I. FILE ATTACHMENT HANDLING
+------------------------------
+Install: @capacitor/filesystem
+
+Download attachments:
+  - When user taps "Download" on an email attachment, use Filesystem.writeFile() to save
+    to the Documents directory (accessible in Files app)
+  - Show native share sheet after download for "Open In" functionality
+  - Progress indicator for large attachments
+
+Attach files to compose:
+  - Use native file picker (input[type="file"] works in WKWebView but with limitations)
+  - For photos: use @capacitor/camera for camera/photo library access
+    - NSCameraUsageDescription and NSPhotoLibraryUsageDescription in Info.plist
+  - For documents: input[type="file"] opens the native document picker
+  - Handle large files gracefully (show upload progress, enforce size limits)
+
+
+================================================================================
+PHASE 4: ADVANCED NATIVE INTEGRATIONS
+================================================================================
+Goal: Deep iOS integration -- biometrics, deep links, Spotlight, share extension.
+
+4A. FACE ID / TOUCH ID APP LOCK
+---------------------------------
+Install: @capacitor-community/biometric-auth
+  - Add toggle in Settings panel to enable biometric lock
+  - On app resume -> show lock overlay -> require Face ID / Touch ID
+  - Store preference in secure storage (Keychain)
+  - Fallback: if biometrics fail 3 times, prompt for app password or device passcode
+
+REQUIRED: Add NSFaceIDUsageDescription to Info.plist
+  - Human-readable string explaining why the app uses Face ID
+  - Example: "Orbi Mail uses Face ID to protect your email from unauthorized access"
+  - Without this, Apple will REJECT the app during review
+
+4B. UNIVERSAL LINKS / DEEP LINKS
+----------------------------------
+Backend: Serve /.well-known/apple-app-site-association from app.ts
+  - appID: TEAMID.com.orbimail.app
+  - paths: ["/thread/*", "/email/*", "/compose"]
+  - MUST be served with Content-Type: application/json
+  - MUST be served over HTTPS with NO redirects
+  - MUST be on the exact domain in the Associated Domains entitlement
+  - Route must bypass all auth middleware (public endpoint)
+
+Frontend: Handle appUrlOpen events via @capacitor/app
+  - Parse URL -> navigate to thread/compose
+  - Handle mailto: links -> open compose with pre-filled recipient
+
+Info.plist: Add Associated Domains entitlement: applinks:api.orbi.agency
+
+AASA caching warning:
+  - Apple's CDN aggressively caches the AASA file
+  - During development, use Apple's AASA validator: https://app-site-association.cdn-apple.com
+  - Use swcutil CLI to debug: swcutil dl -d api.orbi.agency
+  - Changes to AASA may take 24-48 hours to propagate
+  - Test Universal Links using Notes app (type URL, tap it) -- Safari doesn't trigger them
+
+Xcode entitlements file (App.entitlements):
+  - com.apple.developer.associated-domains: ["applinks:api.orbi.agency"]
+  - This must be added manually -- Capacitor doesn't auto-generate it
+
+4C. SPOTLIGHT SEARCH INDEXING
+------------------------------
+Install: @capacitor-community/spotlight-search
+  - Index recent threads (subject, sender, snippet) on thread list refresh
+  - On Spotlight result tap -> deep link to thread via Universal Link
+
+Performance: Debounce indexing
+  - Do NOT re-index the entire thread list on every refresh
+  - Track last-indexed timestamp, only index new/changed threads since then
+  - Limit to most recent 500 threads (Spotlight has per-app limits)
+  - Index in a background task, not on the main thread
+
+Index item structure:
+  - uniqueIdentifier: thread ID
+  - title: email subject
+  - contentDescription: sender name + snippet
+  - keywords: [sender email, sender name, first few words of subject]
+
+4D. SHARE EXTENSION (SEND CONTENT TO ORBI)
+--------------------------------------------
+  - Native iOS Share Extension in Xcode project
+  - Receives shared text/links/images from other apps
+  - Passes to main app via App Groups shared container
+  - Main app opens compose with pre-filled content
+
+NOTE: This is the most complex item in the entire plan. A Share Extension is:
+  - A SEPARATE Xcode target with its own build settings and lifecycle
+  - Runs in a SEPARATE process with a 120MB memory limit
+  - CANNOT access the main app's WKWebView or Capacitor runtime
+  - Needs its own UI (SwiftUI is the best choice -- small, fast, native)
+  - Communicates with the main app via App Groups shared container:
+    - NSUserDefaults suite (for small data like text/URLs)
+    - Shared file container (for images/attachments)
+  - This is the ONLY part of the plan that requires native Swift code
+  - After saving shared content to App Groups, open the main app via URL scheme
+    (com.orbimail.app://compose?shared=true), and the main app reads from the shared container
+
+App Groups setup:
+  - Add App Group capability: group.com.orbimail.app
+  - Add to both the main app target AND the Share Extension target
+  - Configure in both targets' entitlements files
+
+Recommendation: Defer to end of Phase 4 or even post-launch. The core app
+experience is complete without it, and it's 2-3 days of pure native Swift work.
+
+4E. HANDOFF / CONTINUITY
+--------------------------
+  - Register activity type: com.orbimail.app.viewing-thread
+  - When viewing thread, create NSUserActivity with thread ID
+  - Other Apple devices can pick up and continue to same thread
+
+Required setup:
+  - NSUserActivityTypes must be declared in Info.plist:
+      <array>
+        <string>com.orbimail.app.viewing-thread</string>
+        <string>com.orbimail.app.composing-email</string>
+      </array>
+  - webpageURL property on NSUserActivity is REQUIRED for Handoff
+    to work when the receiving device doesn't have the app installed.
+    Set it to the thread's web URL (e.g., https://api.orbi.agency/thread/{id})
+  - Handoff requires the same iCloud account on both devices
+
+4F. MAILTO HANDLER REGISTRATION
+---------------------------------
+  - Register com.orbimail.app as a mailto: URL handler in Info.plist
+  - When user taps an email address in another app and chooses Orbi:
+    - Parse the mailto: URL (recipient, subject, body, cc, bcc)
+    - Open compose view with pre-filled fields
+  - Handle in @capacitor/app's appUrlOpen event, same as Universal Links
+  - Note: iOS lets users choose their default email app in Settings > Mail > Default Mail App
+    Users must manually set Orbi as default for it to be the automatic handler
+
+4G. IN-APP VERSION CHECKING
+------------------------------
+  - On app launch (and every 24 hours while running), check current version against
+    a version endpoint on the backend or use App Store lookup API:
+    https://itunes.apple.com/lookup?bundleId=com.orbimail.app
+  - If a newer version exists, show a gentle non-blocking banner:
+    "A new version of Orbi Mail is available. Update now."
+  - Tapping the banner opens the App Store page
+  - For critical updates (security fixes), show a blocking modal
+  - Never force-update for minor versions -- App Store review frowns on this
+
+
+================================================================================
+PHASE 5: APP STORE SUBMISSION
+================================================================================
+Goal: Get Orbi Mail approved and listed on the App Store.
+
+5A. APPLE DEVELOPER ACCOUNT SETUP
+-----------------------------------
+  - Enroll in Apple Developer Program ($99/year)
+  - IMPORTANT: Choose ORGANIZATION enrollment (not Individual) for an agency app
+    - Requires a D-U-N-S number for your business entity
+    - D-U-N-S lookup/application: https://developer.apple.com/enroll/duns-lookup/
+    - Verification takes 2-4 weeks -- START THIS IMMEDIATELY as it's the #1 timeline risk
+    - If you already have a D-U-N-S number, enrollment takes 1-2 business days
+  - Create App ID: com.orbimail.app
+  - Create provisioning profiles (Development + Distribution)
+  - Generate APNs .p8 key for push notifications (one key works for all apps in the team)
+  - Enable capabilities in the Apple Developer portal:
+    - Push Notifications
+    - Background Modes (fetch, remote-notification)
+    - Associated Domains
+    - App Groups (for Share Extension in Phase 4D)
+
+5B. XCODE PROJECT SIGNING & CAPABILITIES
+-------------------------------------------
+  - Set Team ID and Bundle Identifier in Xcode
+  - Enable automatic signing for development (simplifies device testing)
+  - Manual signing with App Store distribution profile for release builds
+
+Create/edit App.entitlements file with:
+  - aps-environment: development (auto-switches to production for App Store builds)
+  - com.apple.developer.associated-domains: ["applinks:api.orbi.agency"]
+  - keychain-access-groups: ["$(AppIdentifierPrefix)com.orbimail.app"]
+  - com.apple.security.application-groups: ["group.com.orbimail.app"]
+
+IMPORTANT: Every time you add a new capability, the provisioning profile must be
+regenerated. Xcode handles this automatically with automatic signing enabled, but
+for manual/CI signing you must download the new profile from the Developer portal.
+
+5C. APP STORE LISTING
+----------------------
+  App Name: Orbi Mail
+  Subtitle: AI-Powered Email for Teams (max 30 characters)
+  Category: Primary = Business, Secondary = Productivity
+  Age Rating: 4+ (email client, no objectionable content)
+
+  Keywords (100 character limit, comma-separated):
+    email,AI,team,inbox,client,mail,assistant,business,collaboration,smart
+
+  URLs (all required):
+    - Privacy Policy URL: https://orbi.agency/privacy
+    - Support URL: https://orbi.agency/support (or a mailto: link)
+    - Marketing URL: https://orbi.agency (optional but recommended)
+
+  Contact Information:
+    - First name, Last name, Email, Phone (for App Review team)
+
+  Screenshots (REQUIRED sizes):
+    - iPhone 6.7" (1290 x 2796px) -- iPhone 15 Pro Max / 16 Plus
+    - iPhone 6.1" (1179 x 2556px) -- iPhone 15 Pro / 16
+    - iPad Pro 12.9" (2048 x 2732px) -- if supporting iPad
+    - Mac screenshots: Since targeting Apple Silicon Macs via "iOS App on Mac" (5E),
+      capture separate Mac screenshots showing the app in a macOS window.
+      App Store Connect allows uploading Mac-specific screenshots.
+    - Minimum 3 screenshots per size, maximum 10
+    - Show key features: inbox view, AI compose, thread view, dark mode, swipe gestures
+
+  App Preview Video (OPTIONAL but highly recommended):
+    - 15-30 second video showing the app in action
+    - Dramatically improves conversion rates on the App Store
+    - Show: three-column layout, AI compose, swipe gestures, dark mode
+    - Record in Simulator or on device, edit to 15-30s
+    - Specs: H.264, 30fps, same resolution as screenshots
+
+  Description (max 4000 characters):
+    - Lead with the value proposition, not feature lists
+    - First 3 lines are visible before "Read More" -- make them count
+    - Include keywords naturally (email, AI, team collaboration)
+
+  What's New Text (max 4000 characters):
+    - Required for every version update
+    - Template: "Version X.Y.Z\n- [Key change 1]\n- [Key change 2]\n- Bug fixes and improvements"
+
+  Localization:
+    - Set primary language to English (U.S.)
+    - Even if only shipping English, configure the primary locale correctly
+    - Consider localized metadata for key markets (UK English, etc.) post-launch
+
+5D. PRIVACY & COMPLIANCE
+--------------------------
+
+Privacy Nutrition Labels (App Privacy section in App Store Connect):
+  Declare ALL data types your app collects:
+  - Contact Info:
+    - Email Address (linked to user identity, used for app functionality)
+    - Name (linked to user identity, used for app functionality)
+  - User Content:
+    - Emails (linked to user identity, used for app functionality)
+    - Other User Content (comments, drafts -- linked to user identity)
+  - Identifiers:
+    - Device ID (push notification token -- linked to user identity, used for app functionality)
+    - User ID (JWT token / user record ID -- linked to user identity)
+  - Usage Data:
+    - Product Interaction (which features are used -- if you add analytics)
+  - Diagnostics:
+    - Crash Data (if using Sentry/Crashlytics)
+    - Performance Data (if collecting performance metrics)
+
+  For each data type, declare:
+    - Whether it's linked to the user's identity
+    - Whether it's used for tracking (should be NO for all -- you have no third-party tracking)
+    - The purposes (app functionality, analytics, etc.)
+
+PrivacyInfo.xcprivacy manifest:
+  CRITICAL since iOS 17. Apple REJECTS apps that use required-reason APIs without declaring them.
+  You must audit every framework and Capacitor plugin for API usage:
+
+  Required API declarations (likely needed):
+    - NSPrivacyAccessedAPICategoryUserDefaults
+      Reason: CA92.1 (access user defaults to read/write app configuration)
+    - NSPrivacyAccessedAPICategoryFileTimestamp
+      Reason: DDA9.1 (access file timestamps for cache management)
+    - NSPrivacyAccessedAPICategoryDiskSpace
+      Reason: E174.1 (check available disk space -- some Capacitor plugins do this)
+    - NSPrivacyAccessedAPICategorySystemBootTime
+      Reason: 35F9.1 (measure elapsed time -- some libraries use this for performance)
+
+  Audit process:
+    1. Build the app in Xcode
+    2. Run: Product > Analyze
+    3. Check the Privacy Report for any undeclared API usage
+    4. Also check each Capacitor plugin's documentation for required privacy declarations
+    5. Merge all required declarations into a single PrivacyInfo.xcprivacy file
+
+Export Compliance (ECCN):
+  - Since the app uses HTTPS/TLS (standard encryption for communication), set:
+    ITSAppUsesNonExemptEncryption = NO in Info.plist
+  - This avoids the export compliance questionnaire on every submission
+  - If you ever add end-to-end encryption or custom cryptography, this changes
+
+Account Deletion Requirement:
+  - As of June 2024, Apple REQUIRES apps with account creation to offer in-app account deletion
+  - Add a "Delete Account" option in the Settings panel:
+    - Show a confirmation dialog explaining what will be deleted
+    - Call a backend endpoint: DELETE /api/users/me
+    - Backend must delete or anonymize: user record, emails, contacts, AI data,
+      device tokens, OAuth tokens, preferences, comments
+    - After deletion, log the user out and show a confirmation screen
+    - Data deletion must complete within 14 days (per Apple's timeline requirement)
+  - If full deletion is complex, at minimum offer "request deletion" that triggers
+    a manual process, but in-app initiation is required
+
+5E. "iOS APP ON MAC" CONFIGURATION
+------------------------------------
+  - In App Store Connect: "Make this app available on Apple Silicon Macs" (enabled by default)
+  - Test on Apple Silicon Mac using Xcode "My Mac (Designed for iPad)" destination
+  - Verify the following Mac-specific behaviors:
+
+  Window behavior:
+    - Capacitor apps running as "iPad app on Mac" have a FIXED window size by default
+    - Test at the default window dimensions and verify the responsive layout adapts
+    - If UIRequiresFullScreen is set, the window won't be resizable
+    - Consider removing UIRequiresFullScreen to allow window resizing on Mac
+
+  Menu bar:
+    - macOS automatically provides a basic menu bar for iPad apps
+    - Verify Edit menu works: Cmd+C, Cmd+V, Cmd+X, Cmd+Z in TipTap editor
+    - Verify Select All (Cmd+A) works in text fields and email viewer
+
+  Trackpad interactions:
+    - Right-click (two-finger tap) should trigger Radix context menus correctly
+    - Scroll with trackpad should feel smooth (no jank from touch-optimized scroll)
+    - Pinch-to-zoom: decide if you want it (probably disable in WKWebView settings)
+
+  Keyboard shortcuts:
+    - Your app already has keyboard shortcuts (Block L)
+    - Verify they don't conflict with macOS system shortcuts:
+      - Cmd+H = Hide window (macOS), may conflict with your shortcuts
+      - Cmd+Q = Quit (macOS), should work naturally
+      - Cmd+, = Preferences (macOS convention) -- consider mapping to your Settings
+      - Cmd+W = Close window (macOS)
+    - Test that keyboard shortcuts work when the app has focus
+
+  Hover states:
+    - Mac has mouse hover, iOS doesn't. Your CSS hover states should work correctly
+    - Verify hover previews, tooltip triggers, and hover-dependent interactions
+
+5F. VERSION MANAGEMENT & BUILD NUMBERING
+-------------------------------------------
+  - CFBundleShortVersionString: marketing version (e.g., 1.0.0) -- shown to users
+  - CFBundleVersion: build number (e.g., 1, 2, 3...) -- must be unique per submission
+  - Every submission to App Store Connect / TestFlight needs a unique build number
+  - Strategy options:
+    a) Manual increment: update in Xcode before each build
+    b) Timestamp-based: use YYYYMMDDHHMMSS as build number (always unique)
+    c) Fastlane increment_build_number: auto-increments from current value
+    d) CI-based: use the CI build number ($GITHUB_RUN_NUMBER)
+  - Recommended: option (c) or (d) to avoid human error
+
+5G. TESTFLIGHT BETA TESTING
+------------------------------
+  - REQUIRED before App Store release. Do at least one full round of TestFlight testing.
+
+  TestFlight setup:
+    - Beta App Description: brief description for testers
+    - Beta App Review Information: demo account credentials (same as App Review)
+    - Feedback email: where testers send bug reports
+    - Internal testers: up to 100 people from your Apple Developer team (no review needed)
+    - External testers: up to 10,000 people (requires Beta App Review, takes 1-2 days)
+
+  Testing checklist for TestFlight:
+    - [ ] App launches and displays login screen
+    - [ ] Login with test credentials works
+    - [ ] Thread list loads and scrolls smoothly
+    - [ ] Email viewer renders HTML emails correctly
+    - [ ] AI compose generates responses
+    - [ ] Push notifications arrive when backgrounded
+    - [ ] Swipe gestures work (archive, delete, snooze)
+    - [ ] Dark mode follows system setting
+    - [ ] Keyboard doesn't obscure compose field
+    - [ ] App recovers from background correctly
+    - [ ] App works on airplane mode (graceful degradation)
+    - [ ] Works on iPhone SE (smallest screen)
+    - [ ] Works on iPad (if supporting)
+    - [ ] Works on Apple Silicon Mac ("Designed for iPad")
+
+  TestFlight builds expire after 90 days. Plan your testing window accordingly.
+
+5H. APP REVIEW DEMO ACCOUNT
+------------------------------
+  - Create a dedicated review@orbi.agency account specifically for App Store Review
+  - Pre-populate with realistic (but fake) email data:
+    - At least 10 threads with multiple emails each
+    - Mix of read/unread, starred, different categories
+    - Some with attachments
+    - At least one AI-composed draft in progress
+    - Some internal comments
+  - Include clear login instructions in the App Review notes:
+    "Demo Account: review@orbi.agency / [password]
+     This account has pre-populated email data for testing all features."
+  - Ensure the demo account's backend is running and accessible from Apple's network
+    (Apple Review is based in Cupertino and uses US IP addresses)
+  - Keep the demo account active and the backend running during the entire review period
+    (reviews take 24-48 hours but can take up to 7 days)
+
+5I. APP REVIEW PREPARATION
+-----------------------------
+  Common rejection reasons for email clients and how to prevent them:
+
+  1. Crash on no network: Test with airplane mode. Show offline UI (2K), don't crash.
+  2. Incomplete information: Fill out ALL App Store Connect fields. Missing fields = rejection.
+  3. Broken login: Ensure demo account works. Test OAuth flows with real credentials.
+  4. Private API usage: Audit all Capacitor plugins. Run Xcode static analyzer.
+     Use: nm -u YourApp | grep _OBJC to check for private API symbols.
+  5. Missing purpose strings: Every capability needs a human-readable usage description:
+     - NSFaceIDUsageDescription (Face ID)
+     - NSCameraUsageDescription (if using camera for attachments)
+     - NSPhotoLibraryUsageDescription (if accessing photos)
+     - NSContactsUsageDescription (if accessing device contacts)
+  6. Rate limiting on OAuth: If Apple reviewer can't log in because of Google/Microsoft
+     OAuth rate limits, they'll reject. Test the OAuth flow works from a fresh device.
+  7. No account deletion: Must offer in-app account deletion (5D).
+  8. Guideline 4.2 (Minimum Functionality): Apple may question whether a WebView-based
+     email client provides enough native value. Mitigate by:
+     - Implementing haptics, push notifications, Face ID, and other native features
+     - Making sure the app uses native UI elements (share sheet, action sheet, date picker)
+     - Not showing a web browser chrome or URL bar
+
+  App Review notes field (max 500 characters):
+    Include: demo credentials, any special instructions, explanation of native features.
+    Example: "This is a native email client built with Capacitor. Native features include:
+    push notifications, Face ID lock, haptic feedback, iOS share sheet, Keychain storage,
+    and Spotlight indexing. Demo: review@orbi.agency / [password]"
+
+5J. CRASH REPORTING & ANALYTICS
+----------------------------------
+  Crash reporting (REQUIRED for production):
+    - Install Sentry (@sentry/capacitor + @sentry/angular or custom integration)
+    - OR use Firebase Crashlytics
+    - Captures WKWebView crashes, JS errors, native crashes
+    - Upload dSYM files to Sentry/Firebase after each release for symbolicated stack traces
+    - Add to PrivacyInfo.xcprivacy if collecting crash data
+
+  Analytics (RECOMMENDED):
+    - Even basic session/screen tracking helps understand usage patterns
+    - Options: Firebase Analytics, Mixpanel, PostHog, or a simple custom solution
+    - Track: app opens, screen views, feature usage (AI compose, swipe actions, search)
+    - Do NOT use any tracking that requires ATT (App Tracking Transparency) framework
+    - All analytics should be first-party, not shared with third parties
+    - Declare in Privacy Nutrition Labels if implemented
+
+5K. APP SIZE AUDIT
+--------------------
+  - Apple enforces a 200MB over-the-air download limit
+    (users on cellular can't download apps larger than 200MB)
+  - Capacitor apps can get large due to bundled web assets
+
+  Size audit checklist:
+    - Build the release IPA and check the size
+    - Use Xcode's App Thinning report (Product > Archive > Distribute > App Thinning)
+    - Major size contributors:
+      - JavaScript bundle (run 'npx vite build --report' to see bundle analysis)
+      - Images/assets in the web bundle
+      - Capacitor plugins (each adds native code + frameworks)
+      - CocoaPods dependencies
+    - Optimization strategies if over budget:
+      - Enable Vite's code splitting and tree shaking
+      - Compress images, use WebP format
+      - Lazy-load non-critical routes
+      - Remove unused Capacitor plugins
+      - Enable Xcode's "Strip Swift Symbols" build setting
+
+  App Thinning:
+    - Bitcode is deprecated (removed in Xcode 14) -- ignore any references to it
+    - App Thinning for different device architectures is still active and automatic
+    - Verify the Xcode project has "Enable Bitcode" set to NO
+
+5L. CI/CD PIPELINE
+--------------------
+  While Fastlane is listed as "optional" in the original plan, for any production app
+  it should be considered essential:
+
+  Fastlane setup (packages/ios/fastlane/):
+    - fastlane match: manages certificates and provisioning profiles in a private Git repo
+      - Prevents "it works on my machine" signing issues
+      - Required for CI builds where you can't use Xcode automatic signing
+    - fastlane gym: builds the IPA with consistent settings
+    - fastlane pilot: uploads to TestFlight with changelog
+    - fastlane deliver: submits to App Store with metadata and screenshots
+
+  GitHub Actions workflow (.github/workflows/ios-build.yml):
+    - Trigger: on tag push (v1.0.0, v1.1.0, etc.)
+    - Steps:
+      1. Checkout code
+      2. Install Node.js dependencies (npm ci)
+      3. Build frontend (npm run build:ios)
+      4. Sync Capacitor (npx cap sync ios)
+      5. Install CocoaPods (cd ios/App && pod install)
+      6. Run fastlane match to install signing credentials
+      7. Build with fastlane gym
+      8. Upload to TestFlight with fastlane pilot
+    - Secrets required: MATCH_PASSWORD, APP_STORE_CONNECT_API_KEY, FASTLANE_SESSION
+    - Runner: must be macOS (GitHub-hosted macos-latest or self-hosted)
+
+  Alternative: Xcode Cloud
+    - Apple's built-in CI/CD, free for 25 compute hours/month
+    - Configured entirely in Xcode, no GitHub Actions needed
+    - Automatically signs builds using your Apple Developer account
+    - Limitations: less flexible than GitHub Actions + Fastlane
+
+5M. BUILD & SUBMIT
+-------------------
+  Manual process:
+    cd packages/ios
+    npx cap sync ios
+    npx cap open ios
+    # Xcode: Product > Archive > Distribute App > App Store Connect
+
+  Automated process (after 5L setup):
+    cd packages/ios
+    bundle exec fastlane beta    # Build + upload to TestFlight
+    bundle exec fastlane release # Build + submit to App Store
+
+  Post-submission:
+    - Monitor App Store Connect for review status
+    - Be ready to respond to reviewer questions within 24 hours
+    - If rejected, read the rejection reason carefully and fix the specific issue
+    - Common first-submission timeline: 24-48 hours for review, 1-2 rejections typical
+    - After approval: choose to release immediately or hold for manual release
+
+
+================================================================================
+CROSS-CUTTING CONCERNS
+================================================================================
+These apply across all phases and should be addressed alongside the relevant phase work.
+
+CC-1. TESTING STRATEGY
+------------------------
+  Device matrix (test on all of these):
+    - iPhone SE (3rd gen) -- smallest screen, tests responsive layout limits
+    - iPhone 15 Pro -- standard modern device
+    - iPhone 15 Pro Max -- largest screen, tests spacing/alignment
+    - iPad Air / iPad Pro 12.9" -- if supporting tablet layout
+    - Apple Silicon Mac ("Designed for iPad") -- desktop usage via App Store
+
+  iOS version testing:
+    - Minimum: iOS 14 (Capacitor 6 requirement)
+    - Current: iOS 17/18 (most users)
+    - Test on at least iOS 16 and the latest iOS version
+    - Use Xcode Simulator for older iOS versions
+
+  Network condition testing:
+    - Full Wi-Fi (normal path)
+    - Slow 3G (Network Link Conditioner in Xcode)
+    - No network / airplane mode (offline UI)
+    - Wi-Fi to cellular handoff (verify Socket.io reconnects)
+    - VPN active (verify API calls work through VPN)
+
+  Accessibility:
+    - VoiceOver: test full navigation with VoiceOver enabled
+    - Dynamic Type: test with larger text sizes
+    - Reduce Motion: verify transitions respect prefers-reduced-motion
+    - High Contrast: verify text remains readable
+
+CC-2. PERFORMANCE BENCHMARKS
+------------------------------
+  Target metrics:
+    - App launch to interactive: < 2 seconds (splash screen covers load time)
+    - Thread list scroll: 60fps (no jank)
+    - Thread load (tap to render): < 500ms
+    - AI compose response start: < 1s (SSE streaming)
+    - Memory usage: < 150MB typical, < 300MB peak
+    - Battery: no background drain when app is suspended
+
+  Monitoring:
+    - Use Xcode Instruments for profiling (Memory, Time Profiler, Network)
+    - Safari Web Inspector can attach to WKWebView for JS profiling
+    - Monitor WKWebView memory warnings -- if the OS kills WKWebView, the app goes blank
+
+CC-3. SECURITY AUDIT
+----------------------
+  Before submission, audit:
+    - All API calls use HTTPS (no cleartext HTTP in production)
+    - ATS (App Transport Security) is NOT disabled globally in Info.plist
+      - Only allow cleartext for localhost during development
+    - JWT tokens are stored in Keychain (done via secureStorage.ts)
+    - No sensitive data logged to console in production
+    - OAuth tokens are not exposed to the WebView's JavaScript context
+    - Push notification device tokens are transmitted over HTTPS
+    - File downloads go to the app's sandboxed container, not a shared location
+
+
+================================================================================
+CRITICAL FILES TO MODIFY (SUMMARY)
+================================================================================
+
+FILE                                                    | PHASE | CHANGE
+--------------------------------------------------------|-------|---------------------------
+package.json (root)                                     | 1     | DONE - packages/ios workspace + scripts
+packages/frontend/src/lib/platform.ts                   | 1     | DONE - Capacitor detection
+packages/frontend/src/lib/api.ts                        | 1     | Dynamic base URL
+packages/frontend/src/hooks/useSocket.ts                | 1     | Dynamic Socket URL
+packages/backend/src/app.ts                             | 1     | DONE - CORS origins
+packages/frontend/vite.config.ts                        | 1     | DONE - base: './' for iOS
+packages/frontend/src/hooks/useNetworkStatus.ts         | 1     | NEW - network connectivity hook
+packages/frontend/src/lib/haptics.ts                    | 2     | NEW - haptic feedback
+packages/frontend/src/components/thread-list/ThreadList | 2     | Pull-to-refresh
+packages/frontend/src/components/thread-list/ThreadItem | 2     | Haptics on swipe
+packages/frontend/src/components/layout/MobileBottomNav | 2     | Haptics on tab tap
+packages/frontend/src/components/layout/AppLayout.tsx   | 2,3   | Transitions, push init, lifecycle
+packages/frontend/src/index.css                         | 2     | Dark mode tokens, safe areas
+prisma/schema.prisma                                    | 3     | DeviceToken model
+packages/backend/src/routes/devices/index.ts            | 3     | DONE - device routes
+packages/backend/src/services/push-notification.ts      | 3     | NEW - APNs service
+packages/backend/src/config/env.ts                      | 3     | APNs env vars
+packages/backend/src/workers/gmail-sync.worker.ts       | 3     | Trigger push (batched)
+packages/backend/src/workers/microsoft-sync.worker.ts   | 3     | Trigger push (batched)
+packages/frontend/src/hooks/usePushNotifications.ts     | 3     | NEW - push hook + soft prompt
+packages/frontend/src/lib/secureStorage.ts              | 3     | DONE - Keychain adapter
+packages/frontend/src/stores/authStore.ts               | 3     | DONE - secure storage
+packages/backend/src/routes/users/index.ts              | 5     | Account deletion endpoint
+ios/App/App.entitlements                                | 4,5   | All capability entitlements
+ios/App/App/Info.plist                                  | 1-5   | All plist additions
+ios/App/PrivacyInfo.xcprivacy                           | 5     | Required API reason declarations
+.github/workflows/ios-build.yml                         | 5     | CI/CD pipeline
+
+
+================================================================================
+KEY RISKS (UPDATED)
+================================================================================
+
+1. TipTap in WKWebView -- Rich text editor runs in WebView; keyboard handling needs
+   testing. Isolated in ComposeInline.tsx, easy to adapt if issues arise.
+   MITIGATION: Test early in Phase 2C. If problematic, fall back to textarea on iOS.
+
+2. SSE Streaming -- AI chat uses fetch + ReadableStream for SSE. WKWebView supports
+   Streams API but needs early validation.
+   MITIGATION: Test in Phase 1. If broken, fall back to Socket.io-based streaming.
+
+3. IndexedDB Persistence -- Offline cache via idb-keyval works in WKWebView but can
+   be cleared by iOS under storage pressure. Auth tokens use Keychain (Phase 3G);
+   cache loss is acceptable.
+   MITIGATION: Already using Keychain for auth. React Query cache loss is self-healing.
+
+4. Socket.io Background -- iOS suspends WebSocket connections in background. Existing
+   reconnection logic in useSocket.ts already handles this.
+   MITIGATION: Add explicit reconnect on appStateChange resume event (Phase 1J).
+
+5. App Store Review -- Email clients are a known category. Ensure proper offline states,
+   error handling, and no private API usage.
+   MITIGATION: Offline UI (2K), demo account (5H), review prep (5I).
+
+6. WKWebView Memory Pressure -- iOS can terminate the WKWebView process silently,
+   leaving a blank white screen on resume.
+   MITIGATION: Handle webViewTerminated event, reload the app (Phase 1J).
+
+7. OAuth in WKWebView -- Google and Microsoft may block OAuth flows inside WKWebView.
+   MITIGATION: Use @capacitor/browser for OAuth flows (Phase 1K).
+
+8. Apple Developer Enrollment Timeline -- Organization enrollment requires D-U-N-S
+   verification which takes 2-4 weeks.
+   MITIGATION: Start enrollment in parallel with Phase 1 development.
+
+9. AASA Caching -- Apple's CDN caches the apple-app-site-association file aggressively.
+   Changes during development may not reflect for 24-48 hours.
+   MITIGATION: Use AASA validator and swcutil during development (Phase 4B).
+
+10. Share Extension Complexity -- The only component requiring native Swift code.
+    120MB memory limit, separate process, no access to main app's WebView.
+    MITIGATION: Defer to end of Phase 4 or post-launch (Phase 4D).
+
+
+================================================================================
+VERIFICATION PLAN (EXPANDED)
+================================================================================
+
+Phase 1: App launches in Simulator, login works, threads load, emails render, AI chat streams.
+  - [ ] App builds and runs in Xcode Simulator (iPhone 15 Pro)
+  - [ ] App installs and runs on a physical device via USB
+  - [ ] Login screen appears, credentials work
+  - [ ] Thread list populates with email threads
+  - [ ] Tapping a thread shows the email viewer with rendered HTML
+  - [ ] AI chat stream works (type a prompt, get streaming response)
+  - [ ] Socket.io connects and delivers real-time notifications
+  - [ ] OAuth flows work for Gmail and Microsoft accounts
+  - [ ] App handles no-network gracefully (no crash)
+  - [ ] App recovers from background/foreground transition without blank screen
+
+Phase 2: Haptics fire on swipe/tap, pull-to-refresh works, dark mode follows system,
+         transitions animate, keyboard doesn't obscure compose.
+  - [ ] Haptic feedback on swipe gestures (archive, delete)
+  - [ ] Haptic on tab switch in bottom nav
+  - [ ] Pull-to-refresh triggers data reload with spinner
+  - [ ] Dark mode activates when system is in dark mode
+  - [ ] HTML emails render acceptably in dark mode
+  - [ ] View transitions animate smoothly (< 300ms)
+  - [ ] Swipe-back gesture works from email viewer to thread list
+  - [ ] Keyboard doesn't cover compose field on any device size
+  - [ ] TipTap formatting toolbar accessible above keyboard
+  - [ ] Safe areas respected on all screens (notch, home indicator)
+  - [ ] Offline banner shows when network is lost
+  - [ ] Context menus work on long-press
+
+Phase 3: Push prompt appears, notifications arrive when backgrounded, badge updates,
+         Keychain persists auth across restarts.
+  - [ ] Soft permission prompt appears (not on first launch)
+  - [ ] System push permission dialog appears after user opt-in
+  - [ ] Push notifications arrive when app is backgrounded
+  - [ ] Tapping notification navigates to the correct thread
+  - [ ] Badge count updates on new email
+  - [ ] Badge clears when app comes to foreground
+  - [ ] Auth token persists in Keychain across app restarts
+  - [ ] Auth token migrates from localStorage to Keychain on first native launch
+  - [ ] Bulk sync doesn't spam individual notifications (batching works)
+  - [ ] File attachments can be downloaded and shared
+
+Phase 4: Face ID locks/unlocks, deep links navigate to threads, Spotlight indexes threads.
+  - [ ] Face ID prompt appears on app resume (when enabled in Settings)
+  - [ ] Face ID failure falls back gracefully
+  - [ ] Universal Links open the app from Safari/Notes
+  - [ ] Spotlight search shows recent threads
+  - [ ] Tapping Spotlight result navigates to thread
+  - [ ] Share Extension receives text/links from other apps (if implemented)
+  - [ ] Handoff shows Orbi on other Apple devices when viewing a thread
+  - [ ] Mailto links from other apps open Orbi compose
+
+Phase 5: App runs on Apple Silicon Mac, passes review, available for download.
+  - [ ] App runs correctly on Apple Silicon Mac ("Designed for iPad")
+  - [ ] Menu bar Edit menu works (copy/paste/undo)
+  - [ ] Trackpad right-click triggers context menus
+  - [ ] Keyboard shortcuts don't conflict with macOS system shortcuts
+  - [ ] PrivacyInfo.xcprivacy passes Xcode static analysis
+  - [ ] App size is under 200MB
+  - [ ] TestFlight build installs and runs for internal testers
+  - [ ] Demo account is populated and backend is accessible for review
+  - [ ] App Store listing is complete (screenshots, description, URLs)
+  - [ ] Privacy Nutrition Labels are accurate and complete
+  - [ ] Account deletion flow works end-to-end
+  - [ ] Crash reporting captures errors correctly
+  - [ ] App passes App Store Review and is available for download

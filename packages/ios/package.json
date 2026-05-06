@@ -1,0 +1,25 @@
+{
+  "name": "@orbi/ios",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "sync": "npx cap sync ios",
+    "open": "npx cap open ios",
+    "build:sync": "cd ../frontend && npx vite build --mode ios && cd ../ios && npx cap sync ios",
+    "icons": "npx @capacitor/assets generate --ios"
+  },
+  "dependencies": {
+    "@capacitor/action-sheet": "^7.0.4",
+    "@capacitor/app": "^7.0.0",
+    "@capacitor/browser": "^7.0.0",
+    "@capacitor/cli": "^7.0.0",
+    "@capacitor/core": "^7.0.0",
+    "@capacitor/haptics": "^7.0.5",
+    "@capacitor/ios": "^7.0.0",
+    "@capacitor/keyboard": "^7.0.0",
+    "@capacitor/network": "^7.0.0",
+    "@capacitor/share": "^7.0.4",
+    "@capacitor/splash-screen": "^7.0.0",
+    "@capacitor/status-bar": "^7.0.0"
+  }
+}

@@ -1,10 +1,34 @@
 @import 'tailwindcss';
 
+@theme {
+  --color-surface: #FAF9F5;
+  --color-surface-warm: #F0EEE6;
+  --color-border: #E8E8E8;
+  --color-text-primary: #1A1A1A;
+  --color-text-secondary: #6B6B6B;
+  --color-text-tertiary: #9B9B9B;
+  --color-selected: #F0EEE6;
+  --color-primary: #FF7E16;
+  --color-primary-light: #FFC494;
+  --color-primary-hover: #E56D0A;
+  --color-secondary: #B77CFF;
+  --color-secondary-light: #E1C9FF;
+  --color-ai: #7C3AED;
+  --color-ai-hover: #6D28D9;
+  --color-unread: #EF4444;
+  --color-comments-bg: #FFFBEB;
+  --color-gmail: #4285F4;
+  --color-microsoft: #F25022;
+  --color-imap: #A2AAAD;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', system-ui, sans-serif;
+  --font-mono: 'SF Mono', ui-monospace, SFMono-Regular, 'Menlo', monospace;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
-  font-family:
-    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-family: var(--font-sans);
+  color: var(--color-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -17,3 +41,181 @@ body {
 .titlebar-no-drag {
   -webkit-app-region: no-drag;
 }
+
+/* Panel transitions */
+.transition-panel {
+  transition: width 200ms ease-out, opacity 200ms ease-out;
+}
+
+/* AI section background — warm tone */
+.ai-gradient-bg {
+  background: #F0EEE6;
+}
+
+/* Radix dropdown animations */
+@keyframes slideDownAndFade {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUpAndFade {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(-4px); }
+}
+
+[data-state='open'][data-side='bottom'] {
+  animation: slideDownAndFade 200ms ease-out;
+}
+
+[data-state='closed'] {
+  animation: slideUpAndFade 150ms ease-in;
+}
+
+/* AI chat typing dots */
+@keyframes dotPulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1); }
+}
+
+.typing-dot {
+  animation: dotPulse 1.4s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+/* Text highlight pulse — used when navigating from dashboard/AI to a thread */
+@keyframes highlightPulse {
+  0% { background-color: rgba(255, 126, 22, 0.35); }
+  30% { background-color: rgba(255, 126, 22, 0.25); }
+  100% { background-color: transparent; }
+}
+
+mark[data-highlight] {
+  background-color: rgba(255, 126, 22, 0.35);
+  color: inherit;
+  border-radius: 2px;
+  padding: 1px 0;
+  animation: highlightPulse 5s ease-out forwards;
+}
+
+/* Bulk action toolbar slide-up */
+@keyframes bulkBarIn {
+  from { opacity: 0; transform: translate(-50%, 8px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.animate-bounce-in {
+  animation: bulkBarIn 200ms ease-out;
+  /* Override Tailwind's translate since animation controls it */
+  transform: translate(-50%, 0);
+}
+
+/* Restore native HTML email alignment inside inline renderer.
+   Tailwind preflight sets margin:0 on everything and resets table styles,
+   which breaks centered marketing emails that rely on <center>, align attrs,
+   or margin:auto on tables. */
+.email-body-inline center {
+  text-align: center;
+}
+.email-body-inline table {
+  border-collapse: separate;
+}
+.email-body-inline [align="center"] {
+  text-align: center;
+  margin-left: auto;
+  margin-right: auto;
+}
+.email-body-inline [align="right"] {
+  text-align: right;
+  margin-left: auto;
+}
+.email-body-inline [align="left"] {
+  text-align: left;
+}
+.email-body-inline td,
+.email-body-inline th {
+  padding: revert;
+}
+.email-body-inline center table,
+.email-body-inline table[align="center"] {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+/* Email iframe — no border, no scrolling, auto-height */
+.email-iframe {
+  border: none;
+  width: 100%;
+  display: block;
+  min-height: 60px;
+  overflow: hidden;
+}
+
+/* TipTap editor styles */
+.tiptap {
+  outline: none;
+}
+.tiptap p {
+  margin: 0;
+}
+.tiptap p + p {
+  margin-top: 0.25em;
+}
+.tiptap p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--color-text-tertiary);
+  pointer-events: none;
+  height: 0;
+}
+.tiptap a {
+  color: var(--color-primary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.tiptap ul,
+.tiptap ol {
+  padding-left: 1.5em;
+  margin: 0.25em 0;
+}
+.tiptap strong {
+  font-weight: 600;
+}
+
+/* Mobile: prevent 300ms tap delay and disable hover effects */
+@media (max-width: 899px) {
+  * { touch-action: manipulation; }
+}
+
+/* Prevent iOS WKWebView overscroll bounce on the body —
+   keeps fixed headers from shifting when scrolling */
+html, body {
+  overscroll-behavior: none;
+  overflow: hidden;
+  position: fixed;
+  width: 100%;
+  height: 100%;
+}
+
+/* iOS safe area — top padding for notch/Dynamic Island */
+@supports (padding-top: env(safe-area-inset-top)) {
+  .ios-safe-top {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+}
+
+/* Scrollbar styling */
+[data-radix-scroll-area-viewport] {
+  scrollbar-width: thin;
+  scrollbar-color: #D1D5DB transparent;
+  scrollbar-gutter: stable;
+}
+
+/* Fix Radix ScrollArea inner div preventing text truncation */
+[data-radix-scroll-area-viewport] > div {
+  display: block !important;
+  min-width: 0 !important;
+}
+
+/* Hide scrollbar for horizontal scroll containers */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }

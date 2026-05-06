@@ -27,14 +27,33 @@ export default async function searchRoutes(app: FastifyInstance) {
 
     const searchTerm = q.trim();
 
+    // Check if the search term matches a Person — if so, expand to all their emails
+    const matchingPersons = await app.prisma.person.findMany({
+      where: {
+        userId: request.user.userId,
+        displayName: { contains: searchTerm, mode: 'insensitive' },
+      },
+      include: { contacts: { select: { email: true } } },
+      take: 5,
+    });
+
+    const personEmails = matchingPersons.flatMap((p) => p.contacts.map((c) => c.email));
+
+    const orConditions: any[] = [
+      { subject: { contains: searchTerm, mode: 'insensitive' } },
+      { fromAddress: { contains: searchTerm, mode: 'insensitive' } },
+      { fromName: { contains: searchTerm, mode: 'insensitive' } },
+      { bodyText: { contains: searchTerm, mode: 'insensitive' } },
+    ];
+
+    // Add person email expansion — find emails from/to any of their addresses
+    if (personEmails.length > 0) {
+      orConditions.push({ fromAddress: { in: personEmails } });
+    }
+
     const where: any = {
       accountId: { in: accountIds },
-      OR: [
-        { subject: { contains: searchTerm, mode: 'insensitive' } },
-        { fromAddress: { contains: searchTerm, mode: 'insensitive' } },
-        { fromName: { contains: searchTerm, mode: 'insensitive' } },
-        { bodyText: { contains: searchTerm, mode: 'insensitive' } },
-      ],
+      OR: orConditions,
     };
 
     const [emails, total] = await Promise.all([

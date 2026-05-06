@@ -1,6 +1,7 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { api } from '../lib/api';
+import { secureStorage } from '../lib/secureStorage';
 
 interface User {
   id: string;
@@ -17,6 +18,7 @@ interface AuthState {
   login: (email: string, password: string) => Promise<void>;
   logout: () => void;
   setAuth: (token: string, user: User) => void;
+  updateUser: (updates: { name?: string; avatarUrl?: string }) => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -45,16 +47,33 @@ export const useAuthStore = create<AuthState>()(
         api.setToken(token);
         set({ token, user, isAuthenticated: true });
       },
+
+      updateUser: async (updates: { name?: string; avatarUrl?: string }) => {
+        const res = await api.patch<{ data: User }>('/users/me', updates);
+        set({ user: res.data });
+      },
     }),
     {
       name: 'orbi-auth',
-      onRehydrate: (state) => {
-        return (rehydratedState) => {
-          if (rehydratedState?.token) {
-            api.setToken(rehydratedState.token);
-          }
-        };
-      },
+      storage: createJSONStorage(() => secureStorage),
+      partialize: (state) => ({
+        token: state.token,
+        user: state.user,
+        isAuthenticated: state.isAuthenticated,
+      }),
     },
   ),
 );
+
+// Sync token to api client on store changes (covers both rehydration and login)
+useAuthStore.subscribe((state) => {
+  api.setToken(state.token);
+});
+
+// Also set immediately from current persisted state
+api.setToken(useAuthStore.getState().token);
+
+// Auto-logout on 401 responses
+api.setOnUnauthorized(() => {
+  useAuthStore.getState().logout();
+});

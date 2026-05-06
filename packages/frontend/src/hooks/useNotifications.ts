@@ -5,7 +5,6 @@ export function useNotifications() {
   return useQuery({
     queryKey: ['notifications'],
     queryFn: () => api.get<any>('/notifications'),
-    refetchInterval: 30000,
   });
 }
 
@@ -13,7 +12,6 @@ export function useUnreadCount() {
   return useQuery({
     queryKey: ['notifications', 'unread-count'],
     queryFn: () => api.get<any>('/notifications/unread-count'),
-    refetchInterval: 15000,
   });
 }
 

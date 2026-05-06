@@ -1,5 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { authenticate } from '../../middleware/authenticate.js';
+import { createNotificationIfAllowed } from '../../services/notifications.js';
+import { emitCommentsUpdated } from '../../services/socket-events.js';
 
 // Extract user IDs from TipTap mention markup
 function extractMentionIds(html: string): string[] {
@@ -85,22 +87,28 @@ export default async function commentRoutes(app: FastifyInstance) {
             },
           });
 
-          // Create notification for mentioned user
-          await tx.notification.create({
-            data: {
-              userId,
-              type: 'MENTION',
-              title: `${newComment.author.name} mentioned you`,
-              body: bodyText.slice(0, 200),
-              data: { threadId, commentId: newComment.id },
-            },
-          });
         }
 
         return newComment;
       });
 
-      // TODO: Emit socket events for real-time updates
+      // Create notifications outside transaction (best-effort) with real-time push
+      for (const userId of mentionedUserIds) {
+        await createNotificationIfAllowed(
+          app.prisma,
+          {
+            userId,
+            type: 'MENTION',
+            title: `${comment.author.name} mentioned you`,
+            body: bodyText.slice(0, 200),
+            data: { threadId, commentId: comment.id },
+          },
+          app.io,
+        );
+      }
+
+      // Emit real-time comment update to author + mentioned users
+      emitCommentsUpdated(app.io, [request.user.userId, ...mentionedUserIds], threadId);
 
       return { data: comment };
     },
@@ -127,6 +135,8 @@ export default async function commentRoutes(app: FastifyInstance) {
       },
     });
 
+    emitCommentsUpdated(app.io, request.user.userId, comment.threadId);
+
     return { data: updated };
   });
 
@@ -143,6 +153,9 @@ export default async function commentRoutes(app: FastifyInstance) {
     }
 
     await app.prisma.threadComment.delete({ where: { id } });
+
+    emitCommentsUpdated(app.io, request.user.userId, comment.threadId);
+
     return { data: { success: true } };
   });
 
@@ -167,6 +180,8 @@ export default async function commentRoutes(app: FastifyInstance) {
         },
       });
 
+      emitCommentsUpdated(app.io, request.user.userId, comment.threadId);
+
       return { data: updated };
     },
   );
@@ -178,6 +193,11 @@ export default async function commentRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { id } = request.params as { id: string };
       const { emoji } = request.body as { emoji: string };
+
+      const comment = await app.prisma.threadComment.findUnique({ where: { id }, select: { threadId: true } });
+      if (!comment) {
+        return reply.status(404).send({ error: 'Comment not found' });
+      }
 
       const reaction = await app.prisma.commentReaction.upsert({
         where: {
@@ -195,6 +215,8 @@ export default async function commentRoutes(app: FastifyInstance) {
         },
       });
 
+      emitCommentsUpdated(app.io, request.user.userId, comment.threadId);
+
       return { data: reaction };
     },
   );
@@ -206,6 +228,8 @@ export default async function commentRoutes(app: FastifyInstance) {
     async (request, reply) => {
       const { id, emoji } = request.params as { id: string; emoji: string };
 
+      const comment = await app.prisma.threadComment.findUnique({ where: { id }, select: { threadId: true } });
+
       await app.prisma.commentReaction.deleteMany({
         where: {
           commentId: id,
@@ -213,6 +237,10 @@ export default async function commentRoutes(app: FastifyInstance) {
           emoji,
         },
       });
+
+      if (comment) {
+        emitCommentsUpdated(app.io, request.user.userId, comment.threadId);
+      }
 
       return { data: { success: true } };
     },

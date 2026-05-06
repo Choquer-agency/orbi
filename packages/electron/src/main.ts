@@ -1,25 +1,29 @@
-import { app, BrowserWindow, Tray, Menu, nativeImage, Notification, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, Notification, ipcMain, shell, session } from 'electron';
 import path from 'path';
-import Store from 'electron-store';
+import { store } from './store';
 
-const store = new Store({
-  defaults: {
-    windowBounds: { width: 1400, height: 900, x: undefined as number | undefined, y: undefined as number | undefined },
-    isMaximized: false,
-    autoLaunch: false,
-  },
-});
-
-const isDev = process.env.NODE_ENV !== 'production' || !app.isPackaged;
+const isDev = !app.isPackaged;
 const VITE_DEV_SERVER_URL = 'http://localhost:5173';
 const PROTOCOL = 'orbi-mail';
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 
+function resolveAsset(...segments: string[]): string {
+  return path.join(__dirname, '..', 'assets', ...segments);
+}
+
+function resolveFrontendIndex(): string {
+  if (isDev) {
+    return path.join(__dirname, '../../frontend/dist/index.html');
+  }
+  // In production, extraResource copies packages/frontend/dist → Contents/Resources/dist
+  return path.join(process.resourcesPath, 'dist', 'index.html');
+}
+
 function createWindow() {
-  const bounds = store.get('windowBounds') as { width: number; height: number; x?: number; y?: number };
-  const isMaximized = store.get('isMaximized') as boolean;
+  const bounds = store.get('windowBounds');
+  const isMaximized = store.get('isMaximized');
 
   mainWindow = new BrowserWindow({
     width: bounds.width,
@@ -30,10 +34,12 @@ function createWindow() {
     minHeight: 680,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
+    icon: resolveAsset('icon.icns'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
     },
     show: false,
   });
@@ -48,12 +54,11 @@ function createWindow() {
 
   if (isDev) {
     mainWindow.loadURL(VITE_DEV_SERVER_URL);
-    mainWindow.webContents.openDevTools();
+    mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../frontend/dist/index.html'));
+    mainWindow.loadFile(resolveFrontendIndex());
   }
 
-  // Save window state on close
   mainWindow.on('close', () => {
     if (!mainWindow) return;
     const isMax = mainWindow.isMaximized();
@@ -69,7 +74,6 @@ function createWindow() {
     mainWindow = null;
   });
 
-  // Open external links in default browser
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
@@ -77,9 +81,10 @@ function createWindow() {
 }
 
 function createTray() {
-  // Use a simple template icon for the tray
-  const icon = nativeImage.createEmpty();
-  tray = new Tray(icon);
+  const trayIconPath = resolveAsset('trayTemplate.png');
+  const icon = nativeImage.createFromPath(trayIconPath);
+  icon.setTemplateImage(true);
+  tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
 
   const contextMenu = Menu.buildFromTemplate([
     {
@@ -107,7 +112,6 @@ function createTray() {
   });
 }
 
-// Register custom protocol for OAuth callbacks
 if (process.defaultApp) {
   if (process.argv.length >= 2) {
     app.setAsDefaultProtocolClient(PROTOCOL, process.execPath, [path.resolve(process.argv[1])]);
@@ -116,7 +120,6 @@ if (process.defaultApp) {
   app.setAsDefaultProtocolClient(PROTOCOL);
 }
 
-// Handle deep links (macOS)
 app.on('open-url', (event, url) => {
   event.preventDefault();
   handleDeepLink(url);
@@ -130,7 +133,6 @@ function handleDeepLink(url: string) {
   }
 }
 
-// IPC handlers
 ipcMain.handle('show-notification', (_event, title: string, body: string) => {
   if (Notification.isSupported()) {
     const notification = new Notification({ title, body });
@@ -146,24 +148,16 @@ ipcMain.handle('set-badge-count', (_event, count: number) => {
   app.setBadgeCount(count);
 });
 
-ipcMain.handle('get-platform', () => {
-  return process.platform;
-});
-
-ipcMain.handle('get-version', () => {
-  return app.getVersion();
-});
+ipcMain.handle('get-platform', () => process.platform);
+ipcMain.handle('get-version', () => app.getVersion());
 
 ipcMain.handle('set-auto-launch', (_event, enabled: boolean) => {
   app.setLoginItemSettings({ openAtLogin: enabled });
   store.set('autoLaunch', enabled);
 });
 
-ipcMain.handle('get-auto-launch', () => {
-  return store.get('autoLaunch');
-});
+ipcMain.handle('get-auto-launch', () => store.get('autoLaunch'));
 
-// Single instance lock
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
@@ -173,7 +167,6 @@ if (!gotTheLock) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
-    // Handle deep link on Windows/Linux
     const deepLink = argv.find((arg) => arg.startsWith(`${PROTOCOL}://`));
     if (deepLink) {
       handleDeepLink(deepLink);
@@ -181,12 +174,34 @@ if (!gotTheLock) {
   });
 }
 
+function installContentSecurityPolicy() {
+  if (isDev) return;
+  const apiOrigin = process.env.ORBI_API_ORIGIN || 'https://api.orbimail.com';
+  session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+    callback({
+      responseHeaders: {
+        ...details.responseHeaders,
+        'Content-Security-Policy': [
+          [
+            "default-src 'self'",
+            `connect-src 'self' ${apiOrigin} wss://${apiOrigin.replace(/^https?:\/\//, '')}`,
+            "img-src 'self' data: blob: https:",
+            "style-src 'self' 'unsafe-inline'",
+            "script-src 'self'",
+            "font-src 'self' data:",
+          ].join('; '),
+        ],
+      },
+    });
+  });
+}
+
 app.whenReady().then(() => {
+  installContentSecurityPolicy();
   createWindow();
   createTray();
 
-  // Apply auto-launch setting
-  const autoLaunch = store.get('autoLaunch') as boolean;
+  const autoLaunch = store.get('autoLaunch');
   app.setLoginItemSettings({ openAtLogin: autoLaunch });
 });
 

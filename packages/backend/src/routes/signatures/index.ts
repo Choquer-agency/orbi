@@ -6,20 +6,23 @@ export default async function signatureRoutes(app: FastifyInstance) {
     const signatures = await app.prisma.signature.findMany({
       where: { userId: request.user.userId },
       orderBy: { createdAt: 'asc' },
+      include: { account: { select: { id: true, email: true, displayName: true } } },
     });
     return { data: signatures };
   });
 
   app.post('/api/signatures', { preHandler: [authenticate] }, async (request) => {
-    const { name, bodyHtml, isDefault } = request.body as {
+    const { name, bodyHtml, isDefault, accountId } = request.body as {
       name: string;
       bodyHtml: string;
       isDefault?: boolean;
+      accountId?: string | null;
     };
 
     if (isDefault) {
+      // Only clear defaults for the same account scope
       await app.prisma.signature.updateMany({
-        where: { userId: request.user.userId },
+        where: { userId: request.user.userId, accountId: accountId ?? null },
         data: { isDefault: false },
       });
     }
@@ -30,7 +33,9 @@ export default async function signatureRoutes(app: FastifyInstance) {
         name,
         bodyHtml,
         isDefault: isDefault || false,
+        accountId: accountId ?? null,
       },
+      include: { account: { select: { id: true, email: true, displayName: true } } },
     });
 
     return { data: signature };
@@ -38,7 +43,7 @@ export default async function signatureRoutes(app: FastifyInstance) {
 
   app.patch('/api/signatures/:id', { preHandler: [authenticate] }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const updates = request.body as { name?: string; bodyHtml?: string; isDefault?: boolean };
+    const updates = request.body as { name?: string; bodyHtml?: string; isDefault?: boolean; accountId?: string | null };
 
     const signature = await app.prisma.signature.findFirst({
       where: { id, userId: request.user.userId },
@@ -49,8 +54,10 @@ export default async function signatureRoutes(app: FastifyInstance) {
     }
 
     if (updates.isDefault) {
+      // Scope default clearing to the target account (use new accountId if provided, else existing)
+      const targetAccountId = updates.accountId !== undefined ? updates.accountId : signature.accountId;
       await app.prisma.signature.updateMany({
-        where: { userId: request.user.userId },
+        where: { userId: request.user.userId, accountId: targetAccountId },
         data: { isDefault: false },
       });
     }
@@ -58,6 +65,7 @@ export default async function signatureRoutes(app: FastifyInstance) {
     const updated = await app.prisma.signature.update({
       where: { id },
       data: updates,
+      include: { account: { select: { id: true, email: true, displayName: true } } },
     });
 
     return { data: updated };

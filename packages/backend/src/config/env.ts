@@ -21,8 +21,16 @@ const envSchema = z.object({
     .string()
     .default('http://localhost:3001/api/accounts/oauth/microsoft/callback'),
   ANTHROPIC_API_KEY: z.string().default(''),
+  APNS_KEY_ID: z.string().optional(),
+  APNS_TEAM_ID: z.string().optional(),
+  APNS_KEY_CONTENT: z.string().optional(),
+  APNS_KEY_PATH: z.string().optional(),
+  APNS_BUNDLE_ID: z.string().default('com.orbimail.app'),
+  APNS_PRODUCTION: z.coerce.boolean().default(false),
   PORT: z.coerce.number().default(3001),
+  TRACKING_BASE_URL: z.string().default('http://localhost:3001'),
   FRONTEND_URL: z.string().default('http://localhost:5173'),
+  CORS_ORIGINS: z.string().optional(),
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
 });
 

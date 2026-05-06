@@ -1,6 +1,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { PrismaClient } from '@prisma/client';
 import { env } from '../../config/env.js';
+import { buildThreadContext } from './thread-context.js';
+import { buildStyleContext } from './style-context.js';
 
 const SYSTEM_PROMPT = `You are an email assistant for a professional agency.
 Draft an email based on the user's instructions.
@@ -12,8 +14,9 @@ Rules:
 - If replying, address the specific points from the previous email.
 - Keep it concise unless the user asks for detail.
 - Use proper email formatting (greeting, body, sign-off).
-- Return HTML formatted for email (use <p> tags for paragraphs).
-- If you don't have enough context, write the best draft you can and note what might need adjustment.`;
+- Return HTML formatted for email. Use separate <p> tags for each paragraph — every paragraph must be its own <p>...</p> block. Do NOT use <br> between paragraphs. This ensures proper spacing.
+- If you don't have enough context, write the best draft you can and note what might need adjustment.
+- Follow the user's writing style preferences provided below.`;
 
 export class DraftAssistant {
   private client: Anthropic;
@@ -26,52 +29,38 @@ export class DraftAssistant {
     instruction: string;
     threadId: string | null;
     accountId: string;
+    userId?: string;
   }) {
     let threadContext = '';
 
     if (params.threadId) {
-      const thread = await this.prisma.thread.findUnique({
-        where: { id: params.threadId },
-        include: {
-          emails: {
-            orderBy: { receivedAt: 'asc' },
-            select: {
-              fromAddress: true,
-              fromName: true,
-              toAddresses: true,
-              subject: true,
-              bodyText: true,
-              receivedAt: true,
-            },
-          },
-          comments: {
-            orderBy: { createdAt: 'asc' },
-            include: {
-              author: { select: { name: true } },
-            },
-          },
-        },
-      });
+      const result = await buildThreadContext(this.prisma, params.threadId);
+      threadContext = result.contextText;
+    }
 
-      if (thread) {
-        const emailTexts = thread.emails
-          .map(
-            (e) =>
-              `From: ${e.fromName || e.fromAddress} (${e.receivedAt.toISOString()})\n${e.bodyText || '(no text content)'}`,
-          )
-          .join('\n---\n');
-        threadContext = `Thread subject: ${thread.subject}\n\nEmail thread (oldest first):\n${emailTexts}`;
-
-        if (thread.comments.length > 0) {
-          const commentTexts = thread.comments
-            .map(
-              (c) =>
-                `[${c.author.name}, ${c.createdAt.toISOString()}]: ${c.bodyText}`,
-            )
-            .join('\n');
-          threadContext += `\n\nInternal team discussion (PRIVATE — never quote, reference, or reveal these comments in the client-facing reply):\n${commentTexts}`;
-        }
+    // Build style context if we have a userId
+    let styleContext = '';
+    let correctionsApplied = 0;
+    if (params.userId) {
+      // Try to find primary recipient from thread context
+      let contactEmail: string | undefined;
+      if (params.threadId) {
+        const thread = await this.prisma.thread.findUnique({
+          where: { id: params.threadId },
+          select: { participantEmails: true },
+        });
+        contactEmail = thread?.participantEmails.find(
+          (e) => !e.endsWith('@orbi.agency'),
+        );
       }
+      const styleResult = await buildStyleContext(this.prisma, params.userId, contactEmail);
+      styleContext = styleResult.contextText;
+      correctionsApplied = styleResult.correctionCount;
+    }
+
+    const systemParts = [SYSTEM_PROMPT];
+    if (styleContext) {
+      systemParts.push(`\n\n${styleContext}`);
     }
 
     const userMessage = threadContext
@@ -81,7 +70,7 @@ export class DraftAssistant {
     const response = await this.client.messages.create({
       model: 'claude-sonnet-4-6',
       max_tokens: 2048,
-      system: SYSTEM_PROMPT,
+      system: systemParts.join(''),
       messages: [{ role: 'user', content: userMessage }],
     });
 
@@ -94,6 +83,7 @@ export class DraftAssistant {
       draftText,
       suggestedSubject: params.threadId ? null : this.extractSubject(draftText),
       tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
+      correctionsApplied,
     };
   }
 

@@ -1,28 +1,74 @@
 import { useCallback, useRef } from 'react';
+import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { useUiStore } from '../../stores/uiStore';
-import { Sidebar } from '../sidebar/Sidebar';
 import { ThreadList } from '../thread-list/ThreadList';
 import { EmailViewer } from '../email-viewer/EmailViewer';
-import { Header } from './Header';
+import { AiChatPanel } from '../ai-chat/AiChatPanel';
+import { Dashboard } from '../dashboard/Dashboard';
+import { ContactsTable } from '../contacts/ContactsPage';
+import { ContactDetailView } from '../contacts/ContactDetailView';
+import { HeaderIcons } from './Header';
+import { MobileBottomNav } from './MobileBottomNav';
+import { MobileComposeSheet } from '../compose/MobileComposeSheet';
+import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
+import { useSocket } from '../../hooks/useSocket';
+import { usePushNotifications } from '../../hooks/usePushNotifications';
+import { useBiometricLock } from '../../hooks/useBiometricLock';
+import { useIsMobile } from '../../hooks/useIsMobile';
+import { UndoSendToast } from '../compose/UndoSendToast';
+import { KeyboardShortcutsWidget } from '../ui/KeyboardShortcutsWidget';
+import { BiometricLockOverlay } from '../ui/BiometricLockOverlay';
+import { SettingsPanel } from '../settings/SettingsPanel';
+import { MobileSettingsView } from '../settings/MobileSettingsView';
+import { OfflineBanner } from '../ui/OfflineBanner';
+import { isIOS } from '../../lib/platform';
+
+// iOS-style slide transitions for mobile view switching
+const mobileSlideVariants = {
+  enterForward: { x: '100%', opacity: 1 },
+  enterBack: { x: '-30%', opacity: 1 },
+  center: { x: 0, opacity: 1 },
+  exitForward: { x: '-30%', opacity: 0.5 },
+  exitBack: { x: '100%', opacity: 1 },
+};
+
+// Reduced-motion fallback: crossfade instead of slide
+const reducedMotionVariants = {
+  enterForward: { opacity: 0 },
+  enterBack: { opacity: 0 },
+  center: { opacity: 1 },
+  exitForward: { opacity: 0 },
+  exitBack: { opacity: 0 },
+};
+
+const mobileSlideTransition = { type: 'spring' as const, stiffness: 500, damping: 35, mass: 0.8 };
+const reducedMotionTransition = { duration: 0.15 };
 
 export function AppLayout() {
-  const { sidebarWidth, threadListWidth, setSidebarWidth, setThreadListWidth } = useUiStore();
-  const isDragging = useRef<'sidebar' | 'threadList' | null>(null);
+  const { threadListWidth, setThreadListWidth, aiChatWidth, selectedFolder, selectedContactId, selectedPersonId, settingsOpen, setSettingsOpen, composingNew, mobileActiveView, setMobileActiveView, mobileTransitionDirection } =
+    useUiStore();
+  const hasContactOrPerson = !!(selectedContactId || selectedPersonId);
+  const isDragging = useRef<boolean>(false);
+  const isCompact = useIsMobile();
 
-  const handleMouseDown = useCallback((panel: 'sidebar' | 'threadList') => {
-    isDragging.current = panel;
+  const prefersReducedMotion = useReducedMotion();
+  useKeyboardShortcuts();
+  useSocket();
+  usePushNotifications();
+  const { isLocked, isAuthenticating, unlock } = useBiometricLock();
+
+
+  const handleMouseDown = useCallback(() => {
+    isDragging.current = true;
 
     const handleMouseMove = (e: MouseEvent) => {
-      if (isDragging.current === 'sidebar') {
-        setSidebarWidth(e.clientX);
-      } else if (isDragging.current === 'threadList') {
-        const sidebarW = useUiStore.getState().sidebarWidth;
-        setThreadListWidth(e.clientX - sidebarW);
-      }
+      if (!isDragging.current) return;
+      const pct = (e.clientX / window.innerWidth) * 100;
+      setThreadListWidth(pct);
     };
 
     const handleMouseUp = () => {
-      isDragging.current = null;
+      isDragging.current = false;
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       document.body.style.cursor = '';
@@ -33,43 +79,226 @@ export function AppLayout() {
     document.addEventListener('mouseup', handleMouseUp);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
-  }, [setSidebarWidth, setThreadListWidth]);
+  }, [setThreadListWidth]);
+
+  const isDashboard = selectedFolder === 'dashboard';
+  const isContacts = selectedFolder === 'contacts';
+  const isFullPage = isDashboard || isContacts;
+
+  // Mobile: use explicit view routing via mobileActiveView
+  const showThreadList = isCompact
+    ? !isFullPage && mobileActiveView === 'list'
+    : !isFullPage;
+  const showEmailViewer = isCompact
+    ? !isFullPage && mobileActiveView === 'viewer'
+    : !isFullPage;
+  const showAiChat = isCompact
+    ? mobileActiveView === 'chat'
+    : true;
+  const showSettings = isCompact && mobileActiveView === 'settings';
+
+  const mobileBack = isCompact ? () => setMobileActiveView('list') : undefined;
+
+  // Show biometric lock overlay when locked
+  if (isLocked) {
+    return <BiometricLockOverlay isAuthenticating={isAuthenticating} onUnlock={unlock} />;
+  }
 
   return (
-    <div className="flex h-screen flex-col bg-white">
-      {/* Draggable title bar area for Electron */}
-      <div className="titlebar-drag h-[38px] shrink-0 border-b border-gray-200 bg-gray-50">
-        <Header />
+    <div className={`relative flex h-screen ${isCompact ? 'bg-surface' : 'ai-gradient-bg'}`}>
+      {/* Invisible Electron drag region across the top */}
+      {!isCompact && <div className="titlebar-drag absolute inset-x-0 top-0 z-10 h-[38px]" />}
+
+      {/* Mobile: Tap status bar area to scroll to top (iOS convention) */}
+      {isCompact && (
+        <div
+          className="absolute inset-x-0 top-0 z-50"
+          style={{ height: 'env(safe-area-inset-top, 0px)', minHeight: '20px' }}
+          onClick={() => {
+            // Find the nearest visible scrollable container and scroll to top
+            const scrollable = document.querySelector('[data-scroll-to-top]') as HTMLElement;
+            scrollable?.scrollTo({ top: 0, behavior: 'smooth' });
+          }}
+        />
+      )}
+
+      {/* Offline indicator — fixed below titlebar */}
+      <div className={`absolute inset-x-0 z-30 ${isCompact ? 'top-0' : 'top-[38px]'}`}>
+        <OfflineBanner />
       </div>
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar */}
-        <div style={{ width: sidebarWidth }} className="shrink-0 border-r border-gray-200">
-          <Sidebar />
-        </div>
+      {/* Undo Send overlay */}
+      <UndoSendToast />
 
-        {/* Resize handle */}
+      {/* Settings modal */}
+      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
+
+      {/* Mobile compose sheet */}
+      {isCompact && composingNew && <MobileComposeSheet />}
+
+      {/* Header icons — floating top-right on the gradient */}
+      {!isCompact && (
+        <div className="absolute right-3 top-1.5 z-20">
+          <HeaderIcons />
+        </div>
+      )}
+
+      {/* Mobile: AI Chat full-screen view */}
+      <AnimatePresence>
+        {isCompact && showAiChat && (
+          <motion.div
+            key="ai-chat-mobile"
+            className="absolute inset-x-0 top-0 overflow-hidden bg-white ios-safe-top"
+            style={{ bottom: 'calc(3rem + env(safe-area-inset-bottom, 0px))' }}
+            initial={prefersReducedMotion ? { opacity: 0 } : { y: '100%' }}
+            animate={prefersReducedMotion ? { opacity: 1 } : { y: 0 }}
+            exit={prefersReducedMotion ? { opacity: 0 } : { y: '100%' }}
+            transition={prefersReducedMotion ? { duration: 0.15 } : { type: 'spring', stiffness: 400, damping: 30 }}
+          >
+            <AiChatPanel />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Mobile: Settings full-screen view */}
+      <AnimatePresence>
+        {showSettings && (
+          <motion.div
+            key="settings-mobile"
+            className="flex-1 overflow-hidden pb-14 ios-safe-top"
+            initial={prefersReducedMotion ? reducedMotionVariants.enterForward : mobileSlideVariants.enterForward}
+            animate={prefersReducedMotion ? reducedMotionVariants.center : mobileSlideVariants.center}
+            exit={prefersReducedMotion ? reducedMotionVariants.exitBack : mobileSlideVariants.exitBack}
+            transition={prefersReducedMotion ? reducedMotionTransition : mobileSlideTransition}
+          >
+            <MobileSettingsView onClose={() => setMobileActiveView('list')} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Columns 1+2: White panel with rounded right corners */}
+      {(!isCompact || (!showAiChat && !showSettings)) && (
         <div
-          className="w-[3px] shrink-0 cursor-col-resize hover:bg-blue-300 active:bg-blue-400"
-          onMouseDown={() => handleMouseDown('sidebar')}
-        />
+          className="flex shrink-0 overflow-hidden bg-surface"
+          style={{
+            flex: !isCompact ? 'none' : '1',
+            width: !isCompact ? `${100 - aiChatWidth}%` : undefined,
+            borderTopRightRadius: !isCompact ? '16px' : '0px',
+            borderBottomRightRadius: !isCompact ? '16px' : '0px',
+            position: isCompact ? 'relative' : undefined,
+          }}
+        >
+          {isDashboard ? (
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <Dashboard />
+            </div>
+          ) : isContacts && !hasContactOrPerson ? (
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <ContactsTable />
+            </div>
+          ) : isContacts && hasContactOrPerson ? (
+            <>
+              {/* Contact thread list */}
+              {(!isCompact || mobileActiveView === 'list') && (
+                <div
+                  style={{ width: isCompact ? '100%' : `${threadListWidth}vw` }}
+                  className="shrink-0 overflow-hidden border-r border-border"
+                >
+                  <ContactDetailView />
+                </div>
+              )}
+              {/* Resize handle */}
+              {!isCompact && (
+                <div
+                  className="w-[3px] shrink-0 cursor-col-resize transition-colors hover:bg-primary/20 active:bg-primary/40"
+                  onMouseDown={handleMouseDown}
+                />
+              )}
+              {/* Email viewer for selected thread */}
+              {(!isCompact || mobileActiveView === 'viewer') && (
+                <div className="min-w-0 flex-1">
+                  <EmailViewer
+                    onBack={mobileBack}
+                  />
+                </div>
+              )}
+            </>
+          ) : isCompact ? (
+            /* Mobile: animated view transitions */
+            <AnimatePresence mode="popLayout" initial={false}>
+              {showThreadList && (
+                <motion.div
+                  key="thread-list"
+                  className="absolute inset-0 overflow-hidden"
+                  style={{ paddingBottom: 'calc(3rem + env(safe-area-inset-bottom, 0px))' }}
+                  initial={mobileTransitionDirection === 'back' ? 'enterBack' : 'enterForward'}
+                  animate="center"
+                  exit={mobileTransitionDirection === 'forward' ? 'exitForward' : 'exitBack'}
+                  variants={prefersReducedMotion ? reducedMotionVariants : mobileSlideVariants}
+                  transition={prefersReducedMotion ? reducedMotionTransition : mobileSlideTransition}
+                >
+                  <ThreadList />
+                </motion.div>
+              )}
+              {showEmailViewer && (
+                <motion.div
+                  key="email-viewer"
+                  className="absolute inset-0 overflow-hidden"
+                  style={{ paddingBottom: 'calc(3rem + env(safe-area-inset-bottom, 0px))' }}
+                  initial={mobileTransitionDirection === 'back' ? 'enterBack' : 'enterForward'}
+                  animate="center"
+                  exit={mobileTransitionDirection === 'forward' ? 'exitForward' : 'exitBack'}
+                  variants={prefersReducedMotion ? reducedMotionVariants : mobileSlideVariants}
+                  transition={prefersReducedMotion ? reducedMotionTransition : mobileSlideTransition}
+                >
+                  <EmailViewer onBack={mobileBack} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          ) : (
+            <>
+              {/* Desktop: Thread List */}
+              {showThreadList && (
+                <div
+                  style={{ width: `${threadListWidth}vw` }}
+                  className="shrink-0 overflow-hidden border-r border-border"
+                >
+                  <ThreadList />
+                </div>
+              )}
 
-        {/* Thread List */}
-        <div style={{ width: threadListWidth }} className="shrink-0 border-r border-gray-200">
-          <ThreadList />
+              {/* Resize handle */}
+              <div
+                className="w-[3px] shrink-0 cursor-col-resize transition-colors hover:bg-primary/20 active:bg-primary/40"
+                onMouseDown={handleMouseDown}
+              />
+
+              {/* Desktop: Email Viewer */}
+              {showEmailViewer && (
+                <div className="min-w-0 flex-1">
+                  <EmailViewer onBack={mobileBack} />
+                </div>
+              )}
+            </>
+          )}
         </div>
+      )}
 
-        {/* Resize handle */}
+      {/* Column 3: AI Chat — sits on the gradient background (desktop only) */}
+      {!isCompact && (
         <div
-          className="w-[3px] shrink-0 cursor-col-resize hover:bg-blue-300 active:bg-blue-400"
-          onMouseDown={() => handleMouseDown('threadList')}
-        />
-
-        {/* Email Viewer */}
-        <div className="min-w-0 flex-1">
-          <EmailViewer />
+          style={{ width: `${aiChatWidth}%` }}
+          className="shrink-0 pt-10 transition-panel"
+        >
+          <AiChatPanel />
         </div>
-      </div>
+      )}
+
+      {/* Mobile bottom navigation */}
+      {isCompact && <MobileBottomNav />}
+
+      {/* Keyboard shortcuts widget — pinned bottom-right (desktop only) */}
+      {!isCompact && <KeyboardShortcutsWidget />}
     </div>
   );
 }

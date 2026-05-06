@@ -3,12 +3,29 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import path from 'path';
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
+  base: mode === 'ios' || mode === 'electron' ? './' : '/',
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
     },
+  },
+  optimizeDeps: {
+    include: [
+      'react',
+      'react-dom',
+      'react-router-dom',
+      '@tanstack/react-query',
+      'zustand',
+      'zustand/middleware',
+      'lucide-react',
+      'react-hot-toast',
+      'dompurify',
+      'clsx',
+      'tailwind-merge',
+      'socket.io-client',
+    ],
   },
   server: {
     port: 5173,
@@ -23,4 +40,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

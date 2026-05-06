@@ -1,0 +1,20 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appIDs": ["TEAMID.com.orbimail.app"],
+        "components": [
+          { "/": "/thread/*", "comment": "View thread" },
+          { "/": "/email/*", "comment": "View email" },
+          { "/": "/compose", "comment": "New compose" },
+          { "/": "/compose/*", "comment": "Compose with params" },
+          { "/": "/settings", "comment": "Open settings" }
+        ]
+      }
+    ]
+  },
+  "webcredentials": {
+    "apps": ["TEAMID.com.orbimail.app"]
+  }
+}
