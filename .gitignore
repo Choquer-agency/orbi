@@ -12,3 +12,5 @@ coverage/
 .vite/
 .claude/settings.local.json
 *.tsbuildinfo
+.convex/
+convex/_generated/

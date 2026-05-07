@@ -1,68 +1,143 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { useState } from 'react';
+import { useQuery, useMutation, useAction } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 import { isNative } from '../lib/platform';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Drop-in TanStack Query → Convex replacement (mailAccounts CRUD).
+//
+// Public surface preserved:
+//   useAccounts()         — { data, isLoading }; data is the list array
+//   useDeleteAccount()    — { mutate, mutateAsync, isPending }
+//   useStartOAuth()       — { mutate, mutateAsync, isPending }
+//   useUpdateAccount()    — { mutate, mutateAsync, isPending }
+//   useSyncAccount()      — { mutate, mutateAsync, isPending }
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function useAccounts() {
-  return useQuery({
-    queryKey: ['accounts'],
-    queryFn: () => api.get<any>('/accounts'),
-  });
+  const result = useQuery(api.mailAccounts.list, {});
+  return {
+    data: result,
+    isLoading: result === undefined,
+    isError: false,
+    error: undefined,
+  };
 }
 
 export function useDeleteAccount() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api.delete(`/accounts/${id}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['accounts'] }),
-  });
+  const fn = useMutation(api.mailAccounts.disconnect);
+  const [isPending, setIsPending] = useState(false);
+
+  const mutateAsync = async (id: Id<'mailAccounts'> | string) => {
+    setIsPending(true);
+    try {
+      return await fn({ accountId: id as Id<'mailAccounts'> });
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return {
+    mutate: (id: Id<'mailAccounts'> | string) => {
+      void mutateAsync(id);
+    },
+    mutateAsync,
+    isPending,
+    isLoading: isPending,
+  };
 }
 
 export function useStartOAuth() {
-  return useMutation({
-    mutationFn: async (provider: 'gmail' | 'microsoft') => {
+  const getOAuthUrl = useAction(api.mailAccounts.getOAuthUrl);
+  const [isPending, setIsPending] = useState(false);
+
+  const mutateAsync = async (provider: 'gmail' | 'microsoft') => {
+    setIsPending(true);
+    try {
       const isElectron = !!(window as any).electronAPI;
       const native = isNative();
       const platform = isElectron ? 'desktop' : native ? 'capacitor' : 'web';
-      const res = await api.get<any>(`/accounts/oauth/${provider}?platform=${platform}`);
-      console.log('[oauth] response:', JSON.stringify(res));
-      const url = res?.data?.url ?? res?.url;
-      if (!url) {
-        throw new Error('No OAuth URL returned');
-      }
+
+      const res = await getOAuthUrl({
+        provider: provider === 'gmail' ? 'GMAIL' : 'MICROSOFT',
+        platform,
+      });
+      const url = res?.url;
+      if (!url) throw new Error('No OAuth URL returned');
 
       if (native) {
-        // Open OAuth in SFSafariViewController (required by Google and Apple policies)
         const { Browser } = await import('@capacitor/browser');
         await Browser.open({ url, presentationStyle: 'popover' });
       } else {
         window.location.href = url;
       }
-    },
-    onError: (err) => {
+    } catch (err) {
       console.error('[oauth] error:', err);
+      throw err;
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return {
+    mutate: (provider: 'gmail' | 'microsoft') => {
+      void mutateAsync(provider);
     },
-  });
+    mutateAsync,
+    isPending,
+    isLoading: isPending,
+  };
 }
 
 export function useUpdateAccount() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, ...data }: { id: string; displayName?: string }) =>
-      api.patch(`/accounts/${id}`, data),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['accounts'] }),
-  });
+  const fn = useMutation(api.mailAccounts.updateDisplayName);
+  const [isPending, setIsPending] = useState(false);
+
+  const mutateAsync = async (args: {
+    id: Id<'mailAccounts'> | string;
+    displayName?: string | null;
+  }) => {
+    setIsPending(true);
+    try {
+      return await fn({
+        accountId: args.id as Id<'mailAccounts'>,
+        displayName: args.displayName ?? undefined,
+      });
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return {
+    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
+      void mutateAsync(args);
+    },
+    mutateAsync,
+    isPending,
+    isLoading: isPending,
+  };
 }
 
 export function useSyncAccount() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api.post(`/accounts/${id}/sync`),
-    onSuccess: () => {
-      // Refetch threads after sync is queued (with a small delay for processing)
-      setTimeout(() => {
-        queryClient.invalidateQueries({ queryKey: ['threads'] });
-        queryClient.invalidateQueries({ queryKey: ['accounts'] });
-      }, 3000);
+  const fn = useMutation(api.mailAccounts.triggerSync);
+  const [isPending, setIsPending] = useState(false);
+
+  const mutateAsync = async (id: Id<'mailAccounts'> | string) => {
+    setIsPending(true);
+    try {
+      return await fn({ accountId: id as Id<'mailAccounts'> });
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return {
+    mutate: (id: Id<'mailAccounts'> | string) => {
+      void mutateAsync(id);
     },
-  });
+    mutateAsync,
+    isPending,
+    isLoading: isPending,
+  };
 }

@@ -1,43 +1,73 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { useState } from 'react';
+import { useQuery, useMutation, useConvexAuth } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 
 interface TrackingExclusion {
   id: string;
   emailAddress: string;
   reason: string | null;
-  createdAt: string;
+  createdAt: number;
+}
+
+function shape(e: any): TrackingExclusion {
+  return {
+    id: e._id ?? e.id,
+    emailAddress: e.emailAddress,
+    reason: e.reason ?? null,
+    createdAt: e._creationTime ?? e.createdAt,
+  };
 }
 
 export function useTrackingExclusions() {
-  return useQuery({
-    queryKey: ['tracking-exclusions'],
-    queryFn: () => api.get<{ data: TrackingExclusion[] }>('/settings/tracking-exclusions'),
-    select: (res) => res.data,
-  });
+  const { isAuthenticated } = useConvexAuth();
+  const data = useQuery(api.trackingExclusions.list, isAuthenticated ? {} : 'skip');
+  return {
+    data: data ? data.map(shape) : undefined,
+    isLoading: data === undefined,
+  };
 }
 
 export function useAddTrackingExclusion() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (payload: { emailAddress: string; reason?: string }) =>
-      api.post('/settings/tracking-exclusions', payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tracking-exclusions'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-    },
-  });
+  const fn = useMutation(api.trackingExclusions.add);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (
+    args: { emailAddress: string; reason?: string },
+    opts?: { onSuccess?: (data: any) => void; onError?: (err: unknown) => void },
+  ) => {
+    setIsPending(true);
+    try {
+      const result = await fn(args);
+      opts?.onSuccess?.(result);
+      return result;
+    } catch (err) {
+      opts?.onError?.(err);
+      throw err;
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
 export function useDeleteTrackingExclusion() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (id: string) =>
-      api.delete(`/settings/tracking-exclusions/${id}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['tracking-exclusions'] });
-      queryClient.invalidateQueries({ queryKey: ['dashboard'] });
-    },
-  });
+  const fn = useMutation(api.trackingExclusions.remove);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (
+    id: string,
+    opts?: { onSuccess?: (data: any) => void; onError?: (err: unknown) => void },
+  ) => {
+    setIsPending(true);
+    try {
+      const result = await fn({ id: id as Id<'trackingExclusions'> });
+      opts?.onSuccess?.(result);
+      return result;
+    } catch (err) {
+      opts?.onError?.(err);
+      throw err;
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }

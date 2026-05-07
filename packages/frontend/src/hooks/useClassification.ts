@@ -1,5 +1,7 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { useState } from 'react';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 
 interface Classification {
   category: string;
@@ -10,38 +12,67 @@ interface Classification {
 }
 
 export function useClassification(emailId: string | undefined) {
-  return useQuery({
-    queryKey: ['classification', emailId],
-    queryFn: () => api.get<{ data: Classification }>(`/emails/${emailId}/classification`),
-    select: (res) => res.data,
-    enabled: !!emailId,
-  });
+  const data = useQuery(
+    api.classifications.getClassification,
+    emailId ? { emailId: emailId as Id<'emails'> } : 'skip',
+  );
+  const shaped: Classification | undefined = data
+    ? {
+        category: (data as { category: string }).category,
+        confidence: (data as { confidence: number }).confidence,
+        urgency: (data as { urgency?: string }).urgency ?? 'normal',
+        summary: (data as { summary?: string | null }).summary ?? null,
+        manualOverride:
+          (data as { manualOverride?: boolean }).manualOverride ?? false,
+      }
+    : undefined;
+  return {
+    data: shaped,
+    isLoading: emailId ? data === undefined : false,
+  };
 }
 
 export function useOverrideClassification() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: ({ emailId, category }: { emailId: string; category: string }) =>
-      api.patch(`/emails/${emailId}/classification`, { category }),
-    onSuccess: (_, vars) => {
-      queryClient.invalidateQueries({ queryKey: ['classification', vars.emailId] });
-      queryClient.invalidateQueries({ queryKey: ['threads'] });
-    },
-  });
+  const fn = useMutation(api.classifications.overrideClassification);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async ({
+    emailId,
+    category,
+  }: {
+    emailId: string;
+    category: string;
+  }) => {
+    setIsPending(true);
+    try {
+      return await fn({
+        emailId: emailId as Id<'emails'>,
+        category,
+      });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
 export function useClassifyEmail() {
-  return useMutation({
-    mutationFn: (emailId: string) => api.post(`/emails/${emailId}/classify`),
-  });
+  const fn = useMutation(api.classifications.classifyEmail);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (emailId: string) => {
+    setIsPending(true);
+    try {
+      return await fn({ emailId: emailId as Id<'emails'> });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
 export function useCategories() {
-  return useQuery({
-    queryKey: ['categories'],
-    queryFn: () => api.get<{ data: { id: string; label: string; color: string }[] }>('/classifications/categories'),
-    select: (res) => res.data,
-    staleTime: Infinity,
-  });
+  const data = useQuery(api.classifications.listCategories, {});
+  return {
+    data: data as { id: string; label: string; color: string }[] | undefined,
+    isLoading: data === undefined,
+  };
 }

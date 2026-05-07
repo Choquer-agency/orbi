@@ -1,5 +1,7 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { useState } from 'react';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 
 interface DashboardMetrics {
   averageMinutes: number;
@@ -40,40 +42,145 @@ interface PendingComment {
   thread: { id: string; subject: string };
 }
 
+// ─── Metrics ──────────────────────────────────────────────────
+
 export function useDashboardMetrics() {
-  return useQuery({
-    queryKey: ['dashboard', 'metrics'],
-    queryFn: () => api.get<DashboardMetrics>('/dashboard/metrics'),
-    staleTime: 5 * 60 * 1000,
-  });
+  const data = useQuery(api.dashboard.metrics, {});
+  return {
+    data: data as DashboardMetrics | undefined,
+    isLoading: data === undefined,
+  };
 }
 
+// ─── Needs Reply ──────────────────────────────────────────────
+
 export function useNeedsReply() {
-  return useQuery({
-    queryKey: ['dashboard', 'needs-reply'],
-    queryFn: () => api.get<{ data: NeedsReplyItem[] }>('/dashboard/needs-reply'),
-  });
+  const data = useQuery(api.dashboard.needsReply, {});
+  const shaped = data
+    ? (data as Array<{
+        contactEmail: string;
+        contactName: string | null;
+        threadId: string;
+        threadSubject: string;
+        waitingHours: number;
+        lastMessageAt: number;
+      }>).map((r): NeedsReplyItem => ({
+        contactEmail: r.contactEmail,
+        contactName: r.contactName,
+        threadId: r.threadId,
+        threadSubject: r.threadSubject,
+        waitingHours: r.waitingHours,
+        lastMessageAt: new Date(r.lastMessageAt).toISOString(),
+      }))
+    : undefined;
+  return {
+    data: shaped ? { data: shaped } : undefined,
+    isLoading: data === undefined,
+  };
+}
+
+// ─── Tasks ────────────────────────────────────────────────────
+
+function shapeTask(t: {
+  _id: string;
+  threadId: string;
+  description: string;
+  contactEmail?: string | null;
+  contactName?: string | null;
+  taskType: Task['taskType'];
+  deadline?: number | null;
+  status: Task['status'];
+  resolvedAt?: number | null;
+  resolvedBy?: string | null;
+  _creationTime: number;
+  thread?: { subject: string } | null;
+}): Task {
+  return {
+    id: t._id,
+    threadId: t.threadId,
+    description: t.description,
+    contactEmail: t.contactEmail ?? null,
+    contactName: t.contactName ?? null,
+    taskType: t.taskType,
+    deadline: t.deadline ? new Date(t.deadline).toISOString() : null,
+    status: t.status,
+    resolvedAt: t.resolvedAt ? new Date(t.resolvedAt).toISOString() : null,
+    resolvedBy: t.resolvedBy ?? null,
+    createdAt: new Date(t._creationTime).toISOString(),
+    thread: { subject: t.thread?.subject ?? '' },
+  };
 }
 
 export function useDashboardTasks(status: 'open' | 'done' | 'all' = 'open') {
-  return useQuery({
-    queryKey: ['dashboard', 'tasks', status],
-    queryFn: () => api.get<{ data: Task[]; total: number; hasMore: boolean }>(`/dashboard/tasks?status=${status}`),
-  });
+  const result = useQuery(api.dashboard.taskList, { status });
+  const shaped = result
+    ? {
+        data: (result.data as Array<Parameters<typeof shapeTask>[0]>).map(
+          shapeTask,
+        ),
+        total: result.total,
+        hasMore: result.hasMore,
+      }
+    : undefined;
+  return {
+    data: shaped,
+    isLoading: result === undefined,
+  };
 }
 
 export function useToggleTask() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, status }: { id: string; status: 'DONE' | 'OPEN' }) =>
-      api.patch(`/dashboard/tasks/${id}`, { status }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['dashboard', 'tasks'] }),
-  });
+  const fn = useMutation(api.tasks.markDone);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async ({
+    id,
+    status,
+  }: {
+    id: string;
+    status: 'DONE' | 'OPEN';
+  }) => {
+    setIsPending(true);
+    try {
+      return await fn({
+        id: id as Id<'tasks'>,
+        status,
+      });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
+// ─── Pending Comments ─────────────────────────────────────────
+
 export function usePendingComments() {
-  return useQuery({
-    queryKey: ['dashboard', 'pending-comments'],
-    queryFn: () => api.get<{ data: PendingComment[] }>('/dashboard/pending-comments'),
-  });
+  const data = useQuery(api.dashboard.pendingComments, {});
+  const shaped = data
+    ? (data as Array<{
+        _id: string;
+        bodyText: string;
+        bodyHtml: string;
+        _creationTime: number;
+        author: { id: string; name: string | null; avatarUrl: string | null } | null;
+        thread: { id: string; subject: string } | null;
+      }>).map((c): PendingComment => ({
+        id: c._id,
+        bodyText: c.bodyText,
+        bodyHtml: c.bodyHtml,
+        createdAt: new Date(c._creationTime).toISOString(),
+        author: {
+          id: c.author?.id ?? '',
+          name: c.author?.name ?? '',
+          avatarUrl: c.author?.avatarUrl ?? null,
+        },
+        thread: {
+          id: c.thread?.id ?? '',
+          subject: c.thread?.subject ?? '',
+        },
+      }))
+    : undefined;
+  return {
+    data: shaped ? { data: shaped } : undefined,
+    isLoading: data === undefined,
+  };
 }

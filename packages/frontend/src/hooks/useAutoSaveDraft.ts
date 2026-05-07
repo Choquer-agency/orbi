@@ -1,12 +1,19 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { useSaveDraft, useDeleteDraft } from './useDrafts';
+import type { Id } from '../../../../convex/_generated/dataModel';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drop-in replacement — same public API as before. Internally now backed by
+// Convex mutations via useSaveDraft / useDeleteDraft (those are themselves
+// thin wrappers around api.drafts.create / api.drafts.update / api.drafts.discard).
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface AutoSaveOptions {
-  accountId: string;
-  threadId?: string;
+  accountId: Id<'mailAccounts'> | string;
+  threadId?: Id<'threads'> | string;
   mode: 'compose' | 'reply' | 'forward';
-  parentEmailId?: string;
-  existingDraftId?: string;
+  parentEmailId?: Id<'emails'> | string;
+  existingDraftId?: Id<'emails'> | string;
   enabled: boolean;
 }
 
@@ -20,8 +27,12 @@ interface DraftFields {
 export function useAutoSaveDraft(options: AutoSaveOptions) {
   const { accountId, threadId, mode, parentEmailId, existingDraftId, enabled } = options;
 
-  const draftIdRef = useRef<string | null>(existingDraftId ?? null);
-  const [draftId, setDraftId] = useState<string | null>(existingDraftId ?? null);
+  const draftIdRef = useRef<string | null>(
+    existingDraftId ? String(existingDraftId) : null,
+  );
+  const [draftId, setDraftId] = useState<string | null>(
+    existingDraftId ? String(existingDraftId) : null,
+  );
   const [isSaving, setIsSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const saveVersionRef = useRef(0);
@@ -35,7 +46,8 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
       if (!enabled || !accountId) return;
 
       // Skip if nothing meaningful to save
-      const hasContent = (fields.bodyText?.trim() || '') !== '' ||
+      const hasContent =
+        (fields.bodyText?.trim() || '') !== '' ||
         (fields.subject?.trim() || '') !== '' ||
         (fields.toAddresses?.length ?? 0) > 0;
       if (!hasContent) return;
@@ -56,9 +68,15 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
 
         // Only update state if this is still the latest save
         if (version === saveVersionRef.current) {
-          if (!draftIdRef.current && result?.data?.id) {
-            draftIdRef.current = result.data.id;
-            setDraftId(result.data.id);
+          // `create` returns { data: { id, threadId } }; `update` returns { data: <doc> }.
+          // Only set draftId on first creation (when ref was empty).
+          if (!draftIdRef.current) {
+            const created = (result as { data?: { id?: string } } | undefined)?.data;
+            const newId = created?.id ? String(created.id) : null;
+            if (newId) {
+              draftIdRef.current = newId;
+              setDraftId(newId);
+            }
           }
           setLastSavedAt(new Date());
         }
@@ -90,7 +108,7 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
     return () => {
       const id = draftIdRef.current;
       const fields = lastFieldsRef.current;
-      if (id && (!fields?.bodyText?.trim())) {
+      if (id && !fields?.bodyText?.trim()) {
         // Fire-and-forget delete of empty draft
         deleteDraftMutation.mutate(id);
       }

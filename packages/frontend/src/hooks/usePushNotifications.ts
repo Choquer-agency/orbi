@@ -1,27 +1,32 @@
 import { useEffect, useRef } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import { useAuthStore } from '../stores/authStore';
+import { useConvexAuth, useMutation, useConvex } from 'convex/react';
 import { useUiStore } from '../stores/uiStore';
 import { isNative } from '../lib/platform';
-import { api } from '../lib/api';
+import { api } from '../../../../convex/_generated/api';
 
 /**
  * Manages iOS push notification lifecycle:
  * - Requests permission and registers with APNs
- * - Sends device token to backend for push delivery
+ * - Sends device token to Convex for push delivery
  * - Handles notification taps (deep links to threads, background actions)
  * - Suppresses foreground notifications (socket handler shows toasts)
  * - Unregisters on logout
  */
 export function usePushNotifications() {
-  const token = useAuthStore((s) => s.token);
-  const queryClient = useQueryClient();
+  const { isAuthenticated } = useConvexAuth();
+  const registerDevice = useMutation(api.devices.register);
+  const unregisterAllDevices = useMutation(api.devices.unregisterAll);
+  // Used by notification action handlers (mark-read, archive, snooze, accept).
+  const convex = useConvex();
+  const updateThread = useMutation(api.threads.update);
+  const markNotificationRead = useMutation(api.notifications.markRead);
+  const acceptHandoff = useMutation(api.handoffs.accept);
   const registeredRef = useRef(false);
   const deviceTokenRef = useRef<string | null>(null);
 
   // Register for push when authenticated on native
   useEffect(() => {
-    if (!isNative() || !token || registeredRef.current) return;
+    if (!isNative() || !isAuthenticated || registeredRef.current) return;
 
     let cleanup: (() => void) | undefined;
 
@@ -47,7 +52,7 @@ export function usePushNotifications() {
           async (regToken) => {
             deviceTokenRef.current = regToken.value;
             try {
-              await api.post('/devices/register', {
+              await registerDevice({
                 token: regToken.value,
                 platform: 'IOS',
                 sandbox: import.meta.env.DEV,
@@ -69,11 +74,11 @@ export function usePushNotifications() {
         );
 
         // Foreground notification — suppress (socket already shows toast).
-        // Just invalidate queries so badge/counts stay fresh.
+        // Convex queries auto-invalidate, so no manual cache busting needed.
         const fgListener = await PushNotifications.addListener(
           'pushNotificationReceived',
           () => {
-            queryClient.invalidateQueries({ queryKey: ['notifications', 'unread-count'] });
+            // Convex subscriptions update automatically.
           },
         );
 
@@ -81,7 +86,11 @@ export function usePushNotifications() {
         const tapListener = await PushNotifications.addListener(
           'pushNotificationActionPerformed',
           (action) => {
-            handleNotificationAction(action.actionId, action.notification.data);
+            handleNotificationAction(
+              action.actionId,
+              action.notification.data,
+              { updateThread, markNotificationRead, acceptHandoff },
+            );
           },
         );
 
@@ -97,23 +106,26 @@ export function usePushNotifications() {
     })();
 
     return () => cleanup?.();
-  }, [token, queryClient]);
+  }, [isAuthenticated, registerDevice, updateThread, markNotificationRead, acceptHandoff]);
 
   // Unregister all device tokens on logout
   useEffect(() => {
-    if (token || !isNative()) return;
+    if (isAuthenticated || !isNative()) return;
 
-    // Token became null = user logged out
+    // Auth flipped to false = user logged out
     (async () => {
       try {
-        await api.delete('/devices/unregister-all');
+        await unregisterAllDevices({});
       } catch {
         // Best effort — user is already logged out
       }
       registeredRef.current = false;
       deviceTokenRef.current = null;
     })();
-  }, [token]);
+  }, [isAuthenticated, unregisterAllDevices]);
+
+  // `convex` reference suppresses unused-var if needed in future.
+  void convex;
 
   // Badge clearing is handled natively in AppDelegate.applicationDidBecomeActive
   // which sets UIApplication.shared.applicationIconBadgeNumber = 0 on foreground.
@@ -121,9 +133,17 @@ export function usePushNotifications() {
 
 /**
  * Handle notification action — either default tap or a specific action button.
- * Maps action IDs to navigation and API calls.
+ * Maps action IDs to navigation and Convex mutations.
  */
-function handleNotificationAction(actionId: string, data: Record<string, any>) {
+function handleNotificationAction(
+  actionId: string,
+  data: Record<string, any>,
+  mutations: {
+    updateThread: (args: any) => Promise<any>;
+    markNotificationRead: (args: any) => Promise<any>;
+    acceptHandoff: (args: any) => Promise<any>;
+  },
+) {
   const { setSelectedFolder, setSelectedThread, setMobileActiveView } = useUiStore.getState();
 
   const threadId = data?.threadId;
@@ -152,29 +172,39 @@ function handleNotificationAction(actionId: string, data: Record<string, any>) {
 
     case 'ARCHIVE_ACTION':
       if (threadId) {
-        api.patch(`/threads/${threadId}`, { isArchived: true }).catch(console.error);
+        mutations
+          .updateThread({ id: threadId, isArchived: true })
+          .catch(console.error);
       }
       break;
 
     case 'MARK_READ_ACTION':
       if (threadId) {
-        api.patch(`/threads/${threadId}`, { isRead: true }).catch(console.error);
+        mutations
+          .updateThread({ id: threadId, isRead: true })
+          .catch(console.error);
       }
       if (data?.notificationId) {
-        api.patch(`/notifications/${data.notificationId}/read`, {}).catch(console.error);
+        mutations
+          .markNotificationRead({ id: data.notificationId })
+          .catch(console.error);
       }
       break;
 
     case 'ACCEPT_ACTION':
       if (data?.handoffId) {
-        api.post(`/handoffs/${data.handoffId}/accept`).catch(console.error);
+        mutations
+          .acceptHandoff({ id: data.handoffId })
+          .catch(console.error);
       }
       break;
 
     case 'SNOOZE_1H_ACTION':
       if (threadId) {
-        const until = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-        api.patch(`/threads/${threadId}`, { snoozedUntil: until }).catch(console.error);
+        const until = Date.now() + 60 * 60 * 1000;
+        mutations
+          .updateThread({ id: threadId, snoozedUntil: until })
+          .catch(console.error);
       }
       break;
   }

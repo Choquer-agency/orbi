@@ -4,16 +4,21 @@
   "workspaces": [
     "packages/*"
   ],
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.40.1",
+    "@auth/core": "0.37.0",
+    "@convex-dev/auth": "^0.0.83",
+    "@parse/node-apn": "^8.0.0",
+    "convex": "^1.37.0"
+  },
   "scripts": {
-    "dev:web": "concurrently \"npm run dev -w packages/backend\" \"npm run dev -w packages/frontend\"",
-    "dev:electron": "concurrently \"npm run dev -w packages/backend\" \"npm run dev -w packages/electron\"",
-    "build": "npm run build -w packages/shared && npm run build -w packages/backend && npm run build -w packages/frontend",
-    "db:migrate": "npx prisma migrate dev --schema=prisma/schema.prisma",
-    "db:generate": "npx prisma generate --schema=prisma/schema.prisma",
-    "db:seed": "npx tsx prisma/seed.ts",
-    "db:studio": "npx prisma studio --schema=prisma/schema.prisma",
+    "dev": "concurrently \"npx convex dev\" \"npm run dev -w packages/frontend\"",
+    "dev:electron": "concurrently \"npx convex dev\" \"npm run dev -w packages/electron\"",
+    "convex:dev": "npx convex dev",
+    "convex:deploy": "npx convex deploy",
+    "build": "npm run build -w packages/shared && npm run build -w packages/frontend",
     "lint": "eslint packages/*/src --ext .ts,.tsx",
-    "dev:ios": "concurrently \"npm run dev -w packages/backend\" \"npm run dev -w packages/frontend -- --host\"",
+    "dev:ios": "concurrently \"npx convex dev\" \"npm run dev -w packages/frontend -- --host\"",
     "build:ios": "npm run build -w packages/shared && cd packages/frontend && npx vite build --mode ios",
     "sync:ios": "npm run build:ios && cd packages/ios && npx cap sync ios",
     "open:ios": "cd packages/ios && npx cap open ios",
@@ -29,7 +34,6 @@
     "@typescript-eslint/parser": "^8.24.0",
     "@typescript-eslint/eslint-plugin": "^8.24.0",
     "prettier": "^3.5.3",
-    "prisma": "^6.5.0",
     "tsx": "^4.19.3"
   }
 }

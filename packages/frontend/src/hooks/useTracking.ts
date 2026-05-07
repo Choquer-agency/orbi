@@ -1,5 +1,8 @@
-import { useQuery } from '@tanstack/react-query';
-import { api } from '../lib/api';
+// Tracking is read-only metadata for sent emails (open + click records).
+// Agent B owns convex/emails.ts and convex/tracking/* — at the time of
+// this rewrite, no public Convex query exposes tracking-by-email yet.
+// We keep the hook signature stable so consumers (e.g. TrackingInfo) stay
+// drop-in compatible; once a query lands, swap the body for a `useQuery`.
 
 interface EmailOpen {
   id: string;
@@ -32,13 +35,11 @@ interface TrackingData {
 }
 
 export function useTracking(emailId: string | undefined) {
-  return useQuery({
-    queryKey: ['tracking', emailId],
-    queryFn: () => api.get<{ data: TrackingData }>(`/emails/${emailId}/tracking`),
-    select: (res) => res.data,
-    enabled: !!emailId,
-    retry: false,
-    refetchInterval: 60_000,
-    refetchIntervalInBackground: false,
-  });
+  // Stable shape: undefined until a Convex query is added by Agent B.
+  // Consumers tolerate `data === undefined` already.
+  void emailId;
+  return {
+    data: undefined as TrackingData | undefined,
+    isLoading: false,
+  };
 }

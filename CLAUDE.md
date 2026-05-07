@@ -4,71 +4,77 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Orbi Mail is a desktop-first internal agency email client built as an npm workspaces monorepo with four packages: `backend`, `frontend`, `electron`, and `shared`.
+Orbi Mail is a desktop-first internal agency email client built as an npm workspaces monorepo. Backend is fully on Convex (no separate server); frontend is React + Vite, packaged for Mac via Electron and for iOS via Capacitor.
+
+## Packages
+- `packages/frontend/` — React 19 + Vite + Tailwind UI (port 5173 in dev)
+- `packages/electron/` — Electron 35 desktop shell (Mac DMG via Forge)
+- `packages/ios/` — Capacitor iOS shell
+- `packages/shared/` — TypeScript types shared across packages
+- `convex/` — Convex backend (queries, mutations, actions, crons, HTTP endpoints, schema)
 
 ## Commands
 
 ### Development
 ```bash
-npm run dev:web          # Start backend (port 3001) + frontend (port 5173) concurrently
-npm run dev:electron     # Start backend + Electron shell (primary dev mode)
+npm run dev              # Convex dev watcher + frontend (port 5173)
+npm run dev:electron     # Convex dev + Electron shell
+npm run dev:ios          # Convex dev + frontend with --host (for device testing)
 ```
 
-### Prerequisites (macOS Homebrew)
+### Convex
 ```bash
-brew services start postgresql@16
-brew services start redis
+npx convex dev           # Watch + push changes to dev deployment
+npx convex deploy        # Push to production deployment
+npx convex env list      # List env vars on the current deployment
+npx convex env set X y   # Set an env var on the current deployment
+npx convex dashboard     # Open the Convex dashboard
 ```
 
-### Database
+### Build & Package
 ```bash
-npm run db:generate      # Regenerate Prisma client after schema changes
-npm run db:migrate       # Create and apply a new migration
-npm run db:seed          # Seed with test data (admin@orbi.agency / orbi2024)
-npm run db:studio        # Open Prisma Studio GUI
+npm run build               # Build shared + frontend
+npm run package:mac:arm64   # Build Mac .dmg (Apple Silicon)
+npm run build:ios           # Build the iOS frontend bundle for Capacitor sync
+npm run sync:ios            # Build + sync into Xcode workspace
 ```
 
-### Build & Lint
+### Lint
 ```bash
-npm run build            # Build shared → backend → frontend (order matters)
-npm run lint             # ESLint across all packages
+npm run lint
 ```
 
 ## Architecture
 
-### Backend (`packages/backend/`) — Fastify 5 on port 3001
+### Convex backend (`convex/`)
 
-- **Entry**: `src/index.ts` builds the app, starts the server, then starts BullMQ workers.
-- **App assembly**: `src/app.ts` registers plugins (Prisma, Redis) and all route modules.
-- **Plugins** (`src/plugins/`): Fastify plugins that decorate the instance — `app.prisma` (PrismaClient) and `app.redis` (IORedis). Access these via the Fastify instance in route handlers.
-- **Auth**: JWT-based. `src/middleware/authenticate.ts` is a `preHandler` hook — routes call `{ preHandler: [authenticate] }`. JWT payload contains `{ userId, email, role }`, accessed via `request.user`.
-- **Env config**: `src/config/env.ts` loads `.env` from the repo root (not from `packages/backend/`) using Zod validation. All env vars accessed via the `env` export.
-- **Route pattern**: Each route file is a Fastify plugin registered with a prefix (e.g., `/api/threads`). Routes use `app.prisma` for DB access.
-- **BullMQ workers** (`src/workers/`): Background jobs for email sync, send, classify, follow-up, scheduled send. Queue connection config is in `src/queues/connection.ts` — uses parsed URL components (not a shared IORedis instance) to avoid version conflicts with BullMQ's bundled ioredis.
-- **AI services** (`src/services/ai/`): Claude-powered assistants for chat, drafting, classification, meeting detection, follow-ups. `thread-context.ts` and `style-context.ts` are shared context builders used across AI features. AI chat uses SSE streaming via `POST /api/ai/chat/stream`.
+- **Schema** at `convex/schema.ts`. Auth tables come from `@convex-dev/auth/server` (`...authTables`); `users` is extended with `role`, `displayName`, `avatarUrl`. Mailbox accounts (Gmail/Microsoft) live in `mailAccounts` (renamed from Prisma's `Account` to avoid colliding with Convex Auth's `accounts`).
+- **Auth** uses Convex Auth with the `Password` provider. Login/sign-up via `useAuthActions().signIn("password", { ..., flow })`. Mailbox OAuth (connect Gmail/Microsoft for reading mail) is a separate flow in `convex/oauth/*` — not login OAuth.
+- **Function organization**: one file per domain (e.g., `convex/threads.ts`, `convex/emails.ts`, `convex/signatures.ts`). AI functions live under `convex/ai/`. OAuth flows under `convex/oauth/`. Email sync workers under `convex/sync/`. APNs delivery under `convex/push/`. Tracking endpoints under `convex/tracking/`.
+- **Node runtime**: any file using Anthropic SDK or other Node-only packages starts with `"use node";`. Convex disallows queries/mutations in node-runtime files — those go in a sibling `*Data.ts` (V8 runtime) file. Pattern: `convex/ai/chat.ts` (action, "use node") + `convex/ai/chatData.ts` (queries/mutations, V8).
+- **Auth helper**: every protected query/mutation/action calls `await requireUser(ctx)` from `convex/lib/auth.ts`.
+- **HTTP endpoints** (`convex/http.ts`): wires Convex Auth's routes plus AI chat streaming, OAuth callbacks (Gmail/Microsoft), tracking pixel, link-click redirect.
+- **Crons** (`convex/crons.ts`): Gmail incremental sync (1 min), Microsoft incremental sync (1 min), scheduled-send dispatch (1 min), follow-up scan (1 hr).
+- **Scheduler** (`ctx.scheduler.runAfter` / `runAt`): used for the 10s undo-send window, scheduled email sends, snooze unsnooze, follow-up draft generation, push delivery fan-out, sync chunk continuation.
 
-### Frontend (`packages/frontend/`) — React 19 + Vite on port 5173
+### Frontend (`packages/frontend/`) — React 19 + Vite
 
-- **State management**: Zustand stores in `src/stores/` — `authStore` (persisted to localStorage), `uiStore`, `aiChatStore`, `undoSendStore`.
-- **API client**: `src/lib/api.ts` — singleton `ApiClient` class with typed methods (`get`, `post`, `patch`, `put`, `delete`). Auto-injects JWT from auth store. Auto-logout on 401.
-- **Data fetching**: TanStack React Query hooks in `src/hooks/` — one hook file per domain (e.g., `useThreads.ts`, `useContacts.ts`). These wrap the API client with caching and invalidation.
-- **Vite proxy**: Dev server proxies `/api` and `/socket.io` to the backend at port 3001, so the frontend uses relative paths (no hardcoded backend URL).
+- **State**: Zustand stores in `src/stores/` for UI-only state (`authStore`, `uiStore`, `aiChatStore`, `undoSendStore`).
+- **Data**: `useQuery` / `useMutation` / `useAction` from `convex/react`, called via `import { api } from "../../../../convex/_generated/api"`. Queries are reactive — no manual cache invalidation. Hooks in `src/hooks/` keep `{ data, isLoading }` return shape for backward compat with components.
+- **Auth**: wraps app in `<ConvexAuthProvider>` from `@convex-dev/auth/react` (in `main.tsx`). Use `useAuthActions()` for sign-in/out, `useConvexAuth()` for `{ isAuthenticated, isLoading }`, `useAuthToken()` for the bearer token (used for the AI chat streaming endpoint).
+- **Streaming AI chat**: HTTP SSE to `${VITE_CONVEX_SITE_URL}/ai/chat/stream` with `Authorization: Bearer <token>`.
 - **Path alias**: `@/` maps to `packages/frontend/src/`.
-- **Styling**: Tailwind CSS 4 via `@tailwindcss/vite` plugin. UI primitives from Radix UI. Rich text editing with TipTap.
+- **Env vars**: `VITE_CONVEX_URL` (queries WebSocket) and `VITE_CONVEX_SITE_URL` (HTTP actions). Values are in `.env.local` (gitignored) and `.env.electron` (for packaged builds).
 
-### Shared (`packages/shared/`) — TypeScript types shared between packages
+### Electron (`packages/electron/`)
 
-### Electron (`packages/electron/`) — Electron 35 shell via Electron Forge
+Thin shell pointing at the bundled frontend. CSP allows `convex.cloud` and `convex.site`. No local backend spawning.
 
-### Database — PostgreSQL 16 + Prisma 6
+## Key patterns
 
-- Schema at `prisma/schema.prisma` (repo root, not inside a package).
-- Local dev: user `orbi`, database `orbi_mail`, password `orbi_dev`.
-- 25+ models covering email, threads, AI classification, tracking, handoffs, scheduled send, contacts, snippets, and more.
-
-## Key Patterns
-
-- **Route auth**: All protected routes use `{ preHandler: [authenticate] }` and access the user via `request.user.userId`.
-- **AI model**: Uses `claude-sonnet-4-6` via `@anthropic-ai/sdk`. AI services use tool_use for structured outputs (generate_draft, summarize_thread, etc.).
-- **Real-time**: Socket.io for live notifications and updates, proxied through Vite in dev.
-- **Background jobs**: BullMQ queues with Redis. Workers are started/stopped with the server lifecycle in `src/index.ts`.
+- **Fan-out for relations**: Convex has no `include`. Replace `prisma.x.findMany({ include: { y } })` with `Promise.all(ids.map(id => ctx.db.get(id)))`.
+- **Compound indexes**: every multi-field query uses an index defined in `schema.ts`. Equality fields first, range last. Never use `.filter()` on hot paths.
+- **AI model**: `claude-sonnet-4-6` for chat/draft/follow-up; `claude-haiku-4-5-20251001` for the email classifier. Tool_use schemas (`generate_draft`, `summarize_thread`, `extract_action_items`, `search_emails`, `lookup_contact`, `get_priority_inbox`, `get_tasks_and_deadlines`, `extract_tasks`, `resolve_tasks`) are preserved verbatim from the Fastify version.
+- **Real-time**: Convex queries are reactive by default — no Socket.io. Mutations write data; subscribed `useQuery` re-renders automatically.
+- **File uploads**: `generateUploadUrl` mutation → frontend POSTs file directly to Convex storage → metadata mutation stores the resulting `storageId: v.id("_storage")` on the attachment doc.
+- **Action retries**: Convex actions are at-most-once. Email send / sync paths use status-doc + scheduler reschedule patterns instead of automatic retries.

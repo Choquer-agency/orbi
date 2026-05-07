@@ -1,5 +1,7 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { useState, useEffect, useRef } from 'react';
+import { useQuery, useMutation, useAction } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 
 // ─── Types ───────────────────────────────────────────────────
 
@@ -28,62 +30,127 @@ interface TriageFeedbackPayload {
 // ─── Settings ────────────────────────────────────────────────
 
 export function useTriageSettings() {
-  return useQuery({
-    queryKey: ['triage', 'settings'],
-    queryFn: () => api.get<{ data: TriageSettings }>('/triage/settings'),
-    select: (res) => res.data,
-  });
+  const data = useQuery(api.triage.getSettings, {});
+  const shaped: TriageSettings | undefined = data
+    ? {
+        autoSortEnabled:
+          (data as { autoSortEnabled?: boolean }).autoSortEnabled ?? false,
+        confidenceThreshold:
+          (data as { confidenceThreshold?: number }).confidenceThreshold ??
+          0.85,
+      }
+    : undefined;
+  return { data: shaped, isLoading: data === undefined };
 }
 
 export function useUpdateTriageSettings() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (settings: Partial<TriageSettings>) =>
-      api.put('/triage/settings', settings),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['triage', 'settings'] });
-      queryClient.invalidateQueries({ queryKey: ['threads'] });
-    },
-  });
+  const fn = useMutation(api.triage.updateSettings);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (settings: Partial<TriageSettings>) => {
+    setIsPending(true);
+    try {
+      return await fn(settings);
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
-// ─── Suggestion ──────────────────────────────────────────────
+// ─── Suggestion (action — wrapped to act like a cached query) ──
+
+const suggestionCache = new Map<
+  string,
+  { value: TriageSuggestion; timestamp: number }
+>();
+const SUGGESTION_TTL = 5 * 60 * 1000;
 
 export function useTriageSuggestion(threadId: string | null) {
-  return useQuery({
-    queryKey: ['triage', 'suggestion', threadId],
-    queryFn: () => api.get<{ data: TriageSuggestion }>(`/triage/suggestion/${threadId}`),
-    select: (res) => res.data,
-    enabled: !!threadId,
-    staleTime: 5 * 60 * 1000, // cache for 5 min
-  });
+  const fn = useAction(api.triage.getSuggestion);
+  const [data, setData] = useState<TriageSuggestion | undefined>(undefined);
+  const [isLoading, setIsLoading] = useState(false);
+  const lastThreadId = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!threadId) {
+      setData(undefined);
+      setIsLoading(false);
+      lastThreadId.current = null;
+      return;
+    }
+
+    if (lastThreadId.current === threadId) return;
+    lastThreadId.current = threadId;
+
+    const cached = suggestionCache.get(threadId);
+    if (cached && Date.now() - cached.timestamp < SUGGESTION_TTL) {
+      setData(cached.value);
+      setIsLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoading(true);
+    fn({ threadId: threadId as Id<'threads'> })
+      .then((result) => {
+        if (cancelled) return;
+        const shaped = result as TriageSuggestion;
+        suggestionCache.set(threadId, {
+          value: shaped,
+          timestamp: Date.now(),
+        });
+        setData(shaped);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setData(undefined);
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [threadId, fn]);
+
+  return { data, isLoading };
 }
 
 // ─── Feedback ────────────────────────────────────────────────
 
 export function useTriageFeedback() {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: (payload: TriageFeedbackPayload) =>
-      api.post('/triage/feedback', payload),
-    onSuccess: (_, vars) => {
-      queryClient.invalidateQueries({ queryKey: ['triage', 'suggestion', vars.threadId] });
-      queryClient.invalidateQueries({ queryKey: ['threads'] });
-      queryClient.invalidateQueries({ queryKey: ['triage', 'stats'] });
-    },
-  });
+  const fn = useMutation(api.triage.submitFeedback);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (payload: TriageFeedbackPayload) => {
+    setIsPending(true);
+    try {
+      return await fn({
+        emailId: payload.emailId
+          ? (payload.emailId as Id<'emails'>)
+          : undefined,
+        threadId: payload.threadId
+          ? (payload.threadId as Id<'threads'>)
+          : undefined,
+        suggestedCategory: payload.suggestedCategory,
+        finalCategory: payload.finalCategory,
+        wasConfirmed: payload.wasConfirmed,
+      });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
 // ─── Stats ───────────────────────────────────────────────────
 
 export function useTriageStats() {
-  return useQuery({
-    queryKey: ['triage', 'stats'],
-    queryFn: () => api.get<{ data: { feedbackCount: number } }>('/triage/stats'),
-    select: (res) => res.data,
-  });
+  const data = useQuery(api.triage.getStats, {});
+  return {
+    data: data as { feedbackCount: number } | undefined,
+    isLoading: data === undefined,
+  };
 }
 
 // ─── Feedback List ──────────────────────────────────────────
@@ -99,52 +166,90 @@ export interface TriageFeedbackRecord {
 }
 
 export function useTriageFeedbackList(page: number = 1) {
-  return useQuery({
-    queryKey: ['triage', 'feedback', page],
-    queryFn: () =>
-      api.get<{
-        data: TriageFeedbackRecord[];
-        meta: { total: number; page: number; limit: number; totalPages: number };
-      }>(`/triage/feedback?page=${page}&limit=20`),
-  });
+  const result = useQuery(api.triage.listFeedback, { page, limit: 20 });
+  const shaped = result
+    ? {
+        data: (result.data as Array<{
+          _id: string;
+          senderAddress: string;
+          subjectSnippet: string;
+          suggestedCategory: string;
+          finalCategory: string;
+          wasConfirmed: boolean;
+          _creationTime: number;
+        }>).map((r) => ({
+          id: r._id,
+          senderAddress: r.senderAddress,
+          subjectSnippet: r.subjectSnippet,
+          suggestedCategory: r.suggestedCategory,
+          finalCategory: r.finalCategory,
+          wasConfirmed: r.wasConfirmed,
+          createdAt: new Date(r._creationTime).toISOString(),
+        })),
+        meta: result.meta,
+      }
+    : undefined;
+  return {
+    data: shaped,
+    isLoading: result === undefined,
+  };
 }
 
 export function useUpdateTriageFeedback() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, finalCategory }: { id: string; finalCategory: string }) =>
-      api.patch(`/triage/feedback/${id}`, { finalCategory }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['triage', 'feedback'] });
-      queryClient.invalidateQueries({ queryKey: ['triage', 'stats'] });
-    },
-  });
+  const fn = useMutation(api.triage.updateFeedback);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async ({
+    id,
+    finalCategory,
+  }: {
+    id: string;
+    finalCategory: string;
+  }) => {
+    setIsPending(true);
+    try {
+      return await fn({
+        id: id as Id<'triageFeedback'>,
+        finalCategory,
+      });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
 export function useDeleteTriageFeedback() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api.delete(`/triage/feedback/${id}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['triage', 'feedback'] });
-      queryClient.invalidateQueries({ queryKey: ['triage', 'stats'] });
-    },
-  });
+  const fn = useMutation(api.triage.deleteFeedback);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (id: string) => {
+    setIsPending(true);
+    try {
+      return await fn({ id: id as Id<'triageFeedback'> });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
 export function useCreateManualTriageRule() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: { senderAddress: string; finalCategory: string }) =>
-      api.post('/triage/feedback', {
+  const fn = useMutation(api.triage.submitFeedback);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (payload: {
+    senderAddress: string;
+    finalCategory: string;
+  }) => {
+    setIsPending(true);
+    try {
+      return await fn({
         suggestedCategory: '',
         finalCategory: payload.finalCategory,
         wasConfirmed: true,
         senderAddress: payload.senderAddress,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['triage', 'feedback'] });
-      queryClient.invalidateQueries({ queryKey: ['triage', 'stats'] });
-    },
-  });
+      });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }

@@ -176,7 +176,10 @@ if (!gotTheLock) {
 
 function installContentSecurityPolicy() {
   if (isDev) return;
-  const apiOrigin = process.env.ORBI_API_ORIGIN || 'https://api.orbimail.com';
+  // Convex deployment URLs: .convex.cloud for WebSocket queries, .convex.site for HTTP actions.
+  const convexCloud = process.env.CONVEX_URL || 'https://careful-warbler-543.convex.cloud';
+  const convexSite = process.env.CONVEX_SITE_URL || 'https://careful-warbler-543.convex.site';
+  const cloudHost = convexCloud.replace(/^https?:\/\//, '');
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
       responseHeaders: {
@@ -184,7 +187,7 @@ function installContentSecurityPolicy() {
         'Content-Security-Policy': [
           [
             "default-src 'self'",
-            `connect-src 'self' ${apiOrigin} wss://${apiOrigin.replace(/^https?:\/\//, '')}`,
+            `connect-src 'self' ${convexCloud} ${convexSite} wss://${cloudHost}`,
             "img-src 'self' data: blob: https:",
             "style-src 'self' 'unsafe-inline'",
             "script-src 'self'",

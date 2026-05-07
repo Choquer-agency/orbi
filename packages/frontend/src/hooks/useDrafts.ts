@@ -1,78 +1,130 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { useState } from 'react';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Drop-in TanStack Query → Convex replacement.
+//
+// Public surface preserved:
+//   useSaveDraft()   — { mutate, mutateAsync, isPending }
+//   useDeleteDraft() — { mutate, mutateAsync, isPending }
+//   useSendDraft()   — { mutate, mutateAsync, isPending }
+//   useDraftCount()  — { data, isLoading }
+// ─────────────────────────────────────────────────────────────────────────────
 
 interface SaveDraftParams {
-  id?: string;
-  accountId: string;
-  threadId?: string;
+  id?: Id<'emails'> | string;
+  accountId: Id<'mailAccounts'> | string;
+  threadId?: Id<'threads'> | string;
   subject?: string;
   bodyHtml?: string;
   bodyText?: string;
   toAddresses?: { email: string; name?: string }[];
   mode: 'compose' | 'reply' | 'forward';
-  parentEmailId?: string;
+  parentEmailId?: Id<'emails'> | string;
 }
 
 export function useSaveDraft() {
-  const queryClient = useQueryClient();
+  const createFn = useMutation(api.drafts.create);
+  const updateFn = useMutation(api.drafts.update);
+  const [isPending, setIsPending] = useState(false);
 
-  return useMutation({
-    mutationFn: async (params: SaveDraftParams) => {
+  const mutateAsync = async (params: SaveDraftParams) => {
+    setIsPending(true);
+    try {
       if (params.id) {
-        // Update existing draft
-        return api.patch<{ data: any }>(`/drafts/${params.id}`, {
+        return await updateFn({
+          draftId: params.id as Id<'emails'>,
           subject: params.subject,
           bodyHtml: params.bodyHtml,
           bodyText: params.bodyText,
           toAddresses: params.toAddresses,
         });
       }
-      // Create new draft
-      return api.post<{ data: { id: string; threadId: string } }>('/drafts', {
-        accountId: params.accountId,
-        threadId: params.threadId,
+      return await createFn({
+        accountId: params.accountId as Id<'mailAccounts'>,
+        threadId: params.threadId as Id<'threads'> | undefined,
         subject: params.subject,
         bodyHtml: params.bodyHtml,
         bodyText: params.bodyText,
         toAddresses: params.toAddresses,
         mode: params.mode,
-        parentEmailId: params.parentEmailId,
+        parentEmailId: params.parentEmailId as Id<'emails'> | undefined,
       });
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return {
+    mutate: (params: SaveDraftParams) => {
+      void mutateAsync(params);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['draft-count'] });
-    },
-  });
+    mutateAsync,
+    isPending,
+    isLoading: isPending,
+  };
 }
 
 export function useDeleteDraft() {
-  const queryClient = useQueryClient();
+  const fn = useMutation(api.drafts.discard);
+  const [isPending, setIsPending] = useState(false);
 
-  return useMutation({
-    mutationFn: (draftId: string) => api.delete(`/drafts/${draftId}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['threads'] });
-      queryClient.invalidateQueries({ queryKey: ['draft-count'] });
+  const mutateAsync = async (draftId: Id<'emails'> | string) => {
+    setIsPending(true);
+    try {
+      return await fn({ draftId: draftId as Id<'emails'> });
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return {
+    mutate: (draftId: Id<'emails'> | string) => {
+      void mutateAsync(draftId);
     },
-  });
+    mutateAsync,
+    isPending,
+    isLoading: isPending,
+  };
 }
 
 export function useSendDraft() {
-  const queryClient = useQueryClient();
+  const fn = useMutation(api.drafts.sendDraft);
+  const [isPending, setIsPending] = useState(false);
 
-  return useMutation({
-    mutationFn: ({ draftId, undoWindowSeconds }: { draftId: string; undoWindowSeconds?: number }) =>
-      api.post<{ data: any }>(`/drafts/${draftId}/send`, { undoWindowSeconds }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['threads'] });
-      queryClient.invalidateQueries({ queryKey: ['draft-count'] });
+  const mutateAsync = async (args: {
+    draftId: Id<'emails'> | string;
+    undoWindowSeconds?: number;
+  }) => {
+    setIsPending(true);
+    try {
+      // The Convex `sendDraft` mutation owns the undo window (10s) — the
+      // `undoWindowSeconds` arg is preserved on the public surface but
+      // currently ignored server-side. Plumb it through if/when needed.
+      return await fn({ draftId: args.draftId as Id<'emails'> });
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  return {
+    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
+      void mutateAsync(args);
     },
-  });
+    mutateAsync,
+    isPending,
+    isLoading: isPending,
+  };
 }
 
 export function useDraftCount() {
-  return useQuery({
-    queryKey: ['draft-count'],
-    queryFn: () => api.get<{ data: { count: number } }>('/drafts/count'),
-  });
+  const result = useQuery(api.drafts.count, {});
+  return {
+    data: result,
+    isLoading: result === undefined,
+    isError: false,
+    error: undefined,
+  };
 }

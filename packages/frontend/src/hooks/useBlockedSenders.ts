@@ -1,39 +1,75 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { useState } from 'react';
+import { useQuery, useMutation, useConvexAuth } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 
 export interface BlockedSender {
   id: string;
   emailAddress: string | null;
   domain: string | null;
   reason: string | null;
-  createdAt: string;
+  createdAt: number;
+}
+
+function shape(b: any): BlockedSender {
+  return {
+    id: b._id ?? b.id,
+    emailAddress: b.emailAddress ?? null,
+    domain: b.domain ?? null,
+    reason: b.reason ?? null,
+    createdAt: b._creationTime ?? b.createdAt,
+  };
 }
 
 export function useBlockedSenders() {
-  return useQuery({
-    queryKey: ['blocked-senders'],
-    queryFn: () => api.get<{ data: BlockedSender[] }>('/blocked-senders'),
-    select: (res) => res.data,
-  });
+  const { isAuthenticated } = useConvexAuth();
+  const data = useQuery(api.blockedSenders.list, isAuthenticated ? {} : 'skip');
+  return {
+    data: data ? data.map(shape) : undefined,
+    isLoading: data === undefined,
+  };
 }
 
 export function useBlockSender() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: { emailAddress?: string; domain?: string; reason?: string }) =>
-      api.post('/blocked-senders', payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['blocked-senders'] });
-    },
-  });
+  const fn = useMutation(api.blockedSenders.add);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (
+    args: { emailAddress?: string; domain?: string; reason?: string },
+    opts?: { onSuccess?: (data: any) => void; onError?: (err: unknown) => void },
+  ) => {
+    setIsPending(true);
+    try {
+      const result = await fn(args);
+      opts?.onSuccess?.(result);
+      return result;
+    } catch (err) {
+      opts?.onError?.(err);
+      throw err;
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
 export function useUnblockSender() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api.delete(`/blocked-senders/${id}`),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['blocked-senders'] });
-    },
-  });
+  const fn = useMutation(api.blockedSenders.remove);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (
+    id: string,
+    opts?: { onSuccess?: (data: any) => void; onError?: (err: unknown) => void },
+  ) => {
+    setIsPending(true);
+    try {
+      const result = await fn({ id: id as Id<'blockedSenders'> });
+      opts?.onSuccess?.(result);
+      return result;
+    } catch (err) {
+      opts?.onError?.(err);
+      throw err;
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }

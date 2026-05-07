@@ -1,139 +1,51 @@
-import { isWeb } from './platform';
+// ─────────────────────────────────────────────────────────────────────────────
+// DEPRECATED — JWT/Fastify HTTP client.
+//
+// The backend has been replaced by Convex (queries + mutations + actions).
+// New code MUST use `useQuery` / `useMutation` from `convex/react` with the
+// generated `api` from `convex/_generated/api`.
+//
+// This file is kept as a stub so files that still reference `api.get/post/...`
+// continue to type-check during the migration. Each method throws at runtime.
+// Phase 5+ agents will delete every remaining import; this file goes away
+// once the last consumer is migrated.
+// ─────────────────────────────────────────────────────────────────────────────
 
-function getApiBase(): string {
-  if (!isWeb()) {
-    return import.meta.env.VITE_API_URL || 'https://api.orbimail.com/api';
-  }
-  return '/api';
-}
+const STUB_MESSAGE =
+  'lib/api.ts is deprecated. Use Convex hooks (useQuery / useMutation) from convex/react instead.';
 
-const API_BASE = getApiBase();
-
-class ApiClient {
-  private token: string | null = null;
-  private onUnauthorized: (() => void) | null = null;
-
-  setToken(token: string | null) {
-    this.token = token;
-  }
-
-  setOnUnauthorized(callback: () => void) {
-    this.onUnauthorized = callback;
+class ApiClientStub {
+  setToken(_token: string | null) {
+    /* no-op — Convex Auth manages session */
   }
 
-  private getHeaders(json = false): HeadersInit {
-    const headers: HeadersInit = {};
-    if (json) headers['Content-Type'] = 'application/json';
-    if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-    return headers;
+  setOnUnauthorized(_callback: () => void) {
+    /* no-op */
   }
 
-  private async fetchWithTimeout(
-    url: string,
-    options: RequestInit,
-    timeoutMs = 30000,
-  ): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetch(url, { ...options, signal: controller.signal });
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        throw new Error('Request timed out. Please check your connection and try again.');
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
+  async get<T>(_path: string): Promise<T> {
+    throw new Error(STUB_MESSAGE);
   }
 
-  private handleErrorResponse(res: Response) {
-    if (res.status === 401) {
-      this.onUnauthorized?.();
-      throw new Error('Session expired. Please log in again.');
-    }
+  async post<T>(_path: string, _body?: unknown): Promise<T> {
+    throw new Error(STUB_MESSAGE);
   }
 
-  async get<T>(path: string): Promise<T> {
-    const res = await this.fetchWithTimeout(`${API_BASE}${path}`, {
-      headers: this.getHeaders(),
-    });
-    if (!res.ok) {
-      this.handleErrorResponse(res);
-      const error = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(error.message || `Request failed: ${res.status}`);
-    }
-    return res.json();
+  async patch<T>(_path: string, _body: unknown): Promise<T> {
+    throw new Error(STUB_MESSAGE);
   }
 
-  async post<T>(path: string, body?: unknown): Promise<T> {
-    const res = await this.fetchWithTimeout(`${API_BASE}${path}`, {
-      method: 'POST',
-      headers: this.getHeaders(!!body),
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) {
-      this.handleErrorResponse(res);
-      const error = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(error.message || `Request failed: ${res.status}`);
-    }
-    return res.json();
+  async put<T>(_path: string, _body?: unknown): Promise<T> {
+    throw new Error(STUB_MESSAGE);
   }
 
-  async patch<T>(path: string, body: unknown): Promise<T> {
-    const res = await this.fetchWithTimeout(`${API_BASE}${path}`, {
-      method: 'PATCH',
-      headers: this.getHeaders(true),
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      this.handleErrorResponse(res);
-      const error = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(error.message || `Request failed: ${res.status}`);
-    }
-    return res.json();
+  async postFormData<T>(_path: string, _formData: FormData): Promise<T> {
+    throw new Error(STUB_MESSAGE);
   }
 
-  async put<T>(path: string, body?: unknown): Promise<T> {
-    const res = await this.fetchWithTimeout(`${API_BASE}${path}`, {
-      method: 'PUT',
-      headers: this.getHeaders(!!body),
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) {
-      this.handleErrorResponse(res);
-      const error = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(error.message || `Request failed: ${res.status}`);
-    }
-    return res.json();
-  }
-
-  async postFormData<T>(path: string, formData: FormData): Promise<T> {
-    const res = await this.fetchWithTimeout(`${API_BASE}${path}`, {
-      method: 'POST',
-      headers: this.getHeaders(false),
-      body: formData,
-    });
-    if (!res.ok) {
-      this.handleErrorResponse(res);
-      const error = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(error.message || `Request failed: ${res.status}`);
-    }
-    return res.json();
-  }
-
-  async delete<T>(path: string): Promise<T> {
-    const res = await this.fetchWithTimeout(`${API_BASE}${path}`, {
-      method: 'DELETE',
-      headers: this.getHeaders(),
-    });
-    if (!res.ok) {
-      this.handleErrorResponse(res);
-      const error = await res.json().catch(() => ({ message: res.statusText }));
-      throw new Error(error.message || `Request failed: ${res.status}`);
-    }
-    return res.json();
+  async delete<T>(_path: string): Promise<T> {
+    throw new Error(STUB_MESSAGE);
   }
 }
 
-export const api = new ApiClient();
+export const api = new ApiClientStub();

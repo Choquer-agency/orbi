@@ -3,7 +3,10 @@ import { PersistQueryClientProvider } from '@tanstack/react-query-persist-client
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { useEffect } from 'react';
 import toast, { Toaster } from 'react-hot-toast';
-import { useAuthStore } from './stores/authStore';
+import { useConvexAuth, useQuery } from 'convex/react';
+import { useAuthActions } from '@convex-dev/auth/react';
+import { api as convexApi } from '../../../convex/_generated/api';
+import { useAuthStore, registerConvexSignOut } from './stores/authStore';
 import { useUiStore } from './stores/uiStore';
 import { LoginPage } from './components/auth/LoginPage';
 import { AppLayout } from './components/layout/AppLayout';
@@ -67,8 +70,54 @@ const persistOptions = {
   },
 };
 
+function AuthBridge() {
+  // Mirror Convex Auth state into the legacy Zustand authStore so
+  // synchronous consumers (Header, Compose, EmailViewer, …) keep working.
+  const { isAuthenticated, isLoading } = useConvexAuth();
+  const { signOut } = useAuthActions();
+  const me = useQuery(convexApi.users.me, isAuthenticated ? {} : 'skip');
+  const setUser = useAuthStore((s) => s.setUser);
+  const setIsAuthenticated = useAuthStore((s) => s.setIsAuthenticated);
+
+  useEffect(() => {
+    registerConvexSignOut(signOut as () => Promise<void>);
+    return () => registerConvexSignOut(null);
+  }, [signOut]);
+
+  useEffect(() => {
+    if (isLoading) return;
+    setIsAuthenticated(isAuthenticated);
+    if (!isAuthenticated) {
+      setUser(null);
+    }
+  }, [isLoading, isAuthenticated, setIsAuthenticated, setUser]);
+
+  useEffect(() => {
+    if (!me) return;
+    setUser({
+      id: String(me.id),
+      email: me.email ?? '',
+      name: me.name ?? me.displayName ?? me.email ?? '',
+      role: me.role ?? 'AGENT',
+      avatarUrl: me.avatarUrl ?? null,
+    });
+  }, [me, setUser]);
+
+  return null;
+}
+
 function AuthenticatedApp() {
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const { isAuthenticated, isLoading } = useConvexAuth();
+
+  if (isLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center ai-gradient-bg">
+        <div className="rounded-lg bg-white/70 px-6 py-3 text-sm text-text-secondary backdrop-blur-sm">
+          Loading…
+        </div>
+      </div>
+    );
+  }
 
   if (!isAuthenticated) {
     return <LoginPage />;
@@ -128,6 +177,7 @@ function CapacitorDeepLinkHandler() {
 function App() {
   return (
     <PersistQueryClientProvider client={queryClient} persistOptions={persistOptions}>
+      <AuthBridge />
       <BrowserRouter>
         <CapacitorDeepLinkHandler />
         <Routes>

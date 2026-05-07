@@ -1,27 +1,45 @@
 import { useEffect, useCallback } from 'react';
+import { useConvex } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 import { useAiChatStore } from '../stores/aiChatStore';
-import { useAuthStore } from '../stores/authStore';
-import type { AiChatMessage, ConversationSummary } from '../stores/aiChatStore';
+import type {
+  AiChatMessage,
+  ConversationSummary,
+  SearchResultData,
+  PriorityItem,
+  TaskItem,
+  ContactResult,
+  DraftData,
+} from '../stores/aiChatStore';
 
 export function useConversations() {
+  const convex = useConvex();
   const { conversations, setConversations, loadConversation } =
     useAiChatStore();
 
   const fetchConversations = useCallback(async () => {
-    const token = useAuthStore.getState().token;
-    if (!token) return;
-
     try {
-      const res = await fetch('/api/ai/conversations', {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return;
-      const json = await res.json();
-      setConversations(json.data as ConversationSummary[]);
+      const result = (await convex.query(
+        api.ai.chatHistory.listConversations,
+        {},
+      )) as Array<{
+        id: Id<'chatConversations'>;
+        title: string;
+        createdAt: number;
+        updatedAt: number;
+      }>;
+      const summaries: ConversationSummary[] = result.map((c) => ({
+        id: c.id,
+        title: c.title,
+        createdAt: new Date(c.createdAt).toISOString(),
+        updatedAt: new Date(c.updatedAt).toISOString(),
+      }));
+      setConversations(summaries);
     } catch {
-      // Silent fail
+      // Silent fail — anonymous / unauth users
     }
-  }, [setConversations]);
+  }, [convex, setConversations]);
 
   useEffect(() => {
     fetchConversations();
@@ -29,49 +47,48 @@ export function useConversations() {
 
   const loadChat = useCallback(
     async (conversationId: string) => {
-      const token = useAuthStore.getState().token;
-      if (!token) return;
-
       try {
-        const res = await fetch(`/api/ai/conversations/${conversationId}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!res.ok) return;
-        const json = await res.json();
-
-        const messages: AiChatMessage[] = json.data.messages.map(
-          (m: {
+        const result = (await convex.query(api.ai.chatHistory.getConversation, {
+          id: conversationId as Id<'chatConversations'>,
+        })) as {
+          id: Id<'chatConversations'>;
+          title: string;
+          messages: Array<{
             id: string;
             role: string;
             content: string;
-            createdAt: string;
-            draft?: unknown;
-            searchResults?: unknown;
-            threadReferences?: unknown;
-            priorityInbox?: unknown;
-            tasks?: unknown;
-            contactResults?: unknown;
-          }) => ({
-            id: m.id,
-            role: m.role as 'user' | 'assistant',
-            content: m.content,
-            draft: m.draft || undefined,
-            searchResults: m.searchResults || undefined,
-            threadReferences: m.threadReferences || undefined,
-            priorityInbox: m.priorityInbox || undefined,
-            tasks: m.tasks || undefined,
-            contactResults: m.contactResults || undefined,
-            isStreaming: false,
-            createdAt: m.createdAt,
-          }),
-        );
+            createdAt: number;
+            draft?: DraftData;
+            searchResults?: SearchResultData[];
+            threadReferences?: { id: string; subject: string }[];
+            priorityInbox?: PriorityItem[];
+            tasks?: TaskItem[];
+            contactResults?: ContactResult[];
+          }>;
+          createdAt: number;
+          updatedAt: number;
+        };
+
+        const messages: AiChatMessage[] = result.messages.map((m) => ({
+          id: m.id,
+          role: m.role as 'user' | 'assistant',
+          content: m.content,
+          draft: m.draft,
+          searchResults: m.searchResults,
+          threadReferences: m.threadReferences,
+          priorityInbox: m.priorityInbox,
+          tasks: m.tasks,
+          contactResults: m.contactResults,
+          isStreaming: false,
+          createdAt: new Date(m.createdAt).toISOString(),
+        }));
 
         loadConversation(messages, conversationId);
       } catch {
         // Silent fail
       }
     },
-    [loadConversation],
+    [convex, loadConversation],
   );
 
   return {

@@ -1,7 +1,10 @@
 import { useCallback } from 'react';
+import { useConvex } from 'convex/react';
+import { useAuthToken } from '@convex-dev/auth/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 import { useAiChatStore } from '../stores/aiChatStore';
 import { useUiStore } from '../stores/uiStore';
-import { useAuthStore } from '../stores/authStore';
 import type {
   SearchResultData,
   PriorityItem,
@@ -10,53 +13,15 @@ import type {
   AiChatMessage,
 } from '../stores/aiChatStore';
 
-// ── Server sync helpers (fire-and-forget, non-blocking) ──
-
-function getAuthHeaders(): Record<string, string> {
-  const token = useAuthStore.getState().token;
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
-}
-
-async function ensureConversation(): Promise<string> {
-  const store = useAiChatStore.getState();
-  if (store.conversationId) return store.conversationId;
-
-  try {
-    const res = await fetch('/api/ai/conversations', {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({}),
-    });
-    if (!res.ok) return '';
-    const json = await res.json();
-    const id = json.data.id as string;
-    useAiChatStore.getState().setConversationId(id);
-    return id;
-  } catch {
-    return '';
-  }
-}
-
-function saveMessageToServer(
-  conversationId: string,
-  msg: { role: string; content: string; metadata?: Record<string, unknown> },
-) {
-  if (!conversationId) return;
-  fetch(`/api/ai/conversations/${conversationId}/messages`, {
-    method: 'POST',
-    headers: getAuthHeaders(),
-    body: JSON.stringify(msg),
-  }).catch(() => {
-    // Silent fail — local state is the source of truth
-  });
-}
+// Convex HTTP actions live on `.site`, not `.cloud`. The streaming AI chat
+// endpoint is registered in convex/ai/http.ts at POST /ai/chat/stream.
+const STREAM_URL = `${import.meta.env.VITE_CONVEX_SITE_URL}/ai/chat/stream`;
 
 // ── Main hook ──
 
 export function useAiChat() {
+  const convex = useConvex();
+  const token = useAuthToken();
   const { messages, isLoading, addUserMessage, setLoading, clearChat } =
     useAiChatStore();
 
@@ -64,22 +29,44 @@ export function useAiChat() {
     async (content: string, scope: 'thread' | 'all' = 'thread') => {
       if (!content.trim() || isLoading) return;
 
-      const { selectedThreadId, selectedAccountId, composeContext } = useUiStore.getState();
-      const token = useAuthStore.getState().token;
+      const { selectedThreadId, selectedAccountId, composeContext } =
+        useUiStore.getState();
 
       addUserMessage(content.trim());
       setLoading(true);
 
-      // Ensure we have a conversation for persistence
-      const conversationId = await ensureConversation();
+      // Ensure we have a conversation for persistence (server-side dedup
+      // creates one if missing).
+      let conversationId = useAiChatStore.getState().conversationId;
+      if (!conversationId) {
+        try {
+          const result = (await convex.mutation(
+            api.ai.chatHistory.createConversation,
+            {},
+          )) as { id: Id<'chatConversations'> };
+          conversationId = result.id;
+          useAiChatStore.getState().setConversationId(conversationId);
+        } catch {
+          // Streaming will still work without a conversationId; persistence
+          // simply won't happen.
+        }
+      }
 
-      // Persist user message to server
-      saveMessageToServer(conversationId, {
-        role: 'user',
-        content: content.trim(),
-      });
+      // Persist user message to server (fire-and-forget).
+      if (conversationId) {
+        convex
+          .mutation(api.ai.chatHistory.saveMessage, {
+            conversationId: conversationId as Id<'chatConversations'>,
+            role: 'user',
+            content: content.trim(),
+          })
+          .catch(() => {
+            /* silent fail — local state is the source of truth */
+          });
+      }
 
-      // Build conversation history (last 20, role + content only)
+      // Build conversation history (last 20, role + content only, drop the
+      // freshly-added user message — it goes into the `message` field).
       const store = useAiChatStore.getState();
       const history = store.messages
         .slice(-20)
@@ -88,9 +75,10 @@ export function useAiChat() {
       const requestBody = JSON.stringify({
         message: content.trim(),
         messages: history.slice(0, -1),
-        threadId: selectedThreadId || null,
-        accountId: selectedAccountId || null,
+        threadId: selectedThreadId || undefined,
+        accountId: selectedAccountId || undefined,
         scope,
+        conversationId: conversationId || undefined,
         ...(composeContext ? { composeContext } : {}),
       });
 
@@ -102,7 +90,7 @@ export function useAiChat() {
       let streamingMsgId: string | null = null;
 
       try {
-        const response = await fetch('/api/ai/chat/stream', {
+        const response = await fetch(STREAM_URL, {
           method: 'POST',
           headers,
           body: requestBody,
@@ -154,10 +142,7 @@ export function useAiChat() {
             try {
               const event = JSON.parse(line.slice(6));
               if (event.type === 'text_delta') {
-                appendToStreamingMessage(
-                  streamingMsgId!,
-                  event.data.text,
-                );
+                appendToStreamingMessage(streamingMsgId!, event.data.text);
               } else if (event.type === 'tool_result') {
                 if (event.data.tool === 'generate_draft') {
                   draft = event.data.draft;
@@ -226,75 +211,79 @@ export function useAiChat() {
           });
         }
 
-        // Persist assistant message to server
+        // Persist assistant message to server (the server stream also persists
+        // the plain text content, but we send a follow-up with metadata).
         const finalMsg = useAiChatStore
           .getState()
           .messages.find((m) => m.id === streamingMsgId);
-        if (finalMsg) {
-          persistAssistantMessage(conversationId, finalMsg);
+        if (finalMsg && conversationId) {
+          persistAssistantMessage(convex, conversationId, finalMsg);
         }
 
         streamingMsgId = null;
       } catch {
-        if (streamingMsgId) {
-          try {
-            const response = await fetch('/api/ai/chat', {
-              method: 'POST',
-              headers,
-              body: requestBody,
-            });
+        // Fall back to non-streaming chat action.
+        try {
+          const result = (await convex.action(api.ai.chat.chat, {
+            message: content.trim(),
+            messages: history.slice(0, -1) as Array<{
+              role: 'user' | 'assistant';
+              content: string;
+            }>,
+            threadId: selectedThreadId
+              ? (selectedThreadId as Id<'threads'>)
+              : undefined,
+            accountId: selectedAccountId
+              ? (selectedAccountId as Id<'mailAccounts'>)
+              : undefined,
+            scope,
+            composeContext: composeContext ?? undefined,
+          })) as {
+            reply: string;
+            draft?: AiChatMessage['draft'];
+            searchResults?: SearchResultData[];
+            priorityInbox?: PriorityItem[];
+            tasks?: TaskItem[];
+            contactResults?: ContactResult[];
+            threadReferences?: { id: string; subject: string }[];
+          };
 
-            if (!response.ok) throw new Error('Chat failed');
-            const result = await response.json();
-
-            const { finalizeStreamingMessage } =
-              useAiChatStore.getState();
+          if (streamingMsgId) {
+            const { finalizeStreamingMessage } = useAiChatStore.getState();
             finalizeStreamingMessage(streamingMsgId, {
-              replaceContent: result.data.reply,
-              draft: result.data.draft,
-              searchResults: result.data.searchResults,
-              priorityInbox: result.data.priorityInbox,
-              tasks: result.data.tasks,
-              contactResults: result.data.contactResults,
-              threadReferences: result.data.threadReferences,
+              replaceContent: result.reply,
+              draft: result.draft,
+              searchResults: result.searchResults,
+              priorityInbox: result.priorityInbox,
+              tasks: result.tasks,
+              contactResults: result.contactResults,
+              threadReferences: result.threadReferences,
             });
-
-            // Persist fallback response
             const fallbackMsg = useAiChatStore
               .getState()
               .messages.find((m) => m.id === streamingMsgId);
-            if (fallbackMsg) {
-              persistAssistantMessage(conversationId, fallbackMsg);
+            if (fallbackMsg && conversationId) {
+              persistAssistantMessage(convex, conversationId, fallbackMsg);
             }
-          } catch {
-            const { finalizeStreamingMessage } =
-              useAiChatStore.getState();
+          } else {
+            const { addAssistantMessage } = useAiChatStore.getState();
+            addAssistantMessage(result.reply, {
+              threadReferences: result.threadReferences,
+              searchResults: result.searchResults,
+              priorityInbox: result.priorityInbox,
+              tasks: result.tasks,
+              contactResults: result.contactResults,
+              draft: result.draft,
+            });
+          }
+        } catch {
+          if (streamingMsgId) {
+            const { finalizeStreamingMessage } = useAiChatStore.getState();
             finalizeStreamingMessage(streamingMsgId, {
               replaceContent:
                 "I'm not able to process that request right now. Please check that the backend is running and try again.",
             });
-          }
-        } else {
-          try {
-            const response = await fetch('/api/ai/chat', {
-              method: 'POST',
-              headers,
-              body: requestBody,
-            });
-
-            if (!response.ok) throw new Error('Chat failed');
-            const result = await response.json();
-
-            const { addAssistantMessage } = useAiChatStore.getState();
-            addAssistantMessage(result.data.reply, {
-              threadReferences: result.data.threadReferences,
-              searchResults: result.data.searchResults,
-              priorityInbox: result.data.priorityInbox,
-              tasks: result.data.tasks,
-              contactResults: result.data.contactResults,
-              draft: result.data.draft,
-            });
-          } catch {
+          } else {
             const { addAssistantMessage } = useAiChatStore.getState();
             addAssistantMessage(
               "I'm not able to process that request right now. Please check that the backend is running and try again.",
@@ -305,7 +294,7 @@ export function useAiChat() {
         setLoading(false);
       }
     },
-    [isLoading, addUserMessage, setLoading],
+    [convex, token, isLoading, addUserMessage, setLoading],
   );
 
   return { messages, isLoading, sendMessage, clearChat };
@@ -313,7 +302,10 @@ export function useAiChat() {
 
 // ── Persistence helper ──
 
+type ConvexClient = ReturnType<typeof useConvex>;
+
 function persistAssistantMessage(
+  convex: ConvexClient,
   conversationId: string,
   msg: AiChatMessage,
 ) {
@@ -325,9 +317,14 @@ function persistAssistantMessage(
   if (msg.tasks) metadata.tasks = msg.tasks;
   if (msg.contactResults) metadata.contactResults = msg.contactResults;
 
-  saveMessageToServer(conversationId, {
-    role: 'assistant',
-    content: msg.content,
-    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-  });
+  convex
+    .mutation(api.ai.chatHistory.saveMessage, {
+      conversationId: conversationId as Id<'chatConversations'>,
+      role: 'assistant',
+      content: msg.content,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
+    })
+    .catch(() => {
+      /* silent fail */
+    });
 }

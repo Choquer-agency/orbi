@@ -1,5 +1,7 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../lib/api';
+import { useState } from 'react';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 
 interface SyncStatusData {
   historicalSyncStatus: 'IDLE' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
@@ -15,25 +17,83 @@ interface SyncStatusData {
   lastSyncAt: string | null;
 }
 
+function toIso(ts: number | string | null | undefined): string | null {
+  if (ts === null || ts === undefined) return null;
+  if (typeof ts === 'string') return ts;
+  return new Date(ts).toISOString();
+}
+
 export function useHistoricalSyncStatus(accountId: string | null) {
-  return useQuery({
-    queryKey: ['sync-status', accountId],
-    queryFn: () => api.get<{ data: SyncStatusData }>(`/accounts/${accountId}/sync-status`),
-    enabled: !!accountId,
-    refetchInterval: (query) => {
-      const status = query.state.data?.data?.historicalSyncStatus;
-      // Poll every 4s while in progress, otherwise don't auto-refetch
-      return status === 'IN_PROGRESS' ? 4000 : false;
-    },
-  });
+  const data = useQuery(
+    api.mailAccounts.getSyncStatus,
+    accountId ? { accountId: accountId as Id<'mailAccounts'> } : 'skip',
+  );
+  const shaped = data
+    ? {
+        data: {
+          historicalSyncStatus:
+            (data.historicalSyncStatus as SyncStatusData['historicalSyncStatus']) ??
+            'IDLE',
+          historicalSyncProgress: data.historicalSyncProgress
+            ? {
+                syncedThreads:
+                  // Gmail uses syncedThreads / totalThreads; Microsoft uses
+                  // syncedMessages / totalMessages — normalize for the UI.
+                  (data.historicalSyncProgress as {
+                    syncedThreads?: number;
+                    syncedMessages?: number;
+                  }).syncedThreads ??
+                  (data.historicalSyncProgress as { syncedMessages?: number })
+                    .syncedMessages ??
+                  0,
+                totalThreads:
+                  (data.historicalSyncProgress as {
+                    totalThreads?: number;
+                    totalMessages?: number;
+                  }).totalThreads ??
+                  (data.historicalSyncProgress as { totalMessages?: number })
+                    .totalMessages ??
+                  0,
+                pageToken:
+                  (data.historicalSyncProgress as { pageToken?: string })
+                    .pageToken,
+                startedAt:
+                  toIso(
+                    (data.historicalSyncProgress as { startedAt?: number | string })
+                      .startedAt ?? null,
+                  ) ?? '',
+                lastBatchAt:
+                  toIso(
+                    (data.historicalSyncProgress as {
+                      lastBatchAt?: number | string;
+                    }).lastBatchAt ?? null,
+                  ) ?? '',
+                error: (data.historicalSyncProgress as { error?: string }).error,
+              }
+            : null,
+          historicalSyncCompletedAt: toIso(
+            data.historicalSyncCompletedAt ?? null,
+          ),
+          lastSyncAt: toIso(data.lastSyncAt ?? null),
+        } satisfies SyncStatusData,
+      }
+    : undefined;
+  return {
+    data: shaped,
+    isLoading: accountId ? data === undefined : false,
+  };
 }
 
 export function useStartHistoricalSync() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (accountId: string) => api.post(`/accounts/${accountId}/historical-sync`),
-    onSuccess: (_data, accountId) => {
-      queryClient.invalidateQueries({ queryKey: ['sync-status', accountId] });
-    },
-  });
+  const fn = useMutation(api.mailAccounts.triggerHistoricalSync);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (accountId: string) => {
+    setIsPending(true);
+    try {
+      return await fn({ accountId: accountId as Id<'mailAccounts'> });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
