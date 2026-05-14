@@ -44,6 +44,8 @@ async function recordAiUsage(
   userId: Id<"users">,
   inputTokens?: number,
   outputTokens?: number,
+  requestId?: string,
+  stopReason?: string | null,
 ) {
   try {
     await ctx.runMutation(internal.ai.usageData._record, {
@@ -53,6 +55,11 @@ async function recordAiUsage(
       inputTokens,
       outputTokens,
       providerCallCount: 1,
+      requestId,
+      metadata: {
+        stopReason: stopReason ?? null,
+        truncated: stopReason === "max_tokens",
+      },
     });
   } catch {
     // Usage logging must not interrupt follow-up processing.
@@ -133,8 +140,16 @@ Return only the email body text, no subject line or signature.`,
           content: `Here is the email thread context:\n\n${threadContext}\n\nDraft a follow-up email.`,
         },
       ],
+      metadata: { user_id: String(watch.userId) },
     });
-    await recordAiUsage(ctx, watch.userId, response.usage?.input_tokens, response.usage?.output_tokens);
+    await recordAiUsage(
+      ctx,
+      watch.userId,
+      response.usage?.input_tokens,
+      response.usage?.output_tokens,
+      response.id,
+      response.stop_reason,
+    );
 
     const draft = response.content
       .filter((c: Anthropic.ContentBlock): c is Anthropic.TextBlock => c.type === "text")

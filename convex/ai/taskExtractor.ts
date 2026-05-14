@@ -47,6 +47,7 @@ async function recordAiUsage(
   inputTokens?: number,
   outputTokens?: number,
   stopReason?: string | null,
+  requestId?: string,
 ) {
   try {
     await ctx.runMutation(internal.ai.usageData._record, {
@@ -56,6 +57,7 @@ async function recordAiUsage(
       inputTokens,
       outputTokens,
       providerCallCount: 1,
+      requestId,
       metadata: {
         stopReason: stopReason ?? null,
         truncated: stopReason === "max_tokens",
@@ -147,6 +149,7 @@ Only extract real, actionable tasks — not general discussion points.`,
       ],
       tool_choice: { type: "tool", name: "extract_tasks" },
       messages: [{ role: "user", content: contextText }],
+      metadata: { user_id: String(userId) },
     });
 
     await recordAiUsage(
@@ -156,6 +159,7 @@ Only extract real, actionable tasks — not general discussion points.`,
       response.usage?.input_tokens,
       response.usage?.output_tokens,
       response.stop_reason,
+      response.id,
     );
     if (response.stop_reason === "max_tokens") {
       console.warn("[taskExtractor] extractTasks hit max_tokens; skipping to avoid persisting partial tool input");
@@ -250,6 +254,7 @@ export const checkTaskResolution = internalAction({
           content: `Open tasks:\n${taskList}\n\nEmail just sent:\n${sentEmailBody}`,
         },
       ],
+      metadata: { user_id: String(userId) },
     });
 
     await recordAiUsage(
@@ -259,6 +264,7 @@ export const checkTaskResolution = internalAction({
       response.usage?.input_tokens,
       response.usage?.output_tokens,
       response.stop_reason,
+      response.id,
     );
     if (response.stop_reason === "max_tokens") {
       console.warn("[taskExtractor] checkTaskResolution hit max_tokens; not resolving partial tool input");

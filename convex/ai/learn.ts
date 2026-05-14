@@ -75,6 +75,7 @@ export const recordEdit = action({
             content: `Original draft:\n${originalText.slice(0, 2000)}\n\nEdited version (what user actually sent):\n${editedText.slice(0, 2000)}`,
           },
         ],
+        metadata: { user_id: String(userId) },
       });
 
       try {
@@ -85,6 +86,7 @@ export const recordEdit = action({
           inputTokens: response.usage?.input_tokens,
           outputTokens: response.usage?.output_tokens,
           providerCallCount: 1,
+          requestId: response.id,
           metadata: {
             stopReason: response.stop_reason,
             truncated: response.stop_reason === "max_tokens",

@@ -40,4 +40,15 @@ crons.interval(
   {},
 );
 
+// ── AI cost alert ──────────────────────────────────────────────────────────
+// Every 15 minutes, check per-feature spend over the last hour. If any feature
+// exceeds the configured threshold an `aiCostAlerts` row is inserted (the UI
+// surfaces these as a banner; out-of-band notifications are optional).
+crons.interval(
+  "ai-cost-alert-check",
+  { minutes: 15 },
+  internal.ai.costAlerts.runCheck,
+  {},
+);
+
 export default crons;

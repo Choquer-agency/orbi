@@ -194,6 +194,8 @@ const streamChat = httpAction(async (ctx, req) => {
           system: ctxResult.systemPrompt,
           messages,
           tools: TOOLS,
+          // Tag for cost attribution in Anthropic Console.
+          metadata: { user_id: String(userId) },
         });
 
         const toolUses: Array<{
@@ -244,6 +246,7 @@ const streamChat = httpAction(async (ctx, req) => {
             inputTokens: finalMessage.usage?.input_tokens,
             outputTokens: finalMessage.usage?.output_tokens,
             providerCallCount: 1,
+            requestId: finalMessage.id,
             metadata: {
               round,
               transport: "stream",
@@ -414,6 +417,7 @@ const streamChat = httpAction(async (ctx, req) => {
               system: ctxResult.systemPrompt,
               messages,
               tools: TOOLS,
+              metadata: { user_id: String(userId) },
             });
             for await (const event of finalStream) {
               if (
@@ -436,6 +440,7 @@ const streamChat = httpAction(async (ctx, req) => {
                 inputTokens: finalStreamMessage.usage?.input_tokens,
                 outputTokens: finalStreamMessage.usage?.output_tokens,
                 providerCallCount: 1,
+                requestId: finalStreamMessage.id,
                 metadata: {
                   round,
                   final: true,

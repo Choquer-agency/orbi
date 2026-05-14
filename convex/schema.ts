@@ -453,6 +453,21 @@ export default defineSchema({
     .index("by_user_createdAt", ["userId", "createdAt"])
     .index("by_feature_createdAt", ["feature", "createdAt"]),
 
+  // Tripped by the 15-minute cost-alert cron when a feature exceeds its
+  // configured spend threshold in the last N hours. The dashboard reads
+  // unresolved alerts; admins acknowledge to clear.
+  aiCostAlerts: defineTable({
+    feature: v.string(),
+    windowHours: v.number(),
+    estimatedCostUsd: v.number(),
+    thresholdUsd: v.number(),
+    acknowledgedAt: v.optional(v.number()),
+    acknowledgedBy: v.optional(v.id("users")),
+    createdAt: v.number(),
+  })
+    .index("by_createdAt", ["createdAt"])
+    .index("by_feature_createdAt", ["feature", "createdAt"]),
+
   // ───────────────────────────────────────────────────────────────────────────
   // Open + link tracking
   // ───────────────────────────────────────────────────────────────────────────

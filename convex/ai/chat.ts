@@ -546,6 +546,7 @@ async function recordAiUsage(
   }
 }
 
+
 function processOutputTool(
   name: string,
   input: Record<string, unknown>,
@@ -699,6 +700,9 @@ export const chat = action({
         system: ctxResult.systemPrompt,
         messages,
         tools: TOOLS,
+        // Tag every Anthropic call with our internal user id so the Anthropic
+        // Console line items can be traced back to a row in `aiUsageLogs`.
+        metadata: { user_id: String(userId) },
       });
       await recordAiUsage(
         ctx as unknown as { runMutation: (...args: unknown[]) => Promise<unknown> },
@@ -708,6 +712,7 @@ export const chat = action({
           inputTokens: response.usage?.input_tokens,
           outputTokens: response.usage?.output_tokens,
           providerCallCount: 1,
+          requestId: response.id,
           metadata: {
             round,
             transport: "sync",

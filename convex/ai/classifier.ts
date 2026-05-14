@@ -188,6 +188,8 @@ async function recordAiUsage(
   feature: string,
   inputTokens?: number,
   outputTokens?: number,
+  requestId?: string,
+  stopReason?: string | null,
 ) {
   try {
     await ctx.runMutation(internal.ai.usageData._record, {
@@ -197,6 +199,11 @@ async function recordAiUsage(
       inputTokens,
       outputTokens,
       providerCallCount: 1,
+      requestId,
+      metadata: {
+        stopReason: stopReason ?? null,
+        truncated: stopReason === "max_tokens",
+      },
     });
   } catch {
     // Never fail classification because telemetry failed.
@@ -248,7 +255,15 @@ export const classifyEmail = internalAction({
       ],
     });
 
-    await recordAiUsage(ctx, undefined, "classifier", response.usage?.input_tokens, response.usage?.output_tokens);
+    await recordAiUsage(
+      ctx,
+      undefined,
+      "classifier",
+      response.usage?.input_tokens,
+      response.usage?.output_tokens,
+      response.id,
+      response.stop_reason,
+    );
 
     const text = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")
@@ -347,9 +362,18 @@ export const classifyEmailWithContext = internalAction({
           content: `Subject: ${email.subject}\nFrom: ${email.fromName || ""} <${email.fromAddress}>\nBody: ${bodyPreview}`,
         },
       ],
+      metadata: { user_id: String(userId) },
     });
 
-    await recordAiUsage(ctx, userId, "classifier", response.usage?.input_tokens, response.usage?.output_tokens);
+    await recordAiUsage(
+      ctx,
+      userId,
+      "classifier",
+      response.usage?.input_tokens,
+      response.usage?.output_tokens,
+      response.id,
+      response.stop_reason,
+    );
 
     const text = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === "text")

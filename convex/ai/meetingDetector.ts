@@ -77,6 +77,7 @@ export const detect = internalAction({
         inputTokens: response.usage?.input_tokens,
         outputTokens: response.usage?.output_tokens,
         providerCallCount: 1,
+        requestId: response.id,
         metadata: {
           stopReason: response.stop_reason,
           truncated: response.stop_reason === "max_tokens",

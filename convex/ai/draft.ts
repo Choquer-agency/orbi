@@ -69,6 +69,7 @@ export const generateDraft = action({
       max_tokens: DRAFT_MAX_TOKENS,
       system: systemParts.join(""),
       messages: [{ role: "user", content: userMessage }],
+      metadata: { user_id: String(userId) },
     });
 
     try {
@@ -79,6 +80,11 @@ export const generateDraft = action({
         inputTokens: response.usage?.input_tokens,
         outputTokens: response.usage?.output_tokens,
         providerCallCount: 1,
+        requestId: response.id,
+        metadata: {
+          stopReason: response.stop_reason,
+          truncated: response.stop_reason === "max_tokens",
+        },
       });
     } catch {
       // Usage logging should not break draft generation.
