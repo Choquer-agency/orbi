@@ -15,6 +15,7 @@ import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 
 const MODEL = "claude-haiku-4-5-20251001";
+const MEETING_MAX_TOKENS = 300;
 
 const MEETING_DETECTION_PROMPT = `Extract meeting/scheduling details from this email. Respond with JSON only, no markdown.
 
@@ -59,7 +60,7 @@ export const detect = internalAction({
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await client.messages.create({
       model: MODEL,
-      max_tokens: 300,
+      max_tokens: MEETING_MAX_TOKENS,
       system: MEETING_DETECTION_PROMPT,
       messages: [
         {
@@ -68,6 +69,22 @@ export const detect = internalAction({
         },
       ],
     });
+
+    try {
+      await ctx.runMutation(internal.ai.usageData._record, {
+        feature: "meeting_detect",
+        model: MODEL,
+        inputTokens: response.usage?.input_tokens,
+        outputTokens: response.usage?.output_tokens,
+        providerCallCount: 1,
+        metadata: {
+          stopReason: response.stop_reason,
+          truncated: response.stop_reason === "max_tokens",
+        },
+      });
+    } catch {
+      // Telemetry must never break meeting detection.
+    }
 
     const text = response.content
       .filter((c): c is Anthropic.TextBlock => c.type === "text")

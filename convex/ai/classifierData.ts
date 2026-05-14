@@ -18,11 +18,15 @@ export const _getEmailForClassification = internalQuery({
     return {
       email: {
         id: email._id,
+        accountId: email.accountId,
+        threadId: email.threadId,
         subject: email.subject,
         fromAddress: email.fromAddress,
         fromName: email.fromName,
         bodyText: email.bodyText,
         snippet: email.snippet,
+        isDraft: email.isDraft,
+        sentAt: email.sentAt,
       },
       existing,
     };

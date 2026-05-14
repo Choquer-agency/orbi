@@ -17,6 +17,7 @@ import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
 
 const MODEL = "claude-sonnet-4-6";
+const DRAFT_MAX_TOKENS = 1536;
 
 const SYSTEM_PROMPT = `You are an email assistant for a professional agency.
 Draft an email based on the user's instructions.
@@ -65,10 +66,23 @@ export const generateDraft = action({
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await client.messages.create({
       model: MODEL,
-      max_tokens: 2048,
+      max_tokens: DRAFT_MAX_TOKENS,
       system: systemParts.join(""),
       messages: [{ role: "user", content: userMessage }],
     });
+
+    try {
+      await ctx.runMutation(internal.ai.usageData._record, {
+        userId,
+        feature: "draft",
+        model: MODEL,
+        inputTokens: response.usage?.input_tokens,
+        outputTokens: response.usage?.output_tokens,
+        providerCallCount: 1,
+      });
+    } catch {
+      // Usage logging should not break draft generation.
+    }
 
     const textBlock = response.content.find((b) => b.type === "text");
     const draftHtml = textBlock && textBlock.type === "text" ? textBlock.text : "";

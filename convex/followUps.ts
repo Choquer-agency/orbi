@@ -20,6 +20,8 @@ import { requireUser } from "./lib/auth";
 // ─────────────────────────────────────────────────────────────────────────────
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_FOLLOW_UP_INTERVALS = [1, 3, 7];
+const FOLLOW_UP_SCAN_BATCH_LIMIT = 25;
 
 /** POST /api/follow-ups */
 export const create = mutation({
@@ -31,7 +33,7 @@ export const create = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
-    const intervals = args.intervals ?? [3, 7, 14];
+    const intervals = args.intervals ?? DEFAULT_FOLLOW_UP_INTERVALS;
     const nextCheckAt = Date.now() + intervals[0] * DAY_MS;
 
     const id = await ctx.db.insert("followUpWatches", {
@@ -42,6 +44,45 @@ export const create = mutation({
       intervals,
       currentStep: 0,
       nextCheckAt,
+      status: "WATCHING",
+    });
+    return await ctx.db.get(id);
+  },
+});
+
+export const _ensureWatchForEmail = internalMutation({
+  args: {
+    userId: v.id("users"),
+    threadId: v.id("threads"),
+    emailId: v.string(),
+    contactEmail: v.string(),
+    intervals: v.optional(v.array(v.number())),
+  },
+  handler: async (ctx, args) => {
+    const contactEmail = args.contactEmail.toLowerCase().trim();
+    if (!contactEmail) return null;
+
+    const existing = await ctx.db
+      .query("followUpWatches")
+      .withIndex("by_thread", (q) => q.eq("threadId", args.threadId))
+      .collect();
+    const active = existing.find(
+      (w) =>
+        w.userId === args.userId &&
+        w.contactEmail.toLowerCase() === contactEmail &&
+        w.status === "WATCHING",
+    );
+    if (active) return active;
+
+    const intervals = args.intervals ?? DEFAULT_FOLLOW_UP_INTERVALS;
+    const id = await ctx.db.insert("followUpWatches", {
+      userId: args.userId,
+      threadId: args.threadId,
+      emailId: args.emailId,
+      contactEmail,
+      intervals,
+      currentStep: 0,
+      nextCheckAt: Date.now() + intervals[0] * DAY_MS,
       status: "WATCHING",
     });
     return await ctx.db.get(id);
@@ -171,11 +212,13 @@ export const _listDueWatches = internalQuery({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();
-    // No global by_status_nextCheckAt index in schema, so scan and filter.
-    const all = await ctx.db.query("followUpWatches").collect();
-    return all.filter(
-      (w) => w.status === "WATCHING" && w.nextCheckAt <= now,
-    );
+    return await ctx.db
+      .query("followUpWatches")
+      .withIndex("by_status_nextCheckAt", (q) =>
+        q.eq("status", "WATCHING").lte("nextCheckAt", now),
+      )
+      .order("asc")
+      .take(FOLLOW_UP_SCAN_BATCH_LIMIT);
   },
 });
 
@@ -306,7 +349,18 @@ export const processFollowUpScans = internalAction({
       processed += 1;
     }
 
-    return { processed };
+    // If we filled the batch the queue may still have more due watches
+    // (e.g. after downtime). Schedule another tick in 30s so the backlog
+    // drains instead of waiting another hour.
+    if (due.length >= FOLLOW_UP_SCAN_BATCH_LIMIT) {
+      await ctx.scheduler.runAfter(
+        30_000,
+        internal.followUps.processFollowUpScans,
+        {},
+      );
+    }
+
+    return { processed, scheduledFollowUpTick: due.length >= FOLLOW_UP_SCAN_BATCH_LIMIT };
   },
 });
 

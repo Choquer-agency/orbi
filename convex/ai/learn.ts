@@ -16,7 +16,10 @@ import { internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
 
-const MODEL = "claude-sonnet-4-6";
+// Haiku is plenty for a short categorisation task. Reduces per-edit cost
+// ~10× vs Sonnet.
+const MODEL = "claude-haiku-4-5-20251001";
+const LEARN_MAX_TOKENS = 256;
 
 const CATEGORIZE_PROMPT = `You are analyzing how a user edited an AI-generated email draft. Compare the original and edited versions, then categorize the changes.
 
@@ -64,7 +67,7 @@ export const recordEdit = action({
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
       const response = await client.messages.create({
         model: MODEL,
-        max_tokens: 256,
+        max_tokens: LEARN_MAX_TOKENS,
         system: CATEGORIZE_PROMPT,
         messages: [
           {
@@ -73,6 +76,23 @@ export const recordEdit = action({
           },
         ],
       });
+
+      try {
+        await ctx.runMutation(internal.ai.usageData._record, {
+          userId: userId as Id<"users">,
+          feature: "learn",
+          model: MODEL,
+          inputTokens: response.usage?.input_tokens,
+          outputTokens: response.usage?.output_tokens,
+          providerCallCount: 1,
+          metadata: {
+            stopReason: response.stop_reason,
+            truncated: response.stop_reason === "max_tokens",
+          },
+        });
+      } catch {
+        // Usage logging must not interrupt the user-visible learn flow.
+      }
 
       const textBlock = response.content.find((b) => b.type === "text");
       if (!textBlock || textBlock.type !== "text") {

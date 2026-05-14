@@ -8,6 +8,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
+import { promisedFollowUpText } from "./lib/promiseDetector";
 import type { Doc, Id } from "./_generated/dataModel";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,6 +35,22 @@ function newLocalProviderMessageId(): string {
 
 function newLocalProviderThreadId(): string {
   return `local-thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Re-exported for backwards compatibility. The implementation lives in
+// convex/lib/promiseDetector.ts so the sync paths can share it.
+function promisedFollowUp(text: string | undefined): boolean {
+  return promisedFollowUpText(text);
+}
+
+function firstRecipientEmail(toAddresses: unknown): string | null {
+  if (Array.isArray(toAddresses)) {
+    const first = toAddresses[0] as { email?: string } | string | undefined;
+    if (typeof first === "string") return first.toLowerCase().trim();
+    if (first?.email) return first.email.toLowerCase().trim();
+  }
+  if (typeof toAddresses === "string") return toAddresses.split(",")[0]?.trim().toLowerCase() || null;
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -623,6 +640,16 @@ export const actuallySend = internalAction({
         emailId,
         providerMessageId,
       });
+
+      const contactEmail = firstRecipientEmail(email.toAddresses);
+      if (contactEmail && promisedFollowUp(email.bodyText || email.bodyHtml)) {
+        await ctx.runMutation(internal.followUps._ensureWatchForEmail, {
+          userId: account.userId,
+          threadId: email.threadId,
+          emailId: String(email._id),
+          contactEmail,
+        });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       await ctx.runMutation(internal.emails._markFailed, {

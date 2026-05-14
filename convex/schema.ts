@@ -438,6 +438,21 @@ export default defineSchema({
     metadata: v.optional(v.any()),
   }).index("by_conversation", ["conversationId"]),
 
+  aiUsageLogs: defineTable({
+    userId: v.optional(v.id("users")),
+    feature: v.string(),
+    model: v.string(),
+    inputTokens: v.number(),
+    outputTokens: v.number(),
+    providerCallCount: v.number(),
+    estimatedCostUsd: v.number(),
+    requestId: v.optional(v.string()),
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+  })
+    .index("by_user_createdAt", ["userId", "createdAt"])
+    .index("by_feature_createdAt", ["feature", "createdAt"]),
+
   // ───────────────────────────────────────────────────────────────────────────
   // Open + link tracking
   // ───────────────────────────────────────────────────────────────────────────
@@ -486,6 +501,7 @@ export default defineSchema({
     resolvedAt: v.optional(v.number()),
   })
     .index("by_user_status_nextCheckAt", ["userId", "status", "nextCheckAt"])
+    .index("by_status_nextCheckAt", ["status", "nextCheckAt"])
     .index("by_thread", ["threadId"]),
 
   followUpEvents: defineTable({

@@ -40,7 +40,42 @@ import {
 } from "./chat";
 
 const MODEL = "claude-sonnet-4-6";
+// 3 rounds is required because the system prompt instructs the model to
+// chain `search_emails -> get_thread_detail -> answer`. Two rounds drops the
+// final answer.
 const MAX_TOOL_ROUNDS = 3;
+const CHAT_MAX_TOKENS = 1536;
+// Shared budget key with the non-streaming chat path.
+const CHAT_FEATURE_KEY = "chat";
+const DAILY_CHAT_COST_LIMIT_USD = 5;
+
+async function recordAiUsage(
+  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  args: {
+    userId: Id<"users">;
+    feature: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    providerCallCount?: number;
+    requestId?: string;
+    metadata?: unknown;
+  },
+) {
+  try {
+    await ctx.runMutation(internal.ai.usageData._record, {
+      userId: args.userId,
+      feature: args.feature,
+      model: MODEL,
+      inputTokens: args.inputTokens,
+      outputTokens: args.outputTokens,
+      providerCallCount: args.providerCallCount ?? 1,
+      requestId: args.requestId,
+      metadata: args.metadata,
+    });
+  } catch {
+    // Usage logging must not interrupt streaming.
+  }
+}
 
 interface StreamBody {
   message: string;
@@ -121,6 +156,24 @@ const streamChat = httpAction(async (ctx, req) => {
         composeContext: body.composeContext,
       });
 
+      const dailyUsage = (await ctx.runQuery(internal.ai.usageData._dailyUsage, {
+        userId,
+        feature: CHAT_FEATURE_KEY,
+      })) as { estimatedCostUsd: number };
+      if (dailyUsage.estimatedCostUsd >= DAILY_CHAT_COST_LIMIT_USD) {
+        // Surface as an explicit error frame so the UI can render a banner
+        // instead of treating it like a normal assistant reply.
+        await send({
+          type: "error",
+          data: {
+            code: "daily_budget_exceeded",
+            message: "You've hit today's AI chat budget. Try again tomorrow.",
+          },
+        });
+        await send({ type: "done" });
+        return;
+      }
+
       const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
       const userMessages = [
@@ -137,7 +190,7 @@ const streamChat = httpAction(async (ctx, req) => {
         const isLastRound = round === MAX_TOOL_ROUNDS - 1;
         const stream = client.messages.stream({
           model: MODEL,
-          max_tokens: 4096,
+          max_tokens: CHAT_MAX_TOKENS,
           system: ctxResult.systemPrompt,
           messages,
           tools: TOOLS,
@@ -183,6 +236,22 @@ const streamChat = httpAction(async (ctx, req) => {
         }
 
         const finalMessage = await stream.finalMessage();
+        await recordAiUsage(
+          ctx as unknown as { runMutation: (...args: unknown[]) => Promise<unknown> },
+          {
+            userId,
+            feature: CHAT_FEATURE_KEY,
+            inputTokens: finalMessage.usage?.input_tokens,
+            outputTokens: finalMessage.usage?.output_tokens,
+            providerCallCount: 1,
+            metadata: {
+              round,
+              transport: "stream",
+              stopReason: finalMessage.stop_reason,
+              truncated: finalMessage.stop_reason === "max_tokens",
+            },
+          },
+        );
 
         if (toolUses.length === 0) {
           break;
@@ -341,7 +410,7 @@ const streamChat = httpAction(async (ctx, req) => {
           if (isLastRound) {
             const finalStream = client.messages.stream({
               model: MODEL,
-              max_tokens: 4096,
+              max_tokens: CHAT_MAX_TOKENS,
               system: ctxResult.systemPrompt,
               messages,
               tools: TOOLS,
@@ -358,6 +427,24 @@ const streamChat = httpAction(async (ctx, req) => {
                 assistantContent += event.delta.text;
               }
             }
+            const finalStreamMessage = await finalStream.finalMessage();
+            await recordAiUsage(
+              ctx as unknown as { runMutation: (...args: unknown[]) => Promise<unknown> },
+              {
+                userId,
+                feature: CHAT_FEATURE_KEY,
+                inputTokens: finalStreamMessage.usage?.input_tokens,
+                outputTokens: finalStreamMessage.usage?.output_tokens,
+                providerCallCount: 1,
+                metadata: {
+                  round,
+                  final: true,
+                  transport: "stream",
+                  stopReason: finalStreamMessage.stop_reason,
+                  truncated: finalStreamMessage.stop_reason === "max_tokens",
+                },
+              },
+            );
             break;
           }
         }

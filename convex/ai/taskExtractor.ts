@@ -20,6 +20,12 @@ import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
 
 const MODEL = "claude-sonnet-4-6";
+// Sized for the tool_use JSON payload. If Anthropic hits max_tokens mid-JSON
+// the tool_use input is silently truncated and we end up extracting zero
+// tasks. recordAiUsage logs `truncated: true` so the regression is visible in
+// telemetry.
+const EXTRACT_TASKS_MAX_TOKENS = 1536;
+const RESOLVE_TASKS_MAX_TOKENS = 768;
 
 interface ExtractedTask {
   description: string;
@@ -33,6 +39,32 @@ interface ExtractedTask {
 // Backing queries/mutations live in convex/ai/taskExtractorData.ts.
 
 // ── Actions ─────────────────────────────────────────────────────────────────
+
+async function recordAiUsage(
+  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  userId: Id<"users">,
+  feature: string,
+  inputTokens?: number,
+  outputTokens?: number,
+  stopReason?: string | null,
+) {
+  try {
+    await ctx.runMutation(internal.ai.usageData._record, {
+      userId,
+      feature,
+      model: MODEL,
+      inputTokens,
+      outputTokens,
+      providerCallCount: 1,
+      metadata: {
+        stopReason: stopReason ?? null,
+        truncated: stopReason === "max_tokens",
+      },
+    });
+  } catch {
+    // Usage logging should never break task extraction.
+  }
+}
 
 export const extractTasks = action({
   args: { threadId: v.id("threads") },
@@ -48,7 +80,7 @@ export const extractTasks = action({
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await client.messages.create({
       model: MODEL,
-      max_tokens: 2048,
+      max_tokens: EXTRACT_TASKS_MAX_TOKENS,
       system: `You extract actionable tasks from email threads. Today's date is ${new Date().toISOString().split("T")[0]}.
 
 Identify:
@@ -117,6 +149,19 @@ Only extract real, actionable tasks — not general discussion points.`,
       messages: [{ role: "user", content: contextText }],
     });
 
+    await recordAiUsage(
+      ctx,
+      userId,
+      "task_extract",
+      response.usage?.input_tokens,
+      response.usage?.output_tokens,
+      response.stop_reason,
+    );
+    if (response.stop_reason === "max_tokens") {
+      console.warn("[taskExtractor] extractTasks hit max_tokens; skipping to avoid persisting partial tool input");
+      return { created: 0, tasks: [] };
+    }
+
     const toolBlock = response.content.find((b) => b.type === "tool_use");
     if (!toolBlock || toolBlock.type !== "tool_use") {
       return { created: 0, tasks: [] };
@@ -178,7 +223,7 @@ export const checkTaskResolution = internalAction({
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await client.messages.create({
       model: MODEL,
-      max_tokens: 1024,
+      max_tokens: RESOLVE_TASKS_MAX_TOKENS,
       system:
         "You determine which tasks are fulfilled by a sent email. Return only the IDs of resolved tasks.",
       tools: [
@@ -206,6 +251,19 @@ export const checkTaskResolution = internalAction({
         },
       ],
     });
+
+    await recordAiUsage(
+      ctx,
+      userId,
+      "task_resolve",
+      response.usage?.input_tokens,
+      response.usage?.output_tokens,
+      response.stop_reason,
+    );
+    if (response.stop_reason === "max_tokens") {
+      console.warn("[taskExtractor] checkTaskResolution hit max_tokens; not resolving partial tool input");
+      return [];
+    }
 
     const toolBlock = response.content.find((b) => b.type === "tool_use");
     if (!toolBlock || toolBlock.type !== "tool_use") return [];

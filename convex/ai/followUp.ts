@@ -19,6 +19,7 @@ import { internal } from "../_generated/api";
 import type { Id } from "../_generated/dataModel";
 
 const MODEL = "claude-sonnet-4-6";
+const FOLLOW_UP_MAX_TOKENS = 350;
 
 const TONE_LABELS: Record<number, { label: string; instruction: string }> = {
   0: {
@@ -37,6 +38,26 @@ const TONE_LABELS: Record<number, { label: string; instruction: string }> = {
       "Write a final check-in. Be professional but make it clear this is the last follow-up. Suggest next steps if no reply.",
   },
 };
+
+async function recordAiUsage(
+  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  userId: Id<"users">,
+  inputTokens?: number,
+  outputTokens?: number,
+) {
+  try {
+    await ctx.runMutation(internal.ai.usageData._record, {
+      userId,
+      feature: "follow_up_draft",
+      model: MODEL,
+      inputTokens,
+      outputTokens,
+      providerCallCount: 1,
+    });
+  } catch {
+    // Usage logging must not interrupt follow-up processing.
+  }
+}
 
 // ── Public-internal action: check a single watch ────────────────────────────
 
@@ -61,6 +82,7 @@ export const checkWatch = internalAction({
       intervals: number[];
       currentStep: number;
       status: string;
+      userId: Id<"users">;
     } | null;
     if (!watch || watch.status !== "WATCHING") return null;
 
@@ -97,7 +119,7 @@ export const checkWatch = internalAction({
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await client.messages.create({
       model: MODEL,
-      max_tokens: 500,
+      max_tokens: FOLLOW_UP_MAX_TOKENS,
       system: `You are drafting a follow-up email for a professional agency.
 ${tone.instruction}
 
@@ -112,6 +134,8 @@ Return only the email body text, no subject line or signature.`,
         },
       ],
     });
+    await recordAiUsage(ctx, watch.userId, response.usage?.input_tokens, response.usage?.output_tokens);
+
     const draft = response.content
       .filter((c: Anthropic.ContentBlock): c is Anthropic.TextBlock => c.type === "text")
       .map((c) => c.text)

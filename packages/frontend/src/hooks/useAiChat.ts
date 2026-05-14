@@ -127,6 +127,8 @@ export function useAiChat() {
         let tasks: TaskItem[] | undefined;
         let contactResults: ContactResult[] | undefined;
         let hasError = false;
+        let errorMessage: string | null = null;
+        let errorCode: string | null = null;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -163,6 +165,8 @@ export function useAiChat() {
                 // Progress handled by AI's own text — no duplicate needed
               } else if (event.type === 'error') {
                 hasError = true;
+                errorCode = (event.data?.code as string) ?? null;
+                errorMessage = (event.data?.message as string) ?? null;
               }
             } catch {
               // skip malformed events
@@ -171,7 +175,19 @@ export function useAiChat() {
         }
 
         if (hasError) {
-          throw new Error('Stream reported error');
+          // Surface the daily-budget cap as a friendly inline message; do not
+          // fall back to non-streaming because the server already accounted
+          // for the user.
+          if (errorCode === 'daily_budget_exceeded' && streamingMsgId) {
+            const { finalizeStreamingMessage } = useAiChatStore.getState();
+            finalizeStreamingMessage(streamingMsgId, {
+              replaceContent:
+                errorMessage ||
+                "You've hit today's AI chat budget. Try again tomorrow.",
+            });
+            return;
+          }
+          throw new Error(errorMessage || 'Stream reported error');
         }
 
         const currentMsg = useAiChatStore
@@ -222,7 +238,24 @@ export function useAiChat() {
 
         streamingMsgId = null;
       } catch {
-        // Fall back to non-streaming chat action.
+        // Do not fall back after a stream has started: the server may already
+        // have made one or more provider calls, and retrying non-streaming can
+        // double-bill the same request. Let the user explicitly retry instead.
+        if (streamingMsgId) {
+          // Preserve any partial content already streamed; append a notice
+          // rather than replacing it so the user doesn't lose work.
+          const { finalizeStreamingMessage, messages } = useAiChatStore.getState();
+          const current = messages.find((m) => m.id === streamingMsgId);
+          const partial = (current?.content || '').trim();
+          const notice =
+            '\n\n_(Streaming was interrupted. Retry if you still need this answered.)_';
+          finalizeStreamingMessage(streamingMsgId, {
+            replaceContent: partial ? `${partial}${notice}` : notice.trim(),
+          });
+          return;
+        }
+
+        // Fall back only when streaming failed before an assistant message began.
         try {
           const result = (await convex.action(api.ai.chat.chat, {
             message: content.trim(),

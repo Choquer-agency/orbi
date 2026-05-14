@@ -23,7 +23,18 @@ import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
 
 const MODEL = "claude-sonnet-4-6";
+// 3 rounds is required because the system prompt instructs the model to
+// chain `search_emails -> get_thread_detail -> answer`. Two rounds drops the
+// final answer for that flow (the round-2 tool result never gets returned).
 const MAX_TOOL_ROUNDS = 3;
+const CHAT_MAX_TOKENS = 1536;
+const TOOL_RESULT_MAX_CHARS = 6000;
+const TOOL_RESULT_MAX_ITEMS = 8;
+// Shared budget across streaming + non-streaming chat. Both call sites must
+// log under the same feature key so a user can't double-spend by switching
+// transports.
+const CHAT_FEATURE_KEY = "chat";
+const DAILY_CHAT_COST_LIMIT_USD = 5;
 
 // ── Tool name sets ──────────────────────────────────────────────────────────
 
@@ -407,7 +418,18 @@ async function executeTool(
       });
       return {
         toolUseId: id,
-        content: JSON.stringify(results),
+        content: compactToolJson(
+          results.map((r) => ({
+            threadId: r.threadId,
+            emailId: r.emailId,
+            subject: r.subject,
+            from: r.from,
+            date: r.date,
+            snippet: r.snippet,
+            category: r.category,
+            urgency: r.urgency,
+          })),
+        ),
         sideEffects: { searchResults: results, threadReferences: uniqueRefs },
       };
     }
@@ -415,7 +437,7 @@ async function executeTool(
       const result = await ctx.runQuery(internal.ai.chatData._getThreadDetail, {
         threadId: input.thread_id as string,
       });
-      return { toolUseId: id, content: JSON.stringify(result) };
+      return { toolUseId: id, content: compactToolJson(result) };
     }
     case "lookup_contact": {
       const result = (await ctx.runQuery(
@@ -424,7 +446,7 @@ async function executeTool(
       )) as { contacts: ContactResult[] };
       return {
         toolUseId: id,
-        content: JSON.stringify(result.contacts),
+        content: compactToolJson(result.contacts),
         sideEffects: { contactResults: result.contacts },
       };
     }
@@ -435,7 +457,7 @@ async function executeTool(
       )) as { emails: PriorityItem[] };
       return {
         toolUseId: id,
-        content: JSON.stringify(result.emails),
+        content: compactToolJson(result.emails),
         sideEffects: { priorityInbox: result.emails },
       };
     }
@@ -446,7 +468,7 @@ async function executeTool(
       )) as { tasks: TaskItem[] };
       return {
         toolUseId: id,
-        content: JSON.stringify(result.tasks),
+        content: compactToolJson(result.tasks),
         sideEffects: { tasks: result.tasks },
       };
     }
@@ -461,6 +483,68 @@ async function executeTool(
 type ActionRunQuery = (...args: unknown[]) => Promise<unknown>;
 
 // ── Output tool processing ──────────────────────────────────────────────────
+
+// Compact tool output for the model. If the payload is an array, slice items
+// and append a `_truncated` marker (keeps the JSON valid). For non-array
+// payloads we fall back to a length check + best-effort string trim.
+function compactToolJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    if (value.length <= TOOL_RESULT_MAX_ITEMS) {
+      const json = JSON.stringify(value);
+      if (json.length <= TOOL_RESULT_MAX_CHARS) return json;
+      // Long even with few items — keep first N items and signal truncation.
+      const trimmed = value.slice(0, Math.max(1, Math.floor(TOOL_RESULT_MAX_ITEMS / 2)));
+      return JSON.stringify({
+        items: trimmed,
+        _truncated: true,
+        _reason: "payload_too_large",
+        _omitted: value.length - trimmed.length,
+      });
+    }
+    const trimmed = value.slice(0, TOOL_RESULT_MAX_ITEMS);
+    return JSON.stringify({
+      items: trimmed,
+      _truncated: true,
+      _reason: "too_many_items",
+      _omitted: value.length - trimmed.length,
+    });
+  }
+  const json = JSON.stringify(value);
+  if (json.length <= TOOL_RESULT_MAX_CHARS) return json;
+  return JSON.stringify({
+    _truncated: true,
+    _reason: "payload_too_large",
+    preview: json.slice(0, TOOL_RESULT_MAX_CHARS - 200),
+  });
+}
+
+async function recordAiUsage(
+  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  args: {
+    userId: Id<"users">;
+    feature: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    providerCallCount?: number;
+    requestId?: string;
+    metadata?: unknown;
+  },
+) {
+  try {
+    await ctx.runMutation(internal.ai.usageData._record, {
+      userId: args.userId,
+      feature: args.feature,
+      model: MODEL,
+      inputTokens: args.inputTokens,
+      outputTokens: args.outputTokens,
+      providerCallCount: args.providerCallCount ?? 1,
+      requestId: args.requestId,
+      metadata: args.metadata,
+    });
+  } catch {
+    // Usage logging should never break the user flow.
+  }
+}
 
 function processOutputTool(
   name: string,
@@ -571,6 +655,16 @@ export const chat = action({
       composeContext: args.composeContext,
     });
 
+    const dailyUsage = (await ctx.runQuery(internal.ai.usageData._dailyUsage, {
+      userId,
+      feature: CHAT_FEATURE_KEY,
+    })) as { estimatedCostUsd: number };
+    if (dailyUsage.estimatedCostUsd >= DAILY_CHAT_COST_LIMIT_USD) {
+      return {
+        reply: "You've hit today's AI chat budget. Try again tomorrow or raise the daily limit in the backend settings.",
+      };
+    }
+
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
     const userMessages = [
@@ -601,11 +695,27 @@ export const chat = action({
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await client.messages.create({
         model: MODEL,
-        max_tokens: 4096,
+        max_tokens: CHAT_MAX_TOKENS,
         system: ctxResult.systemPrompt,
         messages,
         tools: TOOLS,
       });
+      await recordAiUsage(
+        ctx as unknown as { runMutation: (...args: unknown[]) => Promise<unknown> },
+        {
+          userId,
+          feature: CHAT_FEATURE_KEY,
+          inputTokens: response.usage?.input_tokens,
+          outputTokens: response.usage?.output_tokens,
+          providerCallCount: 1,
+          metadata: {
+            round,
+            transport: "sync",
+            stopReason: response.stop_reason,
+            truncated: response.stop_reason === "max_tokens",
+          },
+        },
+      );
 
       const textBlocks: string[] = [];
       const toolUses: Array<{

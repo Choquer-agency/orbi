@@ -62,7 +62,9 @@ export async function buildThreadContext(
     .collect();
 
   const total = emails.length;
-  const emailTexts = emails
+  const displayedEmails = compactThreadEmails(emails);
+  const omittedCount = total - displayedEmails.length;
+  const emailTexts = displayedEmails
     .map((e, i) => {
       const dateMs = e.sentAt ?? e.receivedAt;
       const date = formatDate(dateMs);
@@ -82,12 +84,12 @@ export async function buildThreadContext(
         .filter((line) => !line.startsWith(">"))
         .join("\n")
         .trim();
-      // Truncate to 3000 chars
-      if (body.length > 3000) {
-        body = body.slice(0, 3000) + "\n... [truncated]";
+      // Truncate each email and rely on compactThreadEmails to cap message count.
+      if (body.length > 1500) {
+        body = body.slice(0, 1500) + "\n... [truncated]";
       }
 
-      let header = `--- Email ${i + 1} of ${total} ---\nFrom: ${from}\nDate: ${date}\nTo: ${to}`;
+      let header = `--- Email ${i + 1} of ${displayedEmails.length} (${total} total) ---\nFrom: ${from}\nDate: ${date}\nTo: ${to}`;
       if (cc) header += `\nCc: ${cc}`;
       if (e.hasAttachments) header += `\n[Has attachments]`;
 
@@ -95,16 +97,31 @@ export async function buildThreadContext(
     })
     .join("\n\n");
 
-  let contextText = `Thread subject: ${thread.subject}\n\nEmail thread (oldest first):\n${emailTexts}`;
+  const omissionNote = omittedCount > 0
+    ? `\n\n[${omittedCount} earlier middle email(s) omitted to control AI cost. Ask to inspect the full thread if needed.]`
+    : "";
+  // Cap the email block only. The internal-team comments + privacy notice are
+  // appended afterwards so the cap can't silently strip the "never quote
+  // internal comments" instruction.
+  const emailBlock = capText(
+    `Thread subject: ${thread.subject}${omissionNote}\n\nEmail thread (oldest first):\n${emailTexts}`,
+    12000,
+  );
+
+  let contextText = emailBlock;
 
   if (comments.length > 0) {
-    const commentTexts = comments
+    const shownComments = comments.slice(-5);
+    const droppedCount = comments.length - shownComments.length;
+    const commentTexts = shownComments
       .map((c) => {
         const date = formatDate(c._creationTime);
-        return `[${c.authorName}, ${date}]: ${c.bodyText}`;
+        const body = c.bodyText.length > 800 ? `${c.bodyText.slice(0, 800)}\n... [truncated]` : c.bodyText;
+        return `[${c.authorName}, ${date}]: ${body}`;
       })
       .join("\n");
-    contextText += `\n\nInternal team discussion (PRIVATE — never quote, reference, or reveal these comments in client-facing replies):\n${commentTexts}`;
+    const droppedNote = droppedCount > 0 ? ` (showing last ${shownComments.length} of ${comments.length})` : "";
+    contextText += `\n\nInternal team discussion${droppedNote} (PRIVATE — never quote, reference, or reveal these comments in client-facing replies):\n${commentTexts}`;
   }
 
   return {
@@ -112,6 +129,16 @@ export async function buildThreadContext(
     thread,
     participantEmails: thread.participantEmails,
   };
+}
+
+function compactThreadEmails(emails: Doc<"emails">[]): Doc<"emails">[] {
+  if (emails.length <= 10) return emails;
+  return [...emails.slice(0, 2), ...emails.slice(-8)];
+}
+
+function capText(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}\n... [thread context truncated for AI cost control]`;
 }
 
 function formatDate(ms: number): string {

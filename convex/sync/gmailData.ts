@@ -12,6 +12,7 @@
 import { internalMutation, internalQuery } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { v } from "convex/values";
+import { promisedFollowUpText } from "../lib/promiseDetector";
 import type { Doc, Id } from "../_generated/dataModel";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -429,12 +430,52 @@ export const _onNewEmailInserted = internalMutation({
       receivedAt: email.receivedAt,
     });
 
-    // 3. Schedule AI classification (Anthropic call inside an action).
-    await ctx.scheduler.runAfter(
-      0,
-      internal.ai.classifier.classifyEmailWithContext,
-      { emailId, userId: account.userId },
-    );
+    // 3. Schedule AI classification for inbound mail only. Outbound promise
+    // follow-ups are handled here without an LLM call so mail sent from the
+    // native client (Gmail web/iOS) still gets tracked.
+    if (!isOutbound) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.ai.classifier.classifyEmailWithContext,
+        { emailId, userId: account.userId },
+      );
+    } else {
+      // Persist a synthetic "sent" classification so downstream filters that
+      // group by category still surface outbound mail. No LLM cost.
+      const existingClassification = await ctx.db
+        .query("emailClassifications")
+        .withIndex("by_email", (q) => q.eq("emailId", emailId))
+        .unique();
+      if (!existingClassification) {
+        await ctx.db.insert("emailClassifications", {
+          emailId,
+          category: "sent",
+          confidence: 1,
+          urgency: "low",
+          summary: undefined,
+          manualOverride: false,
+          overriddenBy: undefined,
+        });
+      }
+      if (promisedFollowUpText(bodyText)) {
+        const firstRecipient = Array.isArray(email.toAddresses)
+          ? (email.toAddresses[0] as { email?: string } | undefined)?.email
+          : undefined;
+        const contactEmail = (firstRecipient ?? "").toLowerCase().trim();
+        if (contactEmail) {
+          await ctx.scheduler.runAfter(
+            0,
+            internal.followUps._ensureWatchForEmail,
+            {
+              userId: account.userId,
+              threadId: email.threadId,
+              emailId: String(emailId),
+              contactEmail,
+            },
+          );
+        }
+      }
+    }
 
     // 4. Notify the user (per-type prefs are enforced inside the helper).
     if (!isOutbound) {
