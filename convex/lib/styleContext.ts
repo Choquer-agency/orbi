@@ -52,6 +52,14 @@ export async function buildStyleContext(
     .withIndex("by_user", (q) => q.eq("userId", userId))
     .unique();
 
+  // Auto-learned profile (built from real sent emails across all accounts).
+  // This is the most important signal when explicit preferences are empty
+  // or sparse, because it reflects the user's actual voice.
+  const profile = await ctx.db
+    .query("styleProfiles")
+    .withIndex("by_user", (q) => q.eq("userId", userId))
+    .unique();
+
   const contactStyle = contactEmail
     ? await ctx.db
         .query("contactStyles")
@@ -88,6 +96,29 @@ export async function buildStyleContext(
     .slice(0, 10);
 
   const lines: string[] = [];
+
+  if (profile) {
+    lines.push("## Learned writing voice (from real sent emails)");
+    if (profile.summary) lines.push(profile.summary);
+    if (profile.bulletRules?.length) {
+      lines.push("");
+      lines.push("Rules to follow when drafting on this user's behalf:");
+      for (const r of profile.bulletRules) lines.push(`- ${r}`);
+    }
+    if (profile.commonGreetings?.length) {
+      lines.push(`Greetings they actually use: ${profile.commonGreetings.join(", ")}`);
+    }
+    if (profile.commonSignOffs?.length) {
+      lines.push(`Sign-offs they actually use: ${profile.commonSignOffs.join(", ")}`);
+    }
+    if (profile.avgWords) {
+      lines.push(`Typical email length: ≈${profile.avgWords} words.`);
+    }
+    lines.push(
+      `(Profile derived from ${profile.sampleSize} emails across ${profile.accountsAnalysed.length} account${profile.accountsAnalysed.length === 1 ? "" : "s"}.)`,
+    );
+    lines.push("");
+  }
 
   lines.push("## User's Writing Style");
   if (prefs) {

@@ -37,25 +37,28 @@ const SHORTCUT_GROUPS = [
   },
 ];
 
-export function KeyboardShortcutsWidget() {
+export function KeyboardShortcutsWidget({ inline = false }: { inline?: boolean }) {
   const shortcutsModalOpen = useUiStore((s) => s.shortcutsModalOpen);
   const setShortcutsModalOpen = useUiStore((s) => s.setShortcutsModalOpen);
 
   return (
     <>
       {/* Trigger button */}
-      <div className="fixed bottom-4 right-4 z-40">
+      <div className={inline ? undefined : 'fixed bottom-4 right-4 z-40'}>
         <button
           onClick={() => setShortcutsModalOpen(true)}
           className={cn(
-            'flex h-9 w-9 items-center justify-center rounded-full bg-white shadow-md ring-1 ring-border/60 transition-all hover:shadow-lg hover:ring-border',
+            inline
+              ? 'flex h-6 w-6 items-center justify-center rounded-full text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary'
+              : 'flex h-9 w-9 items-center justify-center rounded-full bg-white shadow-md ring-1 ring-border/60 transition-all hover:shadow-lg hover:ring-border',
           )}
           title="Keyboard shortcuts (?)"
+          aria-label="Keyboard shortcuts"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
-            width="18"
-            height="18"
+            width={inline ? 15 : 18}
+            height={inline ? 15 : 18}
             fill="currentColor"
             viewBox="0 0 256 256"
             className="text-text-secondary"

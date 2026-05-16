@@ -41,7 +41,7 @@ interface ExtractedTask {
 // ── Actions ─────────────────────────────────────────────────────────────────
 
 async function recordAiUsage(
-  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  ctx: any,
   userId: Id<"users">,
   feature: string,
   inputTokens?: number,

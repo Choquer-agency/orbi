@@ -36,7 +36,7 @@ Categories (primary inbox — these stay in the user's inbox):
 - other: Anything from a real person or business contact that doesn't fit above
 
 Categories (triage — auto-sortable noise; do not create follow-up watches):
-- notification: Automated system emails — analytics platforms, CI/CD pipelines, search console, server alerts, app notifications
+- notification: Automated system emails — analytics platforms, CI/CD pipelines, search console, server alerts, app notifications, calendar invites/RSVPs/Google Calendar invitations
 - marketing: Newsletters, mailing lists, subscription content, promotional campaigns, sales emails, offers, cold outreach pitches (e.g. TechCrunch digests, Substack, SaaS upgrade nudges, Black Friday deals)
 - spam: Unsolicited junk mail, phishing attempts, scam emails
 
@@ -74,6 +74,21 @@ function parseModelOutput(text: string): ParsedClassification {
   }
 }
 
+function isAnthropicAuthError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const status = typeof error === "object" && error !== null && "status" in error
+    ? (error as { status?: unknown }).status
+    : undefined;
+  return status === 401 || message.includes("invalid x-api-key") || message.includes("authentication_error");
+}
+
+const CLASSIFIER_UNAVAILABLE_FALLBACK: ParsedClassification = {
+  category: "other",
+  confidence: 0.2,
+  urgency: "normal",
+  summary: "AI classifier unavailable",
+};
+
 interface ClassificationDoc {
   _id: Id<"emailClassifications">;
   category: string;
@@ -91,8 +106,6 @@ const ACTIONABLE_AUTOMATED_HINTS = [
   "docusign",
   "hellosign",
   "stripe",
-  "calendar-notification",
-  "calendar-server",
   "invoice",
   "billing",
   "receipts",
@@ -113,6 +126,19 @@ function deterministicNoiseCategory(email: {
   const bodyForCheck = (email.bodyText || email.snippet || "").toLowerCase();
   const fromOrName = `${from} ${name}`;
   const isAllowlisted = ACTIONABLE_AUTOMATED_HINTS.some((hint) => fromOrName.includes(hint));
+
+  const isCalendarInvite =
+    from.includes("calendar-notification@google.com") ||
+    from.includes("calendar-server") ||
+    from.includes("calendar-notification") ||
+    subject.includes("invitation:") ||
+    subject.includes("updated invitation:") ||
+    subject.includes("accepted:") ||
+    subject.includes("declined:") ||
+    /\b(google calendar|calendar invitation|invited you to|has accepted this invitation)\b/i.test(bodyForCheck);
+  if (isCalendarInvite) {
+    return "notification";
+  }
 
   const isNoReplySender = /(^|[._-])(no-?reply|do-?not-?reply|donotreply)(@|[._-])/.test(from);
   if (isNoReplySender && !isAllowlisted) {
@@ -138,25 +164,41 @@ function deterministicNoiseCategory(email: {
   return null;
 }
 
+async function persistCategoryClassification(
+  ctx: any,
+  emailId: Id<"emails">,
+  category: string,
+  confidence: number,
+  summary: string,
+): Promise<ClassificationDoc | null> {
+  return (await ctx.runMutation(internal.ai.classifierData._persistClassification, {
+    emailId,
+    category,
+    confidence,
+    urgency: "low",
+    summary,
+  })) as ClassificationDoc | null;
+}
+
 async function persistDeterministicClassification(
-  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  ctx: any,
   emailId: Id<"emails">,
   category: "notification" | "marketing" | "spam",
 ): Promise<ClassificationDoc | null> {
-  return (await ctx.runMutation(internal.ai.classifierData._persistClassification, {
+  return await persistCategoryClassification(
+    ctx,
     emailId,
     category,
     // marketing detection is heuristic and occasionally fires on quoted
     // footers in real replies. Keep confidence below the threshold a UI
     // would use to hide the email from review.
-    confidence: category === "marketing" ? 0.8 : 0.95,
-    urgency: "low",
-    summary: category === "marketing" ? "Automated marketing email" : "Automated notification",
-  })) as ClassificationDoc | null;
+    category === "marketing" ? 0.8 : 0.95,
+    category === "marketing" ? "Automated marketing email" : "Automated notification",
+  );
 }
 
 async function recordDeterministicClassification(
-  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  ctx: any,
   userId: Id<"users"> | undefined,
   category: "notification" | "marketing" | "spam",
 ) {
@@ -183,7 +225,7 @@ function shouldCreateInboundFollowUp(category: string, fromAddress: string): boo
 }
 
 async function recordAiUsage(
-  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  ctx: any,
   userId: Id<"users"> | undefined,
   feature: string,
   inputTokens?: number,
@@ -243,34 +285,41 @@ export const classifyEmail = internalAction({
     const bodyPreview = (email.bodyText || email.snippet || "").slice(0, 500);
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 200,
-      system: CLASSIFICATION_PROMPT,
-      messages: [
-        {
-          role: "user",
-          content: `Subject: ${email.subject}\nFrom: ${email.fromName || ""} <${email.fromAddress}>\nBody: ${bodyPreview}`,
-        },
-      ],
-    });
+    let parsed: ParsedClassification;
+    try {
+      const response = await client.messages.create({
+        model: MODEL,
+        max_tokens: 200,
+        system: CLASSIFICATION_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: `Subject: ${email.subject}\nFrom: ${email.fromName || ""} <${email.fromAddress}>\nBody: ${bodyPreview}`,
+          },
+        ],
+      });
 
-    await recordAiUsage(
-      ctx,
-      undefined,
-      "classifier",
-      response.usage?.input_tokens,
-      response.usage?.output_tokens,
-      response.id,
-      response.stop_reason,
-    );
+      await recordAiUsage(
+        ctx,
+        undefined,
+        "classifier",
+        response.usage?.input_tokens,
+        response.usage?.output_tokens,
+        response.id,
+        response.stop_reason,
+      );
 
-    const text = response.content
-      .filter((b): b is Anthropic.TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("");
+      const text = response.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("");
 
-    const parsed = parseModelOutput(text);
+      parsed = parseModelOutput(text);
+    } catch (error) {
+      if (!isAnthropicAuthError(error)) throw error;
+      console.error("Anthropic classifier auth error; using low-confidence fallback", error);
+      parsed = CLASSIFIER_UNAVAILABLE_FALLBACK;
+    }
     return (await ctx.runMutation(
       internal.ai.classifierData._persistClassification,
       {
@@ -340,6 +389,24 @@ export const classifyEmailWithContext = internalAction({
     }
 
     const { email } = fetched;
+    const senderRule = (await ctx.runQuery(
+      internal.ai.classifierData._getSenderTriageRule,
+      { userId, senderAddress: email.fromAddress },
+    )) as { category: string; confidence: number; examples: number } | null;
+    if (senderRule) {
+      const classification = await persistCategoryClassification(
+        ctx,
+        emailId,
+        senderRule.category,
+        senderRule.confidence,
+        `Matched your previous classification for ${email.fromAddress}`,
+      );
+      return {
+        classification,
+        isTriageCategory: isTriageCategory(senderRule.category),
+      };
+    }
+
     const deterministicCategory = deterministicNoiseCategory(email);
     if (deterministicCategory) {
       await recordDeterministicClassification(ctx, userId, deterministicCategory);
@@ -352,35 +419,42 @@ export const classifyEmailWithContext = internalAction({
     const bodyPreview = (email.bodyText || email.snippet || "").slice(0, 500);
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: 200,
-      system: systemPrompt,
-      messages: [
-        {
-          role: "user",
-          content: `Subject: ${email.subject}\nFrom: ${email.fromName || ""} <${email.fromAddress}>\nBody: ${bodyPreview}`,
-        },
-      ],
-      metadata: { user_id: String(userId) },
-    });
+    let parsed: ParsedClassification;
+    try {
+      const response = await client.messages.create({
+        model: MODEL,
+        max_tokens: 200,
+        system: systemPrompt,
+        messages: [
+          {
+            role: "user",
+            content: `Subject: ${email.subject}\nFrom: ${email.fromName || ""} <${email.fromAddress}>\nBody: ${bodyPreview}`,
+          },
+        ],
+        metadata: { user_id: String(userId) },
+      });
 
-    await recordAiUsage(
-      ctx,
-      userId,
-      "classifier",
-      response.usage?.input_tokens,
-      response.usage?.output_tokens,
-      response.id,
-      response.stop_reason,
-    );
+      await recordAiUsage(
+        ctx,
+        userId,
+        "classifier",
+        response.usage?.input_tokens,
+        response.usage?.output_tokens,
+        response.id,
+        response.stop_reason,
+      );
 
-    const text = response.content
-      .filter((b): b is Anthropic.TextBlock => b.type === "text")
-      .map((b) => b.text)
-      .join("");
+      const text = response.content
+        .filter((b): b is Anthropic.TextBlock => b.type === "text")
+        .map((b) => b.text)
+        .join("");
 
-    const parsed = parseModelOutput(text);
+      parsed = parseModelOutput(text);
+    } catch (error) {
+      if (!isAnthropicAuthError(error)) throw error;
+      console.error("Anthropic classifier auth error; using low-confidence fallback", error);
+      parsed = CLASSIFIER_UNAVAILABLE_FALLBACK;
+    }
     const classification = (await ctx.runMutation(
       internal.ai.classifierData._persistClassification,
       {

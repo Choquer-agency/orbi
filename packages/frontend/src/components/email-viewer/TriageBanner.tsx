@@ -1,16 +1,17 @@
 import { useState } from 'react';
 import { FolderInput, Check, ChevronDown, FolderCheck } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { useTriageSuggestion, useTriageFeedback } from '../../hooks/useTriage';
+import { clearTriageSuggestionCache, useTriageSuggestion, useTriageFeedback } from '../../hooks/useTriage';
 import { useUiStore } from '../../stores/uiStore';
 
 export const TRIAGE_FOLDER_LABELS: Record<string, string> = {
   primary: 'Primary',
+  notification: 'Notification',
   marketing: 'Marketing',
   spam: 'Spam',
 };
 
-export const ALL_TRIAGE_OPTIONS = ['primary', 'marketing', 'spam'];
+export const ALL_TRIAGE_OPTIONS = ['primary', 'notification', 'marketing', 'spam'];
 
 interface TriageBannerProps {
   threadId: string;
@@ -21,6 +22,7 @@ interface TriageBannerProps {
 export function TriageBanner({ threadId, latestEmailId }: TriageBannerProps) {
   const selectedFolder = useUiStore((s) => s.selectedFolder);
   const [showMoveMenu, setShowMoveMenu] = useState(false);
+  const [dismissedThreadId, setDismissedThreadId] = useState<string | null>(null);
 
   const { data: suggestion, isLoading } = useTriageSuggestion(
     selectedFolder === 'inbox' ? threadId : null,
@@ -28,6 +30,7 @@ export function TriageBanner({ threadId, latestEmailId }: TriageBannerProps) {
   const feedback = useTriageFeedback();
 
   if (selectedFolder !== 'inbox') return null;
+  if (dismissedThreadId === threadId) return null;
   if (isLoading) return null;
   if (!suggestion) return null;
 
@@ -52,28 +55,31 @@ export function TriageBanner({ threadId, latestEmailId }: TriageBannerProps) {
     );
   }
 
-  const handleConfirm = () => {
+  const submitFeedbackAndHide = async (finalCategory: string, wasConfirmed: boolean) => {
     if (!latestEmailId) return;
-    feedback.mutate({
-      emailId: latestEmailId,
-      threadId,
-      suggestedCategory,
-      finalCategory: suggestedCategory,
-      wasConfirmed: true,
-    });
+    setDismissedThreadId(threadId);
+    setShowMoveMenu(false);
+    clearTriageSuggestionCache(threadId);
+    try {
+      await feedback.mutateAsync({
+        emailId: latestEmailId,
+        threadId,
+        suggestedCategory,
+        finalCategory,
+        wasConfirmed,
+      });
+    } catch {
+      // Restore the banner if the write failed so the user can retry.
+      setDismissedThreadId(null);
+    }
+  };
+
+  const handleConfirm = () => {
+    void submitFeedbackAndHide(suggestedCategory, true);
   };
 
   const handleMoveTo = (category: string) => {
-    if (!latestEmailId) return;
-    const finalCategory = category === 'primary' ? 'other' : category;
-    feedback.mutate({
-      emailId: latestEmailId,
-      threadId,
-      suggestedCategory,
-      finalCategory,
-      wasConfirmed: category === suggestedCategory,
-    });
-    setShowMoveMenu(false);
+    void submitFeedbackAndHide(category, category === suggestedCategory);
   };
 
   return (

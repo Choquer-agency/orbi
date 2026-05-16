@@ -19,6 +19,14 @@ const addressShape = v.object({
   name: v.optional(v.string()),
 });
 
+function normalizeAddressList(value: unknown): Array<{ email?: string; name?: string }> {
+  if (Array.isArray(value)) return value as Array<{ email?: string; name?: string }>;
+  if (!value) return [];
+  if (typeof value === "string") return value ? [{ email: value }] : [];
+  if (typeof value === "object") return [value as { email?: string; name?: string }];
+  return [];
+}
+
 /** POST /api/scheduled-emails */
 export const create = mutation({
   args: {
@@ -95,10 +103,11 @@ export const list = query({
         .order("asc")
         .collect();
     } else {
-      rows = (
-        await ctx.db.query("scheduledEmails").collect()
-      ).filter((r) => r.userId === userId);
-      rows.sort((a, b) => a.sendAt - b.sendAt);
+      rows = await ctx.db
+        .query("scheduledEmails")
+        .withIndex("by_user_sendAt", (q) => q.eq("userId", userId))
+        .order("asc")
+        .take(200);
     }
 
     // Hydrate account.email + displayName like the Prisma `include`.
@@ -112,6 +121,56 @@ export const list = query({
 
     return rows.map((r) => ({
       ...r,
+      toAddresses: normalizeAddressList(r.toAddresses),
+      ccAddresses: normalizeAddressList(r.ccAddresses),
+      bccAddresses: normalizeAddressList(r.bccAddresses),
+      account: accountMap.get(r.accountId) ?? null,
+    }));
+  },
+});
+
+export const listByThread = query({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, { threadId }) => {
+    const userId = await requireUser(ctx);
+    const thread = await ctx.db.get(threadId);
+    if (!thread) throw new Error("Thread not found");
+    const account = await ctx.db.get(thread.accountId);
+    if (!account || account.userId !== userId) {
+      throw new Error("Thread not found");
+    }
+
+    const [scheduled, sending] = await Promise.all([
+      ctx.db
+        .query("scheduledEmails")
+        .withIndex("by_thread_status_sendAt", (q) =>
+          q.eq("threadId", threadId).eq("status", "SCHEDULED"),
+        )
+        .order("asc")
+        .take(20),
+      ctx.db
+        .query("scheduledEmails")
+        .withIndex("by_thread_status_sendAt", (q) =>
+          q.eq("threadId", threadId).eq("status", "SENDING"),
+        )
+        .order("asc")
+        .take(20),
+    ]);
+
+    const rows = [...scheduled, ...sending].sort((a, b) => a.sendAt - b.sendAt);
+    const accountIds = Array.from(new Set(rows.map((r) => r.accountId)));
+    const accounts = await Promise.all(accountIds.map((id) => ctx.db.get(id)));
+    const accountMap = new Map(
+      accounts
+        .filter((a): a is NonNullable<typeof a> => a !== null)
+        .map((a) => [a._id, { email: a.email, displayName: a.displayName }]),
+    );
+
+    return rows.map((r) => ({
+      ...r,
+      toAddresses: normalizeAddressList(r.toAddresses),
+      ccAddresses: normalizeAddressList(r.ccAddresses),
+      bccAddresses: normalizeAddressList(r.bccAddresses),
       account: accountMap.get(r.accountId) ?? null,
     }));
   },
@@ -129,6 +188,9 @@ export const get = query({
     const account = await ctx.db.get(row.accountId);
     return {
       ...row,
+      toAddresses: normalizeAddressList(row.toAddresses),
+      ccAddresses: normalizeAddressList(row.ccAddresses),
+      bccAddresses: normalizeAddressList(row.bccAddresses),
       account: account
         ? { email: account.email, displayName: account.displayName }
         : null,

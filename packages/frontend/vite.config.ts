@@ -24,7 +24,6 @@ export default defineConfig(({ mode }) => ({
       'dompurify',
       'clsx',
       'tailwind-merge',
-      'socket.io-client',
     ],
   },
   server: {

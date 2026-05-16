@@ -29,38 +29,43 @@ function toIso(ts: number | string | null | undefined): string | null {
   return new Date(ts).toISOString();
 }
 
-function shapeRow(row: {
-  _id: string;
-  userId: string;
-  accountId: string;
-  threadId?: string | null;
-  parentEmailId?: string | null;
-  mode: string;
-  toAddresses: { email: string; name?: string }[];
-  subject: string;
-  bodyHtml: string;
-  bodyText: string;
-  sendAt: number;
-  status: string;
-  cancelledAt?: number | null;
-  _creationTime: number;
-  account?: { email: string; displayName: string | null } | null;
-}): ScheduledEmail {
+function asAddressArray(value: unknown): Array<{ email: string; name?: string }> {
+  if (Array.isArray(value)) {
+    return value
+      .map((a) => (typeof a === 'string' ? { email: a } : a))
+      .filter((a): a is { email: string; name?: string } => Boolean(a?.email));
+  }
+  if (!value) return [];
+  if (typeof value === 'string') return value ? [{ email: value }] : [];
+  if (typeof value === 'object') {
+    const maybe = value as { email?: string; name?: string };
+    return maybe.email ? [{ email: maybe.email, name: maybe.name }] : [];
+  }
+  return [];
+}
+
+function scheduledRows(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  const nested = (value as { data?: unknown } | null | undefined)?.data;
+  return Array.isArray(nested) ? nested : [];
+}
+
+function shapeRow(row: any): ScheduledEmail {
   return {
-    id: row._id,
+    id: row._id ?? row.id,
     userId: row.userId,
     accountId: row.accountId,
     threadId: row.threadId ?? null,
     parentEmailId: row.parentEmailId ?? null,
     mode: row.mode,
-    toAddresses: row.toAddresses,
+    toAddresses: asAddressArray(row.toAddresses),
     subject: row.subject,
     bodyHtml: row.bodyHtml,
     bodyText: row.bodyText,
     sendAt: toIso(row.sendAt) ?? '',
     status: row.status,
     cancelledAt: toIso(row.cancelledAt ?? null),
-    createdAt: toIso(row._creationTime) ?? '',
+    createdAt: toIso(row._creationTime ?? row.createdAt) ?? '',
     account: row.account
       ? { email: row.account.email, displayName: row.account.displayName }
       : undefined,
@@ -75,19 +80,17 @@ export function useScheduledEmails(status?: string) {
     status ? { status } : {},
   );
   return {
-    data: data ? data.map((r) => shapeRow(r as never)) : undefined,
+    data: data === undefined ? undefined : scheduledRows(data).map((r) => shapeRow(r)),
     isLoading: data === undefined,
   };
 }
 
 export function useThreadScheduledEmails(threadId: string | null | undefined) {
-  const { data: all } = useScheduledEmails();
-  if (!threadId || !all) return [];
-  return all.filter(
-    (e) =>
-      e.threadId === threadId &&
-      (e.status === 'SCHEDULED' || e.status === 'SENDING'),
+  const data = useQuery(
+    api.scheduledEmails.listByThread,
+    threadId ? { threadId: threadId as Id<'threads'> } : 'skip',
   );
+  return data === undefined ? [] : scheduledRows(data).map((r) => shapeRow(r));
 }
 
 // ─── Mutations ────────────────────────────────────────────────

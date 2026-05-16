@@ -1,6 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Save, X, Plus, Trash2, Loader2, Brain } from 'lucide-react';
+import { Save, X, Plus, Trash2, Loader2, Brain, Sparkles } from 'lucide-react';
+import { useAction, useQuery } from 'convex/react';
 import { api } from '../../lib/api';
+import { api as convexApi } from '../../../../../convex/_generated/api';
+import toast from 'react-hot-toast';
 
 interface Preferences {
   greetingStyle: string | null;
@@ -66,6 +69,38 @@ export function WritingPreferences({ onClose }: { onClose?: () => void }) {
   const [newDescriptor, setNewDescriptor] = useState('');
   const [customGreeting, setCustomGreeting] = useState('');
   const [customSignoff, setCustomSignoff] = useState('');
+  // Auto-learned style profile (rebuilt from real sent emails on demand).
+  const styleProfile = useQuery((convexApi as any).ai.styleProfileData.getProfile, {}) as
+    | {
+        summary: string;
+        bulletRules: string[];
+        sampleSize: number;
+        accountsAnalysed: string[];
+        commonGreetings: string[];
+        commonSignOffs: string[];
+        avgWords?: number;
+        lastBuiltAt: number;
+      }
+    | null
+    | undefined;
+  const refreshStyleProfile = useAction((convexApi as any).ai.styleProfile.refresh);
+  const [profileLearning, setProfileLearning] = useState(false);
+  const handleLearnProfile = async () => {
+    setProfileLearning(true);
+    try {
+      const r = await refreshStyleProfile({});
+      if (r?.built) {
+        toast.success(`Learned from ${r.sampleSize} emails across ${r.accountsAnalysed} account${r.accountsAnalysed === 1 ? '' : 's'}.`);
+      } else if (r?.skipped) {
+        toast.error(`Couldn't learn: ${r.reason || 'unknown'}`);
+      }
+    } catch (err) {
+      toast.error('Failed to learn writing style');
+      console.error(err);
+    } finally {
+      setProfileLearning(false);
+    }
+  };
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -192,6 +227,44 @@ export function WritingPreferences({ onClose }: { onClose?: () => void }) {
       </div>
 
       <div className="space-y-8">
+        {/* Auto-learn from real sent emails */}
+        <div className="rounded-xl border border-border bg-gradient-to-br from-primary/5 to-transparent p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <Sparkles className="h-4 w-4 text-primary" />
+                <h4 className="text-[13px] font-semibold text-text-primary">Learn from my sent emails</h4>
+              </div>
+              <p className="mt-1 text-[12px] leading-relaxed text-text-secondary">
+                Build a personalised writing profile from real emails you've sent across <strong>every connected account</strong>. The AI will draft replies that sound like you, not generic.
+              </p>
+              {styleProfile && (
+                <div className="mt-3 space-y-2 rounded-lg border border-border bg-surface px-3 py-2 text-[11.5px] leading-relaxed text-text-secondary">
+                  <p className="text-text-primary">{styleProfile.summary}</p>
+                  {styleProfile.bulletRules?.length > 0 && (
+                    <ul className="list-disc space-y-0.5 pl-4">
+                      {styleProfile.bulletRules.slice(0, 6).map((r, i) => (
+                        <li key={i}>{r}</li>
+                      ))}
+                    </ul>
+                  )}
+                  <p className="text-[10.5px] text-text-tertiary">
+                    Learned from {styleProfile.sampleSize} emails · {styleProfile.accountsAnalysed.length} account{styleProfile.accountsAnalysed.length === 1 ? '' : 's'} · updated {new Date(styleProfile.lastBuiltAt).toLocaleDateString()}
+                  </p>
+                </div>
+              )}
+            </div>
+            <button
+              onClick={handleLearnProfile}
+              disabled={profileLearning}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-primary/30 bg-white px-3 py-1.5 text-[12px] font-medium text-primary transition-colors hover:bg-primary/5 disabled:opacity-50"
+            >
+              {profileLearning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+              {styleProfile ? 'Re-learn' : 'Learn my style'}
+            </button>
+          </div>
+        </div>
+
         {/* Greeting & Sign-off */}
         <div className="grid grid-cols-2 gap-6">
           <div>

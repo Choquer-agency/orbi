@@ -98,6 +98,25 @@ export const markAllRead = mutation({
   },
 });
 
+export const markThreadRead = mutation({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, { threadId }) => {
+    const userId = await requireUser(ctx);
+    const unread = await ctx.db
+      .query("notifications")
+      .withIndex("by_user_isRead", (q) =>
+        q.eq("userId", userId).eq("isRead", false),
+      )
+      .collect();
+    const matching = unread.filter((n) => {
+      const data = n.data as { threadId?: unknown } | undefined;
+      return String(data?.threadId ?? "") === String(threadId);
+    });
+    for (const n of matching) await ctx.db.patch(n._id, { isRead: true });
+    return { success: true, count: matching.length };
+  },
+});
+
 export const unreadCount = query({
   args: {},
   handler: async (ctx) => {

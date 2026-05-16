@@ -3,11 +3,21 @@
 @theme {
   --color-surface: #FAF9F5;
   --color-surface-warm: #F0EEE6;
-  --color-border: #E8E8E8;
+  /* Distinct background for the inbox/thread-list column so it visually
+     separates from the body/email viewer. Slightly cooler + a touch darker. */
+  --color-surface-sidebar: #F4F2EC;
+  /* Selected/active row — a hair darker than the column bg */
+  --color-surface-sidebar-active: #EFEDE5;
+  /* Hover row — slightly lighter than active, but still darker than bg */
+  --color-surface-sidebar-hover: #F5F3EB;
+  /* Darker tone for sticky date headers / section dividers */
+  --color-surface-strong: #ECEAE1;
+  --color-border: #DAD6CC;
+  --color-border-strong: #C7C2B5;
   --color-text-primary: #1A1A1A;
-  --color-text-secondary: #6B6B6B;
-  --color-text-tertiary: #9B9B9B;
-  --color-selected: #F0EEE6;
+  --color-text-secondary: #5A5A5A;
+  --color-text-tertiary: #8A8580;
+  --color-selected: #FFE5CC;
   --color-primary: #FF7E16;
   --color-primary-light: #FFC494;
   --color-primary-hover: #E56D0A;
@@ -42,9 +52,52 @@ body {
   -webkit-app-region: no-drag;
 }
 
+/* Snappy controls — all clickable UI should feel immediate.
+   Keep motion tiny so it reads as responsiveness, not animation. */
+:where(button, [role='button'], summary, a[href]) {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+:where(button, [role='button']) {
+  transition-property: transform, background-color, border-color, color, opacity, box-shadow, filter;
+  transition-duration: 90ms;
+  transition-timing-function: cubic-bezier(0.2, 0, 0, 1);
+  transform: translateZ(0);
+}
+
+:where(button, [role='button']):where(:hover) {
+  filter: brightness(0.995);
+}
+
+:where(button, [role='button']):where(:active):not(:disabled):not([aria-disabled='true']) {
+  transform: translateY(1px) scale(0.985);
+  transition-duration: 35ms;
+}
+
+:where(button, [role='button']):where(:focus-visible) {
+  outline: 2px solid color-mix(in srgb, var(--color-primary) 55%, transparent);
+  outline-offset: 2px;
+}
+
+:where(button, [role='button']):where(:disabled, [aria-disabled='true']) {
+  cursor: default;
+  transform: none;
+  filter: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(button, [role='button']) {
+    transition-duration: 0ms !important;
+  }
+  :where(button, [role='button']):where(:active):not(:disabled):not([aria-disabled='true']) {
+    transform: none;
+  }
+}
+
 /* Panel transitions */
 .transition-panel {
-  transition: width 200ms ease-out, opacity 200ms ease-out;
+  transition: width 160ms ease-out, opacity 160ms ease-out;
 }
 
 /* AI section background — warm tone */
@@ -113,11 +166,72 @@ mark[data-highlight] {
    Tailwind preflight sets margin:0 on everything and resets table styles,
    which breaks centered marketing emails that rely on <center>, align attrs,
    or margin:auto on tables. */
+.email-body-card {
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  /* Skip paint work for off-screen email bodies. Gives ~10–20% scroll-paint
+     wins on long threads without changing layout. Browsers that don't
+     support it just ignore. */
+  content-visibility: auto;
+  contain-intrinsic-size: 200px;
+}
+.email-body-inline {
+  max-width: 100%;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  isolation: isolate;
+}
+.email-body-inline * {
+  box-sizing: border-box;
+  max-width: 100%;
+}
+.email-body-inline p,
+.email-body-inline div {
+  overflow-wrap: anywhere;
+}
+.email-body-inline > p {
+  margin: 0 0 0.65em;
+}
+.email-body-inline > p:last-child {
+  margin-bottom: 0;
+}
+.email-body-inline br + br + br {
+  display: none;
+}
+.email-body-inline a {
+  color: #1a73e8;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.email-body-inline img {
+  display: inline-block;
+  max-width: 100% !important;
+  height: auto !important;
+  vertical-align: middle;
+}
 .email-body-inline center {
   text-align: center;
 }
 .email-body-inline table {
   border-collapse: separate;
+  width: auto;
+  max-width: 100% !important;
+  line-height: normal;
+}
+.email-body-inline table[width="1"],
+.email-body-inline td[width="1"],
+.email-body-inline td[style*="width:1px"],
+.email-body-inline td[style*="width: 1px"] {
+  width: 1px !important;
+  max-width: 1px !important;
+}
+.email-body-inline td:empty,
+.email-body-inline th:empty {
+  padding: 0 !important;
 }
 .email-body-inline [align="center"] {
   text-align: center;
@@ -134,11 +248,22 @@ mark[data-highlight] {
 .email-body-inline td,
 .email-body-inline th {
   padding: revert;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  vertical-align: top;
 }
 .email-body-inline center table,
 .email-body-inline table[align="center"] {
   margin-left: auto;
   margin-right: auto;
+}
+.email-body-inline blockquote,
+.email-body-inline .gmail_quote,
+.email-body-inline [class*="quote"] {
+  border-left: 2px solid var(--color-border);
+  margin: 0.75em 0;
+  padding-left: 0.9em;
+  color: var(--color-text-secondary);
 }
 
 /* Email iframe — no border, no scrolling, auto-height */

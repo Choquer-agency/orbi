@@ -4,6 +4,7 @@ import { useAuthStore } from '../../stores/authStore';
 import { useUiStore } from '../../stores/uiStore';
 import { getInitials } from '../../lib/utils';
 import { NotificationPopover } from './NotificationPopover';
+import { KeyboardShortcutsWidget } from '../ui/KeyboardShortcutsWidget';
 
 export function HeaderIcons() {
   const { user, logout } = useAuthStore();
@@ -13,6 +14,7 @@ export function HeaderIcons() {
     <div className="titlebar-no-drag flex items-center gap-3">
       {/* Notifications */}
       <NotificationPopover />
+      <KeyboardShortcutsWidget inline />
 
       {/* User avatar menu */}
       {user && (

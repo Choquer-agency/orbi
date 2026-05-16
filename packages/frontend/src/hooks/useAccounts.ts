@@ -8,7 +8,7 @@ import { isNative } from '../lib/platform';
 // Drop-in TanStack Query → Convex replacement (mailAccounts CRUD).
 //
 // Public surface preserved:
-//   useAccounts()         — { data, isLoading }; data is the list array
+//   useAccounts()         — { data, isLoading }; data is { data: account[] }
 //   useDeleteAccount()    — { mutate, mutateAsync, isPending }
 //   useStartOAuth()       — { mutate, mutateAsync, isPending }
 //   useUpdateAccount()    — { mutate, mutateAsync, isPending }
@@ -17,8 +17,11 @@ import { isNative } from '../lib/platform';
 
 export function useAccounts() {
   const result = useQuery(api.mailAccounts.list, {});
+  const rows = Array.isArray(result) ? result : [];
   return {
-    data: result,
+    // Keep the REST-era shape all current consumers expect:
+    // `const accounts = accountsData?.data ?? []`.
+    data: result === undefined ? undefined : { data: rows },
     isLoading: result === undefined,
     isError: false,
     error: undefined,

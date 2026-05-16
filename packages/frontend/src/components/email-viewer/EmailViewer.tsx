@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, lazy, Suspense } from 'react';
 import {
   Archive,
   Reply,
@@ -43,7 +43,12 @@ import { useUiStore } from '../../stores/uiStore';
 import { useAuthStore } from '../../stores/authStore';
 import { formatExactTime, getInitials, cn } from '../../lib/utils';
 import { getAvatarColor } from '../../lib/constants';
-import { ComposeInline } from '../compose/ComposeInline';
+// Lazy-loaded: the inline composer pulls TipTap (~370 KB gzipped) which we
+// don't want on the critical path of opening a thread. It only renders when
+// the user clicks Reply / Forward / Add note.
+const ComposeInline = lazy(() =>
+  import('../compose/ComposeInline').then((m) => ({ default: m.ComposeInline })),
+);
 import { Tooltip } from '../ui/Tooltip';
 import { ContactCard } from '../contacts/ContactCard';
 import { useContactAutocomplete, useContactNameResolver } from '../../hooks/useContacts';
@@ -51,11 +56,15 @@ import { useThreadScheduledEmails, useSendScheduledNow, useCancelScheduledEmail 
 import { useUndoSendStore } from '../../stores/undoSendStore';
 import { useBlockSender } from '../../hooks/useBlockedSenders';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { useMarkThreadNotificationsRead } from '../../hooks/useNotifications';
 import { haptic } from '../../lib/haptics';
 import { ImageLightbox } from './ImageLightbox';
 import DOMPurify from 'dompurify';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { api } from '../../lib/api';
+import { useQueryClient } from '@tanstack/react-query';
+import { useMutation as useConvexMutation } from 'convex/react';
+import { useAuthToken } from '@convex-dev/auth/react';
+import { api } from '../../../../../convex/_generated/api';
+import type { Id } from '../../../../../convex/_generated/dataModel';
 import toast from 'react-hot-toast';
 
 // Team domain — emails from this domain get the pastel triangle
@@ -63,14 +72,39 @@ const TEAM_DOMAIN = 'orbi.agency';
 
 function SendFailedBanner({ emailId, error, attempts }: { emailId: string; error?: string | null; attempts?: number }) {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: () => api.post(`/emails/${emailId}/retry`),
-    onSuccess: () => {
+  const retrySend = useConvexMutation(api.emails.retrySend);
+  const discardSend = useConvexMutation(api.emails.discardFailedSend);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [isDiscarding, setIsDiscarding] = useState(false);
+
+  const handleRetry = async () => {
+    setIsRetrying(true);
+    try {
+      await retrySend({ emailId: emailId as Id<'emails'> });
       toast.success('Retry queued — sending again');
       queryClient.invalidateQueries({ queryKey: ['thread'] });
-    },
-    onError: () => toast.error('Failed to queue retry'),
-  });
+    } catch (err) {
+      console.error('Retry send failed:', err);
+      toast.error(err instanceof Error ? err.message : 'Failed to queue retry');
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
+  const handleDiscard = async () => {
+    if (!window.confirm('Discard this failed message? It will be removed from the thread.')) return;
+    setIsDiscarding(true);
+    try {
+      await discardSend({ emailId: emailId as Id<'emails'> });
+      toast.success('Discarded');
+      queryClient.invalidateQueries({ queryKey: ['thread'] });
+    } catch (err) {
+      console.error('Discard failed:', err);
+      toast.error(err instanceof Error ? err.message : 'Failed to discard');
+    } finally {
+      setIsDiscarding(false);
+    }
+  };
 
   return (
     <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2.5">
@@ -87,14 +121,24 @@ function SendFailedBanner({ emailId, error, attempts }: { emailId: string; error
             </p>
           )}
         </div>
-        <button
-          onClick={() => retry.mutate()}
-          disabled={retry.isPending}
-          className="flex shrink-0 items-center gap-1.5 rounded-md bg-red-100 px-2.5 py-1 text-[11px] font-medium text-red-700 transition-colors hover:bg-red-200 disabled:opacity-50"
-        >
-          <RotateCcw className={cn('h-3 w-3', retry.isPending && 'animate-spin')} />
-          {retry.isPending ? 'Retrying...' : 'Retry Send'}
-        </button>
+        <div className="flex shrink-0 items-center gap-1.5">
+          <button
+            onClick={handleDiscard}
+            disabled={isDiscarding || isRetrying}
+            className="flex items-center gap-1.5 rounded-md border border-red-200 bg-white px-2.5 py-1 text-[11px] font-medium text-red-700 transition-colors hover:bg-red-100 disabled:opacity-50"
+          >
+            <Trash2 className="h-3 w-3" />
+            {isDiscarding ? 'Discarding...' : 'Discard'}
+          </button>
+          <button
+            onClick={handleRetry}
+            disabled={isRetrying || isDiscarding}
+            className="flex items-center gap-1.5 rounded-md bg-red-100 px-2.5 py-1 text-[11px] font-medium text-red-700 transition-colors hover:bg-red-200 disabled:opacity-50"
+          >
+            <RotateCcw className={cn('h-3 w-3', isRetrying && 'animate-spin')} />
+            {isRetrying ? 'Retrying...' : 'Retry'}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -149,6 +193,14 @@ function stripQuotedContent(html: string): { body: string; hasQuoted: boolean } 
   const headerPattern = /^From:\s+.+/im;
   const sentPattern = /^Sent:\s+.+/im;
 
+  // Only count history removal when we drop actual quoted reply markers,
+  // not when sanitization shrinks the doc by an arbitrary amount.
+  let removedQuoted = false;
+  // Phase 1 wrappers above — count them as quoted history.
+  if (doc.body.innerHTML.length < html.length - 50) {
+    removedQuoted = true;
+  }
+
   let cutEl: Element | null = null;
 
   for (const el of allEls) {
@@ -201,10 +253,15 @@ function stripQuotedContent(html: string): { body: string; hasQuoted: boolean } 
       next = next.nextElementSibling;
       toRemove.remove();
     }
+    removedQuoted = true;
   }
 
   // ── Phase 3: catch-all blockquotes ──────────────────────────
-  doc.querySelectorAll('blockquote').forEach((el) => el.remove());
+  // Only count blockquotes with substantive text content as history.
+  doc.querySelectorAll('blockquote').forEach((el) => {
+    if ((el.textContent ?? '').trim().length > 20) removedQuoted = true;
+    el.remove();
+  });
 
   // ── Phase 4: remove <hr> that precede "From:" blocks ────────
   doc.querySelectorAll('hr').forEach((hr) => {
@@ -216,13 +273,13 @@ function stripQuotedContent(html: string): { body: string; hasQuoted: boolean } 
         el = el.nextElementSibling;
         toRemove.remove();
       }
+      removedQuoted = true;
     }
   });
 
   const cleaned = doc.body.innerHTML;
-  const hasQuoted = cleaned.length < html.length - 50;
 
-  return { body: cleaned, hasQuoted };
+  return { body: cleaned, hasQuoted: removedQuoted };
 }
 
 /**
@@ -254,6 +311,11 @@ function stripQuotedText(text: string): { body: string; hasQuoted: boolean } {
  * Replace cid: references with data-cid-ref attributes for later resolution.
  * We can't use direct URLs because the attachment endpoint requires auth.
  */
+function inlineAttachmentUrl(attachmentId: string): string {
+  const base = import.meta.env.VITE_CONVEX_SITE_URL || import.meta.env.VITE_CONVEX_URL || '';
+  return `${base}/api/attachments/inline/${attachmentId}`;
+}
+
 function markCidImages(html: string, emailId: string, attachments: any[]): string {
   if (!attachments?.length) return html;
 
@@ -264,29 +326,36 @@ function markCidImages(html: string, emailId: string, attachments: any[]): strin
       return attCid === normalized;
     });
     if (att) {
-      // Keep a placeholder src and mark with data attributes for useEffect resolution
+      if (att.url) {
+        return `src="${att.url}" referrerpolicy="no-referrer" data-cid-email="${emailId}" data-cid-attachment="${att.id}"`;
+      }
+      // Keep a placeholder src and mark with data attributes for legacy/provider attachments.
       return `src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" data-cid-email="${emailId}" data-cid-attachment="${att.id}"`;
     }
     return match;
   });
 }
 
-/** Scope <style> blocks to a container so they don't leak into the app */
-function scopeStyles(html: string, scopeId: string): string {
-  return html.replace(/<style([^>]*)>([\s\S]*?)<\/style>/gi, (_, attrs, css) => {
-    // Prefix every selector with the scope ID
-    const scoped = css.replace(
-      /([^\r\n,{}]+)(,(?=[^}]*{)|\s*{)/g,
-      (sMatch: string, selector: string, sep: string) => {
-        const trimmed = selector.trim();
-        if (!trimmed || trimmed.startsWith('@') || trimmed.startsWith('from') || trimmed.startsWith('to') || /^\d+%/.test(trimmed)) {
-          return sMatch;
-        }
-        return `#${scopeId} ${trimmed}${sep}`;
-      },
-    );
-    return `<style${attrs}>${scoped}</style>`;
-  });
+function isForwardedEmail(
+  bodyHtml: string | null,
+  bodyText: string | null,
+  subject?: string | null,
+): boolean {
+  // A real forward has "Fwd:" / "FW:" in the subject. Without that prefix,
+  // any "---- Forwarded message ----" inside the body is part of quoted
+  // history (someone replying to a forwarded chain) and should NOT trigger
+  // the banner.
+  const subj = (subject ?? '').trim();
+  if (!/^\s*(fwd?|fw|tr|wg|rv|enc):/i.test(subj)) return false;
+
+  // Subject says forward; still require a body marker to weed out
+  // mislabelled subjects.
+  const text = `${bodyText || ''}\n${bodyHtml ? bodyHtml.replace(/<[^>]+>/g, ' ') : ''}`;
+  return (
+    /(?:^|\n)\s*-{2,}\s*(forwarded|original)\s+message\b/i.test(text) ||
+    /(?:^|\n)\s*begin forwarded message\b/i.test(text) ||
+    /(?:^|\n)\s*forwarded message\s*$/im.test(text)
+  );
 }
 
 /** Map MIME type / file extension to icon component and color */
@@ -461,173 +530,147 @@ function AttachmentPreview({ emailId, attachment, onClose }: {
   );
 }
 
-/** Renders email body inline (no iframe) with quoted content collapsed */
-function CollapsedEmailBody({ bodyHtml, bodyText, highlightText, emailId, attachments, onImageClick }: {
+/**
+ * Renders email body inside an isolated <iframe srcdoc> (Spark/Gmail-style).
+ *
+ * Why an iframe:
+ * - CSS isolation: the app's Tailwind preflight cannot bleed into the email,
+ *   and the email's CSS cannot leak into the app.
+ * - Layout fidelity: marketing emails are built for an isolated viewport with
+ *   their own <style> rules targeting body/*. Inline rendering breaks these.
+ * - Security: sandbox blocks scripts/forms/cookies even if sanitization misses.
+ *
+ * How sizing works:
+ * - The iframe's srcdoc includes a tiny bootstrap script that posts its full
+ *   content height to the parent via `postMessage` whenever it changes
+ *   (ResizeObserver + image-load events).
+ * - The parent listens for that message (keyed by a per-frame nonce) and grows
+ *   the iframe to fit so the page scrolls naturally as one document.
+ *
+ * Link clicks and image clicks are forwarded the same way.
+ */
+function CollapsedEmailBody({
+  bodyHtml,
+  bodyText,
+  subject,
+  preBodyHtmlClean,
+  preBodyHtmlTrimmed,
+  preHasQuotedHistory,
+  preIsForwarded,
+  highlightText,
+  emailId,
+  attachments,
+  authToken,
+  onImageClick,
+  onImageDownload,
+}: {
   bodyHtml: string | null;
   bodyText: string | null;
+  subject: string | null;
+  // Server-side pre-processed strings. When non-null we skip client work.
+  preBodyHtmlClean: string | null;
+  preBodyHtmlTrimmed: string | null;
+  preHasQuotedHistory: boolean | null;
+  preIsForwarded: boolean | null;
   highlightText: string | null;
   emailId: string;
   attachments: any[];
+  authToken: string | null;
   onImageClick?: (src: string, alt?: string) => void;
+  onImageDownload?: (src: string, alt?: string) => void;
 }) {
-  const bodyRef = useRef<HTMLDivElement>(null);
   const [showQuoted, setShowQuoted] = useState(false);
-  const scopeId = useMemo(() => `email-${emailId.slice(0, 8)}`, [emailId]);
+  const hasServerPreprocess = !!preBodyHtmlClean;
 
-  // Resolve cid: images by fetching attachments with auth and creating blob URLs
-  useEffect(() => {
-    const container = bodyRef.current;
-    if (!container) return;
-    const cidImgs = container.querySelectorAll('img[data-cid-attachment]');
-    const blobUrls: string[] = [];
-    const cidSet = new WeakSet<Element>();
-
-    cidImgs.forEach((img) => {
-      cidSet.add(img);
-      const attEmailId = img.getAttribute('data-cid-email');
-      const attId = img.getAttribute('data-cid-attachment');
-      if (!attEmailId || !attId) return;
-
-      const stored = localStorage.getItem('orbi-auth');
-      const token = stored ? JSON.parse(stored)?.state?.token : null;
-      fetch(`/api/emails/${attEmailId}/attachments/${attId}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      })
-        .then((res) => {
-          if (!res.ok) throw new Error('Failed to load');
-          return res.blob();
-        })
-        .then((blob) => {
-          const url = URL.createObjectURL(blob);
-          blobUrls.push(url);
-          (img as HTMLImageElement).src = url;
-        })
-        .catch(() => {
-          (img as HTMLImageElement).style.opacity = '0';
-        });
-    });
-
-    // For non-CID images: use opacity instead of display:none to preserve layout
-    const allImgs = container.querySelectorAll('img');
-    const errorHandlers: Array<[HTMLImageElement, () => void]> = [];
-    allImgs.forEach((img) => {
-      if (cidSet.has(img)) return;
-      const handler = () => { (img as HTMLImageElement).style.opacity = '0'; };
-      (img as HTMLImageElement).addEventListener('error', handler);
-      errorHandlers.push([img as HTMLImageElement, handler]);
-    });
-
-    return () => {
-      blobUrls.forEach((url) => URL.revokeObjectURL(url));
-      errorHandlers.forEach(([img, handler]) => img.removeEventListener('error', handler));
-    };
-  });
-
-  // Intercept link clicks in email body — open external links in system browser on native
-  useEffect(() => {
-    const container = bodyRef.current;
-    if (!container) return;
-
-    const handleClick = async (e: MouseEvent) => {
-      const anchor = (e.target as HTMLElement).closest('a');
-      if (!anchor) return;
-      const href = anchor.getAttribute('href');
-      if (!href) return;
-
-      // mailto: links — could open compose, but for now let native handle
-      if (href.startsWith('mailto:') || href.startsWith('tel:')) return;
-
-      // Internal links (anchors, relative) — skip
-      if (href.startsWith('#') || href.startsWith('/')) return;
-
-      // External link — open in system browser on native, new tab on web
-      e.preventDefault();
-      e.stopPropagation();
-
-      try {
-        const { isNative } = await import('../../lib/platform');
-        if (isNative()) {
-          const { Browser } = await import('@capacitor/browser');
-          Browser.open({ url: href });
-        } else {
-          window.open(href, '_blank', 'noopener');
-        }
-      } catch {
-        window.open(href, '_blank', 'noopener');
-      }
-    };
-
-    container.addEventListener('click', handleClick);
-    return () => container.removeEventListener('click', handleClick);
-  });
-
-  // Image tap to open lightbox on mobile
-  useEffect(() => {
-    if (!onImageClick) return;
-    const container = bodyRef.current;
-    if (!container) return;
-
-    const handleImgClick = (e: MouseEvent) => {
-      const img = (e.target as HTMLElement).closest('img');
-      if (!img) return;
-      const src = img.getAttribute('src');
-      if (src) {
-        e.preventDefault();
-        e.stopPropagation();
-        onImageClick(src, img.getAttribute('alt') || undefined);
-      }
-    };
-
-    container.addEventListener('click', handleImgClick);
-    return () => container.removeEventListener('click', handleImgClick);
-  });
-
-  const { trimmedHtml, trimmedText, hasQuoted } = useMemo(() => {
+  const { trimmedHtml, trimmedText, hasQuoted, isForwarded } = useMemo(() => {
+    // Fast path: server already did the work.
+    if (hasServerPreprocess) {
+      // The server-side flag was historically computed from the body only,
+      // which mislabels reply chains that quote a forwarded message. Gate
+      // it on the subject prefix here so legacy rows display correctly.
+      const subj = (subject ?? '').trim();
+      const subjectLooksForward = /^\s*(fwd?|fw|tr|wg|rv|enc):/i.test(subj);
+      return {
+        trimmedHtml: preBodyHtmlTrimmed ?? preBodyHtmlClean ?? null,
+        trimmedText: null,
+        hasQuoted: !!preHasQuotedHistory,
+        isForwarded: !!preIsForwarded && subjectLooksForward,
+      };
+    }
+    const forwarded = isForwardedEmail(bodyHtml, bodyText, subject);
     if (bodyHtml) {
       const result = stripQuotedContent(bodyHtml);
-      return { trimmedHtml: result.body, trimmedText: null, hasQuoted: result.hasQuoted };
+      return { trimmedHtml: result.body, trimmedText: null, hasQuoted: result.hasQuoted, isForwarded: forwarded };
     }
     if (bodyText) {
       const result = stripQuotedText(bodyText);
-      return { trimmedHtml: null, trimmedText: result.body, hasQuoted: result.hasQuoted };
+      return { trimmedHtml: null, trimmedText: result.body, hasQuoted: result.hasQuoted, isForwarded: forwarded };
     }
-    return { trimmedHtml: null, trimmedText: null, hasQuoted: false };
-  }, [bodyHtml, bodyText]);
+    return { trimmedHtml: null, trimmedText: null, hasQuoted: false, isForwarded: false };
+  }, [
+    bodyHtml,
+    bodyText,
+    hasServerPreprocess,
+    preBodyHtmlClean,
+    preBodyHtmlTrimmed,
+    preHasQuotedHistory,
+    preIsForwarded,
+    subject,
+  ]);
 
-  const displayHtml = showQuoted ? bodyHtml : trimmedHtml;
+  // When showing history we always need the full HTML. Use the pre-cleaned
+  // version if we have it; otherwise the raw bodyHtml.
+  const displayHtml = showQuoted
+    ? hasServerPreprocess
+      ? preBodyHtmlClean
+      : bodyHtml
+    : trimmedHtml;
   const displayText = showQuoted ? bodyText : trimmedText;
 
   const sanitizedHtml = useMemo(() => {
     if (!displayHtml) return null;
-
-    // Mark cid: images for later resolution via authenticated fetch
+    // Resolve CID images (cheap string replace) regardless of source.
     let resolved = markCidImages(displayHtml, emailId, attachments);
-
-    // Scope <style> blocks to this email's container before sanitizing
-    resolved = scopeStyles(resolved, scopeId);
-
-    let cleaned = DOMPurify.sanitize(resolved, {
-      FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'textarea', 'select', 'button'],
-      ADD_TAGS: ['style', 'img'],
-      ADD_ATTR: ['src', 'alt', 'width', 'height', 'border', 'align', 'valign', 'bgcolor', 'background', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'data-cid-email', 'data-cid-attachment', 'referrerpolicy'],
-      ADD_DATA_URI_TAGS: ['img'],
-    });
-    // Prevent external image servers from rejecting based on Referer header
-    cleaned = cleaned.replace(/<img /gi, '<img referrerpolicy="no-referrer" ');
-    if (highlightText) {
-      cleaned = injectHighlight(cleaned, highlightText);
+    // Skip the (expensive) DOMPurify pass when we trust the server output.
+    if (!hasServerPreprocess) {
+      resolved = DOMPurify.sanitize(resolved, {
+        FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'textarea', 'select', 'button'],
+        ADD_TAGS: ['style', 'img'],
+        ADD_ATTR: ['src', 'alt', 'width', 'height', 'border', 'align', 'valign', 'bgcolor', 'background', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'data-cid-email', 'data-cid-attachment', 'referrerpolicy'],
+        ADD_DATA_URI_TAGS: ['img'],
+      });
+      resolved = resolved.replace(/<img /gi, '<img referrerpolicy="no-referrer" ');
     }
-    return cleaned;
-  }, [displayHtml, highlightText, emailId, attachments, scopeId]);
+    if (highlightText) {
+      resolved = injectHighlight(resolved, highlightText);
+    }
+    return resolved;
+  }, [displayHtml, highlightText, emailId, attachments, hasServerPreprocess]);
 
   return (
-    <>
+    <div className="email-body-card">
+      {isForwarded && (
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
+          <span className="font-medium">Forwarded to you</span>
+          {hasQuoted && (
+            <button
+              onClick={() => setShowQuoted(!showQuoted)}
+              className="rounded-md bg-white/70 px-2 py-1 text-[11px] font-semibold text-amber-800 shadow-sm transition-colors hover:bg-white"
+            >
+              {showQuoted ? 'Hide history' : 'View history'}
+            </button>
+          )}
+        </div>
+      )}
       {sanitizedHtml ? (
-        <div
-          id={scopeId}
-          ref={bodyRef}
-          className="email-body-inline text-[14px] leading-relaxed text-text-primary [&_img]:max-w-full [&_img]:h-auto [&_a]:text-[#1a73e8] [&_table]:max-w-full [&_pre]:overflow-x-auto [&_pre]:max-w-full"
-          dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
+        <EmailBodyIframe
+          key={`${emailId}-${showQuoted ? 'history' : 'trimmed'}-${sanitizedHtml.length}`}
+          html={sanitizedHtml}
+          emailId={emailId}
+          authToken={authToken}
+          attachments={attachments}
+          onImageClick={onImageClick}
+          onImageDownload={onImageDownload}
         />
       ) : displayText ? (
         <pre
@@ -642,15 +685,388 @@ function CollapsedEmailBody({ bodyHtml, bodyText, highlightText, emailId, attach
           }}
         />
       ) : null}
-      {hasQuoted && (
+      {hasQuoted && !isForwarded && (
         <button
           onClick={() => setShowQuoted(!showQuoted)}
-          className="mt-2 rounded-md border border-border px-2.5 py-1 text-[11px] font-medium text-text-tertiary transition-colors hover:bg-surface hover:text-text-secondary"
+          className="mt-3 rounded-md border border-border bg-white px-2.5 py-1 text-[11px] font-medium text-text-tertiary transition-colors hover:bg-surface hover:text-text-secondary"
         >
-          {showQuoted ? 'Hide quoted text' : '···'}
+          {showQuoted ? 'Hide history' : 'View history'}
         </button>
       )}
-    </>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Iframe-based renderer (Spark / Gmail / Outlook parity)
+// ----------------------------------------------------------------------------
+
+/** Minimal reset injected into every email iframe.
+ *  Mirrors what big mail clients do: clear UA margins, sensible defaults for
+ *  links/images/tables, no Tailwind preflight to fight. */
+const EMAIL_IFRAME_BASE_CSS = `
+/* Minimal reset plus newsletter scaling. Marketing emails often ship a fixed
+   600px table canvas. We preserve that canvas, then scale it down inside the
+   iframe when the reading pane is narrower. */
+html, body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  color: #1a1a1a;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+/* Many marketing emails ship inline <style> with rules like
+   "html, body { height: 100% }" which, inside our 60px-seed iframe,
+   collapse the body to viewport size and trap scrollHeight at 60px.
+   Force auto height so our measurement wrapper can grow freely. */
+html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow: visible !important; }
+body { padding: 0 2px; max-width: 100%; overflow-x: hidden !important; }
+img, video, canvas, svg { border: 0; max-width: 100%; height: auto; }
+a { color: #1a73e8; text-decoration: underline; overflow-wrap: anywhere; word-break: break-word; }
+pre { white-space: pre-wrap; }
+table { border-collapse: collapse; }
+/* Wrapper we always measure from — author CSS can't shrink it. The bootstrap
+   may apply transform: scale(...) here for fixed-width newsletters. */
+#orbi-email-root { display: block; height: auto !important; min-height: 0; transform-origin: top left; }
+`;
+
+/* Override CSS appended AFTER the email body so any inline <style> blocks
+   the author shipped lose the cascade. Same set of height rules. */
+const EMAIL_IFRAME_OVERRIDE_CSS = `
+html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow-y: visible !important; overflow-x: hidden !important; }
+#orbi-email-root { display: block !important; height: auto !important; min-height: 0 !important; transform-origin: top left !important; }
+img, video, canvas, svg { max-width: 100%; height: auto; }
+a, pre { overflow-wrap: anywhere; word-break: break-word; }
+.orbi-image-hover-target { cursor: zoom-in !important; }
+.orbi-image-toolbar {
+  position: fixed;
+  z-index: 2147483647;
+  display: flex;
+  gap: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+.orbi-image-toolbar[data-visible="true"] { opacity: 1; pointer-events: auto; transform: translateY(0); }
+.orbi-image-toolbar button {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+.orbi-image-toolbar button:hover { transform: translateY(-1px); filter: saturate(1.08); }
+.orbi-image-toolbar button[data-action="view"] { background: #f97316; color: #ffffff; }
+.orbi-image-toolbar button[data-action="download"] { background: #f97316; color: #ffffff; }
+.orbi-image-toolbar button svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 2.5; fill: none; }
+`;
+
+function EmailBodyIframe({
+  html,
+  emailId,
+  authToken,
+  attachments,
+  onImageClick,
+  onImageDownload,
+}: {
+  html: string;
+  emailId: string;
+  authToken: string | null;
+  attachments: any[];
+  onImageClick?: (src: string, alt?: string) => void;
+  onImageDownload?: (src: string, alt?: string) => void;
+}) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [height, setHeight] = useState(60);
+  // Unique nonce per render so stale messages from a previous srcdoc are ignored.
+  const nonce = useMemo(
+    () => `${emailId}-${Math.random().toString(36).slice(2, 10)}`,
+    [emailId, html],
+  );
+  // When the rendered HTML changes (e.g. user toggled "View / Hide history"),
+  // shrink the iframe back to a tiny seed so we don't keep the previous
+  // taller measurement; the new content's `postMessage('height')` will then
+  // grow it to the right size.
+  useEffect(() => {
+    setHeight(60);
+  }, [nonce]);
+
+  // Resolve cid: attachments inside the iframe by fetching with auth and
+  // swapping in a blob URL. Done from the parent so we keep auth out of the
+  // sandbox.
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    let cancelled = false;
+    const blobUrls: string[] = [];
+
+    const resolveCids = () => {
+      const doc = iframe.contentDocument;
+      if (!doc) return;
+      const cidImgs = doc.querySelectorAll('img[data-cid-attachment]:not([data-cid-resolved])');
+      cidImgs.forEach((img) => {
+        const attId = img.getAttribute('data-cid-attachment');
+        if (!attId) return;
+        img.setAttribute('data-cid-resolved', 'loading');
+        fetch(inlineAttachmentUrl(attId), {
+          credentials: 'include',
+          headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+        })
+          .then((res) => (res.ok ? res.blob() : Promise.reject(new Error(`cid ${res.status}`))))
+          .then((blob) => {
+            if (cancelled) return;
+            const url = URL.createObjectURL(blob);
+            blobUrls.push(url);
+            const image = img as HTMLImageElement;
+            image.style.display = '';
+            image.src = url;
+            img.setAttribute('data-cid-resolved', 'true');
+          })
+          .catch((err) => {
+            img.removeAttribute('data-cid-resolved');
+            console.warn('[email-viewer] inline image failed to load', attId, err);
+          });
+      });
+      // Hide broken non-CID images so they don't reserve large empty boxes.
+      doc.querySelectorAll('img').forEach((img) => {
+        if (img.hasAttribute('data-cid-attachment')) return;
+        img.addEventListener('error', () => {
+          (img as HTMLImageElement).style.display = 'none';
+        });
+      });
+    };
+
+    const scheduleResolveCids = () => {
+      resolveCids();
+      requestAnimationFrame(resolveCids);
+      setTimeout(resolveCids, 100);
+      setTimeout(resolveCids, 500);
+      setTimeout(resolveCids, 1500);
+    };
+
+    // contentDocument can initially be a completed about:blank document before
+    // srcDoc is parsed. Always listen for iframe load and also retry shortly
+    // after mount so CID placeholders added by srcDoc are not missed.
+    iframe.addEventListener('load', scheduleResolveCids);
+    scheduleResolveCids();
+
+    return () => {
+      cancelled = true;
+      iframe.removeEventListener('load', scheduleResolveCids);
+      blobUrls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [authToken, nonce, attachments]);
+
+  // Listen for height / link / image messages from the iframe.
+  useEffect(() => {
+    const onMessage = async (e: MessageEvent) => {
+      const data = e.data;
+      if (!data || typeof data !== 'object' || data.nonce !== nonce) return;
+      if (data.type === 'height') {
+        const next = Number(data.height);
+        if (Number.isFinite(next) && next > 0) setHeight(Math.ceil(next));
+        return;
+      }
+      if (data.type === 'link' && typeof data.href === 'string') {
+        const href = data.href;
+        if (href.startsWith('mailto:') || href.startsWith('tel:')) {
+          window.location.href = href;
+          return;
+        }
+        try {
+          const { isNative } = await import('../../lib/platform');
+          if (isNative()) {
+            const { Browser } = await import('@capacitor/browser');
+            Browser.open({ url: href });
+          } else {
+            window.open(href, '_blank', 'noopener');
+          }
+        } catch {
+          window.open(href, '_blank', 'noopener');
+        }
+        return;
+      }
+      if (data.type === 'image' && typeof data.src === 'string' && onImageClick) {
+        onImageClick(data.src, data.alt);
+      }
+      if (data.type === 'image-download' && typeof data.src === 'string' && onImageDownload) {
+        onImageDownload(data.src, data.alt);
+      }
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, [nonce, onImageClick, onImageDownload]);
+
+  // Bootstrap script lives inside the iframe. Reports its own size and forwards
+  // link/image clicks. The parent also gets same-origin access so it can fetch
+  // authenticated CID attachments and swap them to blob URLs.
+  // Bootstrap intentionally avoids rewriting author tables. For fixed-width
+  // newsletters it scales the measurement wrapper, preserving layout while
+  // fitting the current pane width.
+  const bootstrap = `
+<script>
+(function () {
+  var NONCE = ${JSON.stringify(nonce)};
+  function post(payload) {
+    try { parent.postMessage(Object.assign({ nonce: NONCE }, payload), '*'); } catch (e) {}
+  }
+  function measure() {
+    var root = document.getElementById('orbi-email-root');
+    // Preserve fixed-width newsletter layouts (typically 600px tables) and
+    // scale the whole canvas down when the pane is narrower. This avoids both
+    // horizontal cutoff and broken table styling.
+    var rootHeight = 0;
+    if (root) {
+      root.style.transform = 'none';
+      root.style.width = '';
+      var nodes = root.querySelectorAll('*');
+      var naturalWidth = Math.max(root.scrollWidth, root.offsetWidth, document.documentElement.clientWidth || 0);
+      for (var i = 0; i < nodes.length; i++) {
+        var wr = nodes[i].getBoundingClientRect();
+        if (wr.right > naturalWidth) naturalWidth = Math.ceil(wr.right);
+      }
+      var viewportWidth = Math.max(1, document.documentElement.clientWidth || window.innerWidth || naturalWidth);
+      var scale = naturalWidth > viewportWidth ? Math.max(0.5, viewportWidth / naturalWidth) : 1;
+      root.style.transformOrigin = 'top left';
+      root.style.transform = scale < 1 ? 'scale(' + scale + ')' : 'none';
+      root.style.width = scale < 1 ? (100 / scale) + '%' : '';
+
+      var rect = root.getBoundingClientRect();
+      rootHeight = Math.max(Math.ceil(rect.bottom), Math.ceil(root.scrollHeight * scale), Math.ceil(root.offsetHeight * scale));
+      // Walk descendants after scaling to catch absolutely-positioned children.
+      for (var j = 0; j < nodes.length; j++) {
+        var r = nodes[j].getBoundingClientRect();
+        if (r.bottom > rootHeight) rootHeight = Math.ceil(r.bottom);
+      }
+    }
+    // If our wrapper exists, trust it. documentElement/body scrollHeight can
+    // report the iframe viewport height, which is stale when collapsing from
+    // full history back to the trimmed body.
+    if (root) return rootHeight;
+    return Math.max(
+      document.documentElement.scrollHeight,
+      document.body ? document.body.scrollHeight : 0,
+      document.documentElement.offsetHeight,
+      document.body ? document.body.offsetHeight : 0
+    );
+  }
+  function send() { post({ type: 'height', height: measure() }); }
+  var ro = ('ResizeObserver' in window) ? new ResizeObserver(send) : null;
+  var root = document.getElementById('orbi-email-root');
+  if (ro && root) ro.observe(root);
+  if (ro && document.documentElement) ro.observe(document.documentElement);
+  window.addEventListener('resize', send);
+  window.addEventListener('load', function () {
+    send();
+    var imgs = document.querySelectorAll('img');
+    for (var i = 0; i < imgs.length; i++) {
+      imgs[i].addEventListener('load', send);
+      imgs[i].addEventListener('error', send);
+    }
+    setTimeout(send, 300);
+    setTimeout(send, 1500);
+  });
+  // First measure as soon as DOM is parsed, even before <img> load.
+  function installImageToolbar() {
+    var toolbar = document.createElement('div');
+    toolbar.className = 'orbi-image-toolbar';
+    toolbar.setAttribute('aria-hidden', 'true');
+    toolbar.innerHTML = '<button type="button" data-action="view" aria-label="View fullscreen" title="View fullscreen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M21 16v5h-5"/><path d="M9 9 3.5 3.5M15 9l5.5-5.5M9 15l-5.5 5.5M15 15l5.5 5.5"/></svg></button><button type="button" data-action="download" aria-label="Download image" title="Download image"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>';
+    document.body.appendChild(toolbar);
+    var activeImg = null;
+    var hideTimer = null;
+    function clearHide() { if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } }
+    function hideSoon() {
+      clearHide();
+      hideTimer = setTimeout(function () {
+        toolbar.setAttribute('data-visible', 'false');
+        activeImg = null;
+      }, 220);
+    }
+    function showFor(img) {
+      if (!img || !img.src) return;
+      activeImg = img;
+      img.classList.add('orbi-image-hover-target');
+      var r = img.getBoundingClientRect();
+      var toolbarWidth = 61;
+      toolbar.style.left = Math.max(10, Math.min(r.right - toolbarWidth - 10, window.innerWidth - toolbarWidth - 10)) + 'px';
+      toolbar.style.top = Math.max(10, r.top + 10) + 'px';
+      toolbar.setAttribute('data-visible', 'true');
+      clearHide();
+    }
+    document.addEventListener('mouseover', function (e) {
+      var img = e.target && e.target.closest ? e.target.closest('img') : null;
+      if (img && img.src && img.naturalWidth > 24 && img.naturalHeight > 24) showFor(img);
+    });
+    document.addEventListener('mouseout', function (e) {
+      var img = e.target && e.target.closest ? e.target.closest('img') : null;
+      if (img && !toolbar.contains(e.relatedTarget)) hideSoon();
+    });
+    toolbar.addEventListener('mouseenter', clearHide);
+    toolbar.addEventListener('mouseleave', hideSoon);
+    toolbar.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!activeImg || !activeImg.src) return;
+      var action = e.target && e.target.getAttribute ? e.target.getAttribute('data-action') : '';
+      var payload = { src: activeImg.src, alt: activeImg.getAttribute('alt') || '' };
+      if (action === 'download') post(Object.assign({ type: 'image-download' }, payload));
+      else post(Object.assign({ type: 'image' }, payload));
+    });
+    window.addEventListener('scroll', function () { if (activeImg) showFor(activeImg); }, true);
+    window.addEventListener('resize', function () { if (activeImg) showFor(activeImg); });
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () { send(); installImageToolbar(); });
+  } else {
+    send();
+    installImageToolbar();
+  }
+  document.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a') : null;
+    if (a && a.href) {
+      var href = a.getAttribute('href') || '';
+      if (href && href.charAt(0) !== '#') {
+        e.preventDefault();
+        post({ type: 'link', href: a.href });
+      }
+      return;
+    }
+    var img = e.target && e.target.closest ? e.target.closest('img') : null;
+    if (img && img.src) {
+      post({ type: 'image', src: img.src, alt: img.getAttribute('alt') || '' });
+    }
+  });
+})();
+</script>`;
+
+  // Wrap the author's HTML in a measurement div, and append the override
+  // <style> AFTER the content so any inline author CSS rules for
+  // html/body/height lose the cascade.
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${EMAIL_IFRAME_BASE_CSS}</style></head><body><div id="orbi-email-root">${html}</div><style>${EMAIL_IFRAME_OVERRIDE_CSS}</style>${bootstrap}</body></html>`;
+
+  return (
+    <iframe
+      ref={iframeRef}
+      title="email"
+      // allow-same-origin lets the parent resolve CID/inline attachments with
+      // auth headers and swap them to blob URLs. Email HTML is sanitized before
+      // reaching srcDoc; sandbox still blocks forms/top-nav and isolates popups.
+      sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
+      srcDoc={srcDoc}
+      style={{ width: '100%', maxWidth: '100%', minWidth: 0, border: 0, height, display: 'block', overflow: 'hidden' }}
+    />
   );
 }
 
@@ -671,6 +1087,119 @@ function getSenderAccent(fromAddress: string, currentUserEmail: string | undefin
   const senderDomain = fromAddress.split('@')[1];
   if (senderDomain === TEAM_DOMAIN) return '#FFC494';
   return null;
+}
+
+function asAddressArray(value: unknown): Array<{ email?: string; name?: string }> {
+  if (Array.isArray(value)) return value as Array<{ email?: string; name?: string }>;
+  if (!value) return [];
+  if (typeof value === 'string') return value ? [{ email: value }] : [];
+  if (typeof value === 'object') return [value as { email?: string; name?: string }];
+  return [];
+}
+
+function addressListLabel(value: unknown): string {
+  return asAddressArray(value)
+    .map((a) => a.name || a.email)
+    .filter(Boolean)
+    .join(', ');
+}
+
+function addressListEmails(value: unknown): string {
+  return asAddressArray(value)
+    .map((a) => a.email)
+    .filter(Boolean)
+    .join(', ');
+}
+
+function compactAddressLabel(addr: { email?: string; name?: string }): string {
+  return addr.name || addr.email || '';
+}
+
+function EmailRecipientSummary({ to, cc, bcc }: { to: unknown; cc?: unknown; bcc?: unknown }) {
+  const [expanded, setExpanded] = useState(false);
+  const wrapperRef = useRef<HTMLSpanElement>(null);
+  const toList = asAddressArray(to).filter((a) => a.email || a.name);
+  const ccList = asAddressArray(cc).filter((a) => a.email || a.name);
+  const bccList = asAddressArray(bcc).filter((a) => a.email || a.name);
+  const extraCount = ccList.length + bccList.length;
+  const toLabel = toList.slice(0, 2).map(compactAddressLabel).filter(Boolean).join(', ') || 'undisclosed recipients';
+  const hiddenToCount = Math.max(0, toList.length - 2);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!wrapperRef.current?.contains(event.target as Node)) setExpanded(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false);
+    };
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [expanded]);
+
+  return (
+    <span ref={wrapperRef} className="relative ml-2 inline-flex items-center gap-1 text-[11px] text-text-tertiary">
+      <span>to {toLabel}</span>
+      {(hiddenToCount > 0 || extraCount > 0) && (
+        <button
+          type="button"
+          aria-expanded={expanded}
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded((v) => !v);
+          }}
+          className="rounded-full border border-border bg-surface px-1.5 py-0.5 text-[10px] font-semibold text-text-secondary transition-colors hover:border-primary/40 hover:text-primary"
+        >
+          +{hiddenToCount + extraCount}
+        </button>
+      )}
+      {expanded && (
+        <div className="absolute left-0 top-5 z-20 w-[min(420px,80vw)] rounded-xl border border-border bg-white p-3 text-[11px] text-text-secondary shadow-lg">
+          <div className="mb-1 flex items-center justify-between border-b border-border/60 pb-2">
+            <span className="font-semibold text-text-primary">Recipients</span>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setExpanded(false);
+              }}
+              className="rounded-md p-1 text-text-tertiary hover:bg-surface hover:text-text-primary"
+              aria-label="Close recipients"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <RecipientRow label="To" list={toList} />
+          {ccList.length > 0 && <RecipientRow label="Cc" list={ccList} />}
+          {bccList.length > 0 && <RecipientRow label="Bcc" list={bccList} />}
+        </div>
+      )}
+    </span>
+  );
+}
+
+function RecipientRow({ label, list }: { label: string; list: Array<{ email?: string; name?: string }> }) {
+  return (
+    <div className="grid grid-cols-[34px_1fr] gap-2 py-1">
+      <span className="font-semibold text-text-tertiary">{label}</span>
+      <span className="break-words text-text-secondary">
+        {list.map((a) => a.name && a.email ? `${a.name} <${a.email}>` : compactAddressLabel(a)).join(', ')}
+      </span>
+    </div>
+  );
+}
+
+function parseAddressString(value: string | undefined): Array<{ email: string }> {
+  if (!value) return [];
+  return value
+    .split(/[;,]/)
+    .map((email) => email.trim())
+    .filter(Boolean)
+    .map((email) => ({ email }));
 }
 
 // Mock team members for comment tagging
@@ -798,8 +1327,9 @@ function injectHighlight(html: string, text: string): string {
 }
 
 export function EmailViewer({ onBack }: EmailViewerProps) {
-  const { selectedThreadId, pendingDraft, setPendingDraft, highlightText, setHighlightText, scrollToScheduled, setScrollToScheduled, editingScheduledId, setEditingScheduledId, composingNew, setComposingNew, pendingReplyMode, setPendingReplyMode } = useUiStore();
+  const { selectedThreadId, setSelectedThread, pendingDraft, setPendingDraft, highlightText, setHighlightText, scrollToScheduled, setScrollToScheduled, editingScheduledId, setEditingScheduledId, composingNew, setComposingNew, pendingReplyMode, setPendingReplyMode } = useUiStore();
   const { user } = useAuthStore();
+  const authToken = useAuthToken();
   const { data: accountsData } = useAccounts();
   const resolveName = useContactNameResolver();
   const { data, isLoading, isPlaceholderData, isError, error } = useThread(selectedThreadId);
@@ -807,6 +1337,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const isStale = isPlaceholderData && data?.data?.id !== selectedThreadId;
   const effectiveLoading = isLoading || isStale;
   const updateThread = useUpdateThread();
+  const markThreadNotificationsRead = useMarkThreadNotificationsRead();
   const addComment = useAddComment();
   const blockSender = useBlockSender();
   const scheduledEmails = useThreadScheduledEmails(selectedThreadId);
@@ -829,6 +1360,19 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const [previewAttachment, setPreviewAttachment] = useState<{ emailId: string; attachment: any } | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt?: string } | null>(null);
   const isMobile = useIsMobile();
+
+  const downloadInlineImage = useCallback((src: string, alt?: string) => {
+    const extFromMime = src.startsWith('data:image/') ? src.slice('data:image/'.length).split(/[;,]/)[0] : '';
+    const safeName = (alt || 'inline-image').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'inline-image';
+    const filename = /\.(png|jpe?g|gif|webp|svg)$/i.test(safeName) ? safeName : `${safeName}.${extFromMime || 'png'}`;
+    const a = document.createElement('a');
+    a.href = src;
+    a.download = filename;
+    a.rel = 'noopener noreferrer';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }, []);
 
   // Swipe-back gesture from left edge (iOS convention)
   const swipeBackRef = useRef<{ startX: number; startY: number; active: boolean; hapticFired: boolean } | null>(null);
@@ -918,14 +1462,15 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     };
   }, [isMobile, onBack, replyMode]);
 
-  // Mark thread as read when opened
+  // Mark thread and any linked notifications as read when opened.
   useEffect(() => {
     if (!selectedThreadId || !data?.data) return;
     const thread = data.data;
     if (!thread.isRead) {
       updateThread.mutate({ id: selectedThreadId, isRead: true });
     }
-  }, [selectedThreadId, data?.data?.isRead]);
+    markThreadNotificationsRead(selectedThreadId).catch(console.error);
+  }, [selectedThreadId, data?.data?.isRead, markThreadNotificationsRead]);
 
   // Open reply/forward from context menu
   useEffect(() => {
@@ -945,8 +1490,9 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     return () => viewport.removeEventListener('scroll', onScroll);
   }, [selectedThreadId]);
 
-  // Scroll to bottom for multi-email threads, top for single emails
-  // useLayoutEffect blocks paint until scroll is positioned — prevents flash of top content
+  // Scroll to bottom for multi-email threads, top for single emails.
+  // Email bodies resize after iframe/image load, so retry bottom positioning a
+  // few times on open unless the user has already started scrolling.
   useLayoutEffect(() => {
     if (!selectedThreadId || !data?.data) return;
     if (data.data.id !== selectedThreadId) return;
@@ -955,10 +1501,22 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     const emailCount = data.data.emails?.length ?? 0;
     if (emailCount <= 1) {
       viewport.scrollTo({ top: 0, behavior: 'instant' });
-    } else {
-      viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
+      return;
     }
-  }, [selectedThreadId, data?.data?.id]);
+
+    let cancelled = false;
+    const delays = [0, 80, 220, 500, 1000];
+    const scrollBottom = () => {
+      if (cancelled || userScrolledRef.current) return;
+      viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
+    };
+    scrollBottom();
+    const timers = delays.slice(1).map((delay) => setTimeout(scrollBottom, delay));
+    return () => {
+      cancelled = true;
+      timers.forEach(clearTimeout);
+    };
+  }, [selectedThreadId, data?.data?.id, data?.data?.emails?.length]);
 
   // Auto-scroll to highlighted text and clear after 5s
   useEffect(() => {
@@ -1033,13 +1591,16 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const timeline = useMemo(() => {
     if (!data?.data) return [];
     const items: TimelineItem[] = [];
-    for (const email of data.data.emails ?? []) {
+    const emails = Array.isArray(data.data.emails) ? data.data.emails : [];
+    const comments = Array.isArray(data.data.comments) ? data.data.comments : [];
+    const scheduled = Array.isArray(scheduledEmails) ? scheduledEmails : [];
+    for (const email of emails) {
       items.push({ type: 'email', timestamp: email.receivedAt, data: email });
     }
-    for (const comment of data.data.comments ?? []) {
+    for (const comment of comments) {
       items.push({ type: 'comment', timestamp: comment.createdAt, data: comment });
     }
-    for (const se of scheduledEmails) {
+    for (const se of scheduled) {
       items.push({ type: 'scheduled', timestamp: se.sendAt, data: se });
     }
     items.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
@@ -1098,15 +1659,17 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       const firstAccountId = defaultAccount?.id ?? synced?.id ?? accounts[0]?.id;
       return (
         <div className="flex h-full flex-col bg-surface">
-          <div className="flex items-center border-b border-border px-5 pt-[30px] pb-2">
+          <div className="flex h-[78px] items-center border-b border-border px-5 pt-[32px]">
             <h2 className="flex h-7 items-center text-sm font-semibold text-text-primary">New Message</h2>
           </div>
           <div className="flex-1" />
-          <ComposeInline
-            mode="compose"
-            accountId={firstAccountId}
-            onClose={() => setComposingNew(false)}
-          />
+          <Suspense fallback={<div className="flex-1" />}>
+            <ComposeInline
+              mode="compose"
+              accountId={firstAccountId}
+              onClose={() => setComposingNew(false)}
+            />
+          </Suspense>
         </div>
       );
     }
@@ -1146,7 +1709,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     return (
       <div className="flex h-full flex-col bg-surface">
         {/* Skeleton: thread header toolbar */}
-        <div className="flex items-center justify-between border-b border-border px-5 pb-2 pt-[30px]">
+        <div className="flex h-[78px] items-center justify-between border-b border-border px-5 pt-[32px]">
           <div className="flex h-7 items-center"><div className="h-4 w-48 animate-pulse rounded bg-border/50" /></div>
           <div className="flex gap-1">
             {[1, 2, 3, 4].map((i) => (
@@ -1199,7 +1762,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   return (
     <div ref={viewerContainerRef} className="flex h-full flex-col bg-surface">
       {/* Thread header toolbar */}
-      <div className="flex items-center justify-between border-b border-border px-5 pb-2 pt-[30px]">
+      <div className="flex h-[78px] items-center justify-between border-b border-border px-5 pt-[32px]">
         <div className="flex h-7 min-w-0 items-center gap-3">
           {onBack && (
             <button
@@ -1328,6 +1891,21 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               </div>
             );
           })()}
+          {/* Close — right corner */}
+          <Tooltip content="Close (Esc)">
+            <button
+              onClick={(e) => {
+                (e.currentTarget as HTMLButtonElement).blur();
+                setSelectedThread(null);
+              }}
+              className="ml-1 flex items-center gap-1 rounded-lg border border-border bg-surface px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:border-text-tertiary hover:bg-surface-hover hover:text-text-primary focus:outline-none focus-visible:outline-none"
+              aria-label="Close"
+            >
+              <X className="h-4 w-4" />
+              <span>Close</span>
+              <kbd className="ml-1 hidden rounded border border-border bg-bg px-1 text-[10px] text-text-tertiary sm:inline">Esc</kbd>
+            </button>
+          </Tooltip>
         </div>
       </div>
 
@@ -1418,13 +1996,13 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                 return (
                   <div
                     key={email.id}
-                    className="relative mb-2 rounded-xl bg-white px-5 py-4 shadow-sm"
+                    className="relative mb-2 min-w-0 overflow-hidden rounded-xl bg-white px-5 py-4 shadow-sm"
                     style={accentColor ? { borderLeftWidth: '2px', borderLeftColor: accentColor + '60' } : undefined}
                   >
 
                     {/* Email header */}
-                    <div className="mb-3 flex items-start justify-between">
-                      <div className="flex items-center gap-2.5">
+                    <div className="mb-3 flex min-w-0 items-start justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-2.5">
                         <Avatar.Root className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full">
                           <Avatar.Fallback
                             className={cn(
@@ -1436,9 +2014,9 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                             {getInitials(senderName)}
                           </Avatar.Fallback>
                         </Avatar.Root>
-                        <div>
+                        <div className="min-w-0">
                           <button
-                            className="text-[13px] font-semibold text-text-primary hover:text-primary transition-colors cursor-pointer"
+                            className="max-w-full truncate text-[13px] font-semibold text-text-primary transition-colors hover:text-primary cursor-pointer"
                             onClick={(e) => {
                               setContactCardEmail(email.fromAddress);
                               setContactCardAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
@@ -1446,12 +2024,11 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                           >
                             {senderName}
                           </button>
-                          <span className="ml-2 text-[11px] text-text-tertiary">
-                            to{' '}
-                            {(email.toAddresses as any[])
-                              ?.map((a: any) => a.name || a.email)
-                              .join(', ')}
-                          </span>
+                          <EmailRecipientSummary
+                            to={email.toAddresses}
+                            cc={email.ccAddresses}
+                            bcc={email.bccAddresses}
+                          />
                         </div>
                       </div>
                       <span className="shrink-0 text-[11px] text-text-tertiary">
@@ -1459,14 +2036,24 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                       </span>
                     </div>
 
-                    {/* Email body — with quoted content collapsed */}
+                    {/* Email body — with quoted content collapsed.
+                        bodyHtmlClean / bodyHtmlTrimmed are server-side
+                        pre-processed strings (sanitize + strip-quotes). When
+                        present we skip the client's per-render DOMPurify pass. */}
                     <CollapsedEmailBody
                       bodyHtml={email.bodyHtml}
                       bodyText={email.bodyText}
+                      subject={email.subject ?? thread.subject ?? null}
+                      preBodyHtmlClean={email.bodyHtmlClean ?? null}
+                      preBodyHtmlTrimmed={email.bodyHtmlTrimmed ?? null}
+                      preHasQuotedHistory={email.hasQuotedHistory ?? null}
+                      preIsForwarded={email.isForwarded ?? null}
                       highlightText={highlightText}
                       emailId={email.id}
                       attachments={email.attachments ?? []}
-                      onImageClick={isMobile ? (src, alt) => setLightboxImage({ src, alt }) : undefined}
+                      authToken={authToken}
+                      onImageClick={(src, alt) => setLightboxImage({ src, alt })}
+                      onImageDownload={downloadInlineImage}
                     />
 
                     {/* Attachments — hide inline/embedded images (CID or signature-like) */}
@@ -1558,9 +2145,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               if (item.type === 'scheduled') {
                 const se = item.data;
                 const sendTime = new Date(se.sendAt);
-                const recipients = (se.toAddresses as any[])
-                  ?.map((a: any) => a.name || a.email)
-                  .join(', ');
+                const recipients = addressListLabel(se.toAddresses);
 
                 return (
                   <div
@@ -1612,7 +2197,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                           // Open compose with the scheduled email data for editing
                           setPendingDraft({
                             body: se.bodyText || '',
-                            to: (se.toAddresses as any[])?.map((a: any) => a.email).join(', '),
+                            to: addressListEmails(se.toAddresses),
                             subject: se.subject,
                             threadId: selectedThreadId || undefined,
                           });
@@ -1634,7 +2219,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                                   id: res.data.id,
                                   threadId: res.data.threadId,
                                   body: se.bodyText || '',
-                                  to: (se.toAddresses as any[])?.map((a: any) => a.email).join(', '),
+                                  to: addressListEmails(se.toAddresses),
                                   subject: se.subject,
                                   undoDeadlineAt: res.data.undoDeadlineAt,
                                 });
@@ -1732,7 +2317,9 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       {/* Reply bar + inline comment input */}
       <div className="border-t border-border bg-white">
         {replyMode ? (
-          <ComposeInline
+          <Suspense fallback={<div className="h-16 animate-pulse bg-surface" />}>
+            <ComposeInline
+            key={`${pendingDraft?.draftId ?? pendingDraft?.threadId ?? savedDraftEmail?.id ?? 'compose'}-${pendingDraft?.to ?? ''}-${replyMode}`}
             threadId={thread.id}
             lastEmailId={thread.emails?.[thread.emails.length - 1]?.id}
             accountId={(() => {
@@ -1741,9 +2328,9 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               if (!lastEmail) return thread.accountId;
               const allAccounts = accountsData?.data ?? [];
               const recipientEmails = [
-                ...(lastEmail.toAddresses as any[] ?? []),
-                ...(lastEmail.ccAddresses as any[] ?? []),
-              ].map((a: any) => a?.email?.toLowerCase()).filter(Boolean);
+                ...asAddressArray(lastEmail.toAddresses),
+                ...asAddressArray(lastEmail.ccAddresses),
+              ].map((a) => a?.email?.toLowerCase()).filter(Boolean);
               const matchedAccount = allAccounts.find((a: any) =>
                 recipientEmails.includes(a.email?.toLowerCase()),
               );
@@ -1767,7 +2354,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                 ? {
                     body: savedDraftEmail.bodyText || '',
                     bodyHtml: savedDraftEmail.bodyHtml || undefined,
-                    to: (savedDraftEmail.toAddresses as any[])?.map((a: any) => a.email).join(', ') || '',
+                    to: addressListEmails(savedDraftEmail.toAddresses),
                     subject: savedDraftEmail.subject || '',
                   }
                 : pendingDraft && pendingDraft.threadId === thread.id
@@ -1780,6 +2367,12 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                 : undefined
             }
             replyRecipients={(() => {
+              // AI-created drafts carry an explicit To value. In reply mode the
+              // composer renders recipient chips from `replyRecipients`, not
+              // `initialDraft.to`, so honor the AI draft recipient here instead
+              // of recomputing recipients from the latest email in the thread.
+              if (pendingDraft?.to) return parseAddressString(pendingDraft.to);
+
               const lastEmail = thread.emails?.[thread.emails.length - 1];
               if (!lastEmail) return [];
               const myEmails = (accountsData?.data ?? []).map((a: any) => a.email?.toLowerCase());
@@ -1789,7 +2382,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                 all.push({ email: lastEmail.fromAddress, name: lastEmail.fromName || undefined });
               }
               // Add to/cc (excluding self)
-              for (const addr of [...(lastEmail.toAddresses as any[] ?? []), ...(lastEmail.ccAddresses as any[] ?? [])]) {
+              for (const addr of [...asAddressArray(lastEmail.toAddresses), ...asAddressArray(lastEmail.ccAddresses)]) {
                 if (addr?.email && !myEmails.includes(addr.email.toLowerCase()) && !all.some((a) => a.email === addr.email)) {
                   all.push({ email: addr.email, name: addr.name || undefined });
                 }
@@ -1802,9 +2395,9 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               const allAccounts = accountsData?.data ?? [];
               if (lastEmail) {
                 const recipientEmails = [
-                  ...(lastEmail.toAddresses as any[] ?? []),
-                  ...(lastEmail.ccAddresses as any[] ?? []),
-                ].map((a: any) => a?.email?.toLowerCase()).filter(Boolean);
+                  ...asAddressArray(lastEmail.toAddresses),
+                  ...asAddressArray(lastEmail.ccAddresses),
+                ].map((a) => a?.email?.toLowerCase()).filter(Boolean);
                 const matched = allAccounts.find((a: any) =>
                   recipientEmails.includes(a.email?.toLowerCase()),
                 );
@@ -1813,6 +2406,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               return allAccounts.find((a: any) => a.id === thread.accountId)?.email;
             })()}
           />
+          </Suspense>
         ) : (
           <div className="space-y-0">
             {/* Reply bar — avatar + input on left, icons on right */}
@@ -1988,6 +2582,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
         src={lightboxImage?.src ?? null}
         alt={lightboxImage?.alt}
         onClose={() => setLightboxImage(null)}
+        onDownload={downloadInlineImage}
       />
     </div>
   );

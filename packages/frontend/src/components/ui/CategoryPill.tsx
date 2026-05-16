@@ -1,17 +1,18 @@
 import { cn } from '../../lib/utils';
 
-const CATEGORY_STYLES: Record<string, { bg: string; text: string; label: string }> = {
-  revision_request: { bg: 'bg-orange-50', text: 'text-orange-600', label: 'Revision' },
-  billing: { bg: 'bg-emerald-50', text: 'text-emerald-600', label: 'Billing' },
-  new_inquiry: { bg: 'bg-blue-50', text: 'text-blue-600', label: 'New Inquiry' },
-  project_update: { bg: 'bg-violet-50', text: 'text-violet-600', label: 'Update' },
-  meeting_scheduling: { bg: 'bg-teal-50', text: 'text-teal-600', label: 'Meeting' },
-  feedback: { bg: 'bg-yellow-50', text: 'text-yellow-600', label: 'Feedback' },
-  support_request: { bg: 'bg-red-50', text: 'text-red-600', label: 'Support' },
-  internal: { bg: 'bg-sky-50', text: 'text-sky-600', label: 'Internal' },
-  marketing: { bg: 'bg-pink-50', text: 'text-pink-600', label: 'Marketing' },
-  spam: { bg: 'bg-orange-50', text: 'text-orange-500', label: 'Spam' },
-  other: { bg: 'bg-gray-50', text: 'text-gray-500', label: 'Other' },
+const CATEGORY_STYLES: Record<string, { bg: string; text: string; ring: string; label: string }> = {
+  revision_request: { bg: 'bg-orange-100', text: 'text-orange-700', ring: 'ring-orange-200', label: 'Revision Request' },
+  billing: { bg: 'bg-emerald-100', text: 'text-emerald-700', ring: 'ring-emerald-200', label: 'Billing' },
+  new_inquiry: { bg: 'bg-blue-100', text: 'text-blue-700', ring: 'ring-blue-200', label: 'New Inquiry' },
+  project_update: { bg: 'bg-violet-100', text: 'text-violet-700', ring: 'ring-violet-200', label: 'Project Update' },
+  meeting_scheduling: { bg: 'bg-teal-100', text: 'text-teal-700', ring: 'ring-teal-200', label: 'Meeting Scheduling' },
+  feedback: { bg: 'bg-yellow-100', text: 'text-yellow-700', ring: 'ring-yellow-200', label: 'Feedback' },
+  support_request: { bg: 'bg-red-100', text: 'text-red-700', ring: 'ring-red-200', label: 'Support Request' },
+  internal: { bg: 'bg-sky-100', text: 'text-sky-700', ring: 'ring-sky-200', label: 'Internal' },
+  notification: { bg: 'bg-indigo-100', text: 'text-indigo-700', ring: 'ring-indigo-200', label: 'Notification' },
+  marketing: { bg: 'bg-pink-100', text: 'text-pink-700', ring: 'ring-pink-200', label: 'Marketing' },
+  spam: { bg: 'bg-orange-100', text: 'text-orange-600', ring: 'ring-orange-200', label: 'Spam' },
+  other: { bg: 'bg-gray-100', text: 'text-gray-600', ring: 'ring-gray-200', label: 'Other' },
 };
 
 interface CategoryPillProps {
@@ -27,9 +28,10 @@ export function CategoryPill({ category, className, onClick }: CategoryPillProps
     <span
       onClick={onClick}
       className={cn(
-        'inline-flex items-center rounded-lg px-1.5 py-0.5 text-[10px] font-semibold leading-tight',
+        'inline-flex items-center rounded-md px-1.5 py-[1px] text-[10px] font-semibold leading-tight ring-1 ring-inset',
         style.bg,
         style.text,
+        style.ring,
         onClick && 'cursor-pointer hover:opacity-80',
         className,
       )}
@@ -40,5 +42,9 @@ export function CategoryPill({ category, className, onClick }: CategoryPillProps
 }
 
 export function getCategoryLabel(category: string): string {
-  return CATEGORY_STYLES[category]?.label || category;
+  return CATEGORY_STYLES[category]?.label || category
+    .split('_')
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
 }

@@ -27,9 +27,9 @@ export const globalCostWindow = query({
     hours: v.optional(v.number()),
     feature: v.optional(v.string()),
   },
-  handler: async (ctx, { hours, feature }) => {
+  handler: async (ctx, { hours, feature }): Promise<any> => {
     await requireAdmin(ctx);
-    return await ctx.runQuery(internal.ai.usageData._featureWindow, {
+    return await (ctx as any).runQuery(internal.ai.usageData._featureWindow, {
       hours: hours ?? 24,
       feature,
     });
@@ -41,9 +41,9 @@ export const topUsersByCost = query({
     hours: v.optional(v.number()),
     limit: v.optional(v.number()),
   },
-  handler: async (ctx, { hours, limit }) => {
+  handler: async (ctx, { hours, limit }): Promise<any> => {
     await requireAdmin(ctx);
-    return await ctx.runQuery(internal.ai.usageData._topUsersByCost, {
+    return await (ctx as any).runQuery(internal.ai.usageData._topUsersByCost, {
       hours: hours ?? 24,
       limit: limit ?? 10,
     });
@@ -56,9 +56,9 @@ export const recentByFeature = query({
     hours: v.optional(v.number()),
     limit: v.optional(v.number()),
   },
-  handler: async (ctx, { feature, hours, limit }) => {
+  handler: async (ctx, { feature, hours, limit }): Promise<any> => {
     await requireAdmin(ctx);
-    return await ctx.runQuery(internal.ai.usageData._recentByFeature, {
+    return await (ctx as any).runQuery(internal.ai.usageData._recentByFeature, {
       feature,
       hours: hours ?? 24,
       limit: limit ?? 100,
@@ -70,13 +70,13 @@ export const recentByFeature = query({
 // in a single round-trip.
 export const overview = query({
   args: {},
-  handler: async (ctx) => {
+  handler: async (ctx): Promise<any> => {
     await requireAdmin(ctx);
     const [h1, h24, h168, h720] = await Promise.all([
-      ctx.runQuery(internal.ai.usageData._featureWindow, { hours: 1 }),
-      ctx.runQuery(internal.ai.usageData._featureWindow, { hours: 24 }),
-      ctx.runQuery(internal.ai.usageData._featureWindow, { hours: 24 * 7 }),
-      ctx.runQuery(internal.ai.usageData._featureWindow, { hours: 24 * 30 }),
+      (ctx as any).runQuery(internal.ai.usageData._featureWindow, { hours: 1 }),
+      (ctx as any).runQuery(internal.ai.usageData._featureWindow, { hours: 24 }),
+      (ctx as any).runQuery(internal.ai.usageData._featureWindow, { hours: 24 * 7 }),
+      (ctx as any).runQuery(internal.ai.usageData._featureWindow, { hours: 24 * 30 }),
     ]);
     return { lastHour: h1, last24h: h24, last7d: h168, last30d: h720 };
   },
@@ -86,9 +86,9 @@ export const overview = query({
 
 export const openCostAlerts = query({
   args: {},
-  handler: async (ctx) => {
+  handler: async (ctx): Promise<any> => {
     await requireAdmin(ctx);
-    return await ctx.runQuery(internal.ai.costAlerts._listOpen, {});
+    return await (ctx as any).runQuery(internal.ai.costAlerts._listOpen, {});
   },
 });
 
@@ -114,9 +114,9 @@ export const myUsage = query({
     hours: v.optional(v.number()),
     features: v.optional(v.array(v.string())),
   },
-  handler: async (ctx, { hours, features }) => {
+  handler: async (ctx, { hours, features }): Promise<any> => {
     const userId = await requireUser(ctx);
-    return await ctx.runQuery(internal.ai.usageData._userWindow, {
+    return await (ctx as any).runQuery(internal.ai.usageData._userWindow, {
       userId,
       hours: hours ?? 24,
       features,

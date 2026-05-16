@@ -14,6 +14,14 @@ import { requireUser } from "./lib/auth";
 const HOUR_MS = 60 * 60 * 1000;
 const MINUTE_MS = 60 * 1000;
 
+// Cap dashboard work to keep response time + bytes-read bounded. Convex hard
+// limit is 16 MiB read per function execution. Email docs include bodyHtml +
+// bodyText (often 20–80 KB), so the email cap must stay small — a few
+// hundred per account at most.
+const DASHBOARD_LOOKBACK_DAYS = 14;
+const DASHBOARD_MAX_EMAILS_PER_ACCOUNT = 400;
+const DASHBOARD_MAX_THREADS_SCANNED = 300;
+
 /** GET /api/dashboard/metrics */
 export const metrics = query({
   args: {},
@@ -43,38 +51,45 @@ export const metrics = query({
       exclusions.map((e) => e.emailAddress.toLowerCase()),
     );
 
-    // Pull non-archived/non-trashed threads per account, then gather emails.
-    const deltas: number[] = [];
-
-    for (const accountId of accountIds) {
-      const threads = await ctx.db
-        .query("threads")
-        .withIndex("by_account_isArchived_isTrashed", (q) =>
-          q.eq("accountId", accountId).eq("isArchived", false).eq("isTrashed", false),
-        )
-        .collect();
-
-      for (const thread of threads) {
-        const emails = await ctx.db
+    // Walk emails directly, in time order, bounded by lookback + per-account
+    // cap. We group by thread on the fly and compute reply deltas without
+    // ever loading historical mail.
+    const since = Date.now() - DASHBOARD_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+    const emailsPerAccount = await Promise.all(
+      accountIds.map((id) =>
+        ctx.db
           .query("emails")
-          .withIndex("by_thread_receivedAt", (q) =>
-            q.eq("threadId", thread._id),
+          .withIndex("by_account_receivedAt", (q) =>
+            q.eq("accountId", id).gte("receivedAt", since),
           )
-          .order("asc")
-          .collect();
+          .order("desc")
+          .take(DASHBOARD_MAX_EMAILS_PER_ACCOUNT),
+      ),
+    );
 
-        for (let i = 0; i < emails.length - 1; i++) {
-          const incoming = emails[i];
-          const next = emails[i + 1];
-          if (excludedSet.has(incoming.fromAddress.toLowerCase())) continue;
+    const byThread = new Map<string, typeof emailsPerAccount[number]>();
+    for (const batch of emailsPerAccount) {
+      for (const e of batch) {
+        const arr = byThread.get(e.threadId) ?? [];
+        arr.push(e);
+        byThread.set(e.threadId, arr);
+      }
+    }
 
-          const isIncoming = !userEmails.has(incoming.fromAddress.toLowerCase());
-          const isReply = userEmails.has(next.fromAddress.toLowerCase());
+    const deltas: number[] = [];
+    for (const emails of byThread.values()) {
+      emails.sort((a, b) => a.receivedAt - b.receivedAt);
+      for (let i = 0; i < emails.length - 1; i++) {
+        const incoming = emails[i];
+        const next = emails[i + 1];
+        if (excludedSet.has(incoming.fromAddress.toLowerCase())) continue;
 
-          if (isIncoming && isReply) {
-            const deltaMs = next.receivedAt - incoming.receivedAt;
-            if (deltaMs > 0) deltas.push(deltaMs / MINUTE_MS);
-          }
+        const isIncoming = !userEmails.has(incoming.fromAddress.toLowerCase());
+        const isReply = userEmails.has(next.fromAddress.toLowerCase());
+
+        if (isIncoming && isReply) {
+          const deltaMs = next.receivedAt - incoming.receivedAt;
+          if (deltaMs > 0) deltas.push(deltaMs / MINUTE_MS);
         }
       }
     }
@@ -131,18 +146,21 @@ export const needsReply = query({
       lastMessageAt: number;
     }[] = [];
 
+    // Look at the most recently active threads only — anything older than
+    // the lookback window is unlikely to be the "needs reply" surface and
+    // would push us past the 16 MiB read budget.
     for (const accountId of accountIds) {
       const threads = await ctx.db
         .query("threads")
         .withIndex("by_account_isArchived_isTrashed", (q) =>
           q.eq("accountId", accountId).eq("isArchived", false).eq("isTrashed", false),
         )
-        .collect();
+        .take(DASHBOARD_MAX_THREADS_SCANNED);
 
-      // Sort by lastMessageAt desc to roughly mirror Prisma orderBy.
       threads.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+      const recentThreads = threads.slice(0, DASHBOARD_MAX_THREADS_SCANNED);
 
-      for (const thread of threads) {
+      for (const thread of recentThreads) {
         const lastEmail = await ctx.db
           .query("emails")
           .withIndex("by_thread_receivedAt", (q) =>
@@ -188,15 +206,47 @@ export const taskList = query({
     const take = Math.min(limit, 100);
     const skip = (page - 1) * take;
 
-    let rows = (await ctx.db.query("tasks").collect()).filter(
-      (t) => t.userId === userId,
-    );
-
-    if (status === "open") rows = rows.filter((t) => t.status === "OPEN");
-    else if (status === "done")
-      rows = rows.filter(
-        (t) => t.status === "DONE" || t.status === "AUTO_RESOLVED",
+    // Use the by_user_status_deadline index instead of scanning the whole
+    // tasks table.
+    let rows: any[];
+    if (status === "open") {
+      rows = await ctx.db
+        .query("tasks")
+        .withIndex("by_user_status_deadline", (q) =>
+          q.eq("userId", userId).eq("status", "OPEN"),
+        )
+        .collect();
+    } else if (status === "done") {
+      const [done, auto] = await Promise.all([
+        ctx.db
+          .query("tasks")
+          .withIndex("by_user_status_deadline", (q) =>
+            q.eq("userId", userId).eq("status", "DONE"),
+          )
+          .collect(),
+        ctx.db
+          .query("tasks")
+          .withIndex("by_user_status_deadline", (q) =>
+            q.eq("userId", userId).eq("status", "AUTO_RESOLVED"),
+          )
+          .collect(),
+      ]);
+      rows = [...done, ...auto];
+    } else {
+      // "all" — collect all statuses for this user. Still bounded by user.
+      const statuses = ["OPEN", "DONE", "AUTO_RESOLVED"] as const;
+      const batches = await Promise.all(
+        statuses.map((s) =>
+          ctx.db
+            .query("tasks")
+            .withIndex("by_user_status_deadline", (q) =>
+              q.eq("userId", userId).eq("status", s),
+            )
+            .collect(),
+        ),
       );
+      rows = batches.flat();
+    }
 
     rows.sort((a, b) => {
       if (a.status !== b.status) return a.status < b.status ? -1 : 1;
@@ -213,7 +263,7 @@ export const taskList = query({
     const threadMap = new Map(
       threads
         .filter((t): t is NonNullable<typeof t> => t !== null)
-        .map((t) => [t._id, { subject: t.subject }]),
+        .map((t: any) => [t._id, { subject: t.subject }]),
     );
 
     return {
@@ -258,28 +308,59 @@ export const pendingComments = query({
       .collect();
     const myAccountIds = new Set(myAccounts.map((a) => a._id));
 
-    // Fetch unresolved comments and filter — schema has no isResolved index,
-    // so we collect and filter in JS (small N — only unresolved comments).
-    const allComments = await ctx.db.query("threadComments").collect();
-    const unresolved = allComments.filter(
-      (c) => !c.isResolved && c.authorId !== userId,
+    // Avoid a full-table scan of threadComments. We already know the
+    // candidate threadIds (my mentions + my account's threads), so walk
+    // by_thread for each and merge. We also bound the per-account thread
+    // scan to the most recently active.
+    const accountThreadCandidates: typeof myAccounts[number] extends never
+      ? never
+      : Array<{ _id: string; accountId: string; lastMessageAt: number }> = [];
+
+    for (const accountId of myAccountIds) {
+      const threads = await ctx.db
+        .query("threads")
+        .withIndex("by_account_isArchived_isTrashed", (q) =>
+          q.eq("accountId", accountId as any).eq("isArchived", false).eq("isTrashed", false),
+        )
+        .take(DASHBOARD_MAX_THREADS_SCANNED);
+      accountThreadCandidates.push(...(threads as any));
+    }
+
+    const candidateThreadIds = new Set<string>(
+      accountThreadCandidates.map((t) => t._id as string),
     );
 
-    const matched: typeof unresolved = [];
+    const commentsByThread = new Map<string, Array<any>>();
+    for (const threadId of candidateThreadIds) {
+      const rows = await ctx.db
+        .query("threadComments")
+        .withIndex("by_thread", (q) => q.eq("threadId", threadId as any))
+        .take(50);
+      if (rows.length > 0) commentsByThread.set(threadId, rows);
+    }
+
+    // Plus comments where I'm mentioned but whose thread isn't in my
+    // accounts (e.g. shared threads). Fetch each by id.
+    const mentionedComments = await Promise.all(
+      Array.from(mentionCommentIds).map((id) => ctx.db.get(id)),
+    );
+
     const seen = new Set<string>();
-    for (const c of unresolved) {
-      if (seen.has(c._id)) continue;
-      let isMatch = mentionCommentIds.has(c._id);
-      if (!isMatch) {
-        const thread = await ctx.db.get(c.threadId);
-        if (thread && myAccountIds.has(thread.accountId)) {
-          isMatch = true;
-        }
-      }
-      if (isMatch) {
+    const matched: any[] = [];
+    for (const rows of commentsByThread.values()) {
+      for (const c of rows) {
+        if (seen.has(c._id)) continue;
+        if (c.isResolved || c.authorId === userId) continue;
         matched.push(c);
         seen.add(c._id);
       }
+    }
+    for (const c of mentionedComments) {
+      if (!c) continue;
+      if (seen.has(c._id)) continue;
+      if (c.isResolved || c.authorId === userId) continue;
+      matched.push(c);
+      seen.add(c._id);
     }
 
     matched.sort((a, b) => b._creationTime - a._creationTime);
@@ -288,8 +369,8 @@ export const pendingComments = query({
     // Hydrate author + thread (matches Prisma include shape).
     const result = await Promise.all(
       top.map(async (c) => {
-        const author = await ctx.db.get(c.authorId);
-        const thread = await ctx.db.get(c.threadId);
+        const author = (await ctx.db.get(c.authorId)) as any;
+        const thread = (await ctx.db.get(c.threadId)) as any;
         return {
           ...c,
           author: author
@@ -344,12 +425,23 @@ export const activity = query({
       .filter((e) => !userEmails.has(e.fromAddress.toLowerCase()))
       .slice(0, 5);
 
-    // Recently resolved tasks
-    const tasksAll = (await ctx.db.query("tasks").collect()).filter(
-      (t) =>
-        t.userId === userId &&
-        (t.status === "DONE" || t.status === "AUTO_RESOLVED") &&
-        t.resolvedAt !== undefined,
+    // Recently resolved tasks — use the indexed query, scoped by user+status.
+    const [doneTasks, autoTasks] = await Promise.all([
+      ctx.db
+        .query("tasks")
+        .withIndex("by_user_status_deadline", (q) =>
+          q.eq("userId", userId).eq("status", "DONE"),
+        )
+        .collect(),
+      ctx.db
+        .query("tasks")
+        .withIndex("by_user_status_deadline", (q) =>
+          q.eq("userId", userId).eq("status", "AUTO_RESOLVED"),
+        )
+        .collect(),
+    ]);
+    const tasksAll = [...doneTasks, ...autoTasks].filter(
+      (t) => t.resolvedAt !== undefined,
     );
     tasksAll.sort((a, b) => (b.resolvedAt ?? 0) - (a.resolvedAt ?? 0));
     const resolvedTasks = tasksAll.slice(0, 5);

@@ -19,6 +19,16 @@ function formatScheduledTime(dateStr: string): string {
   return `${date.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })} at ${time}`;
 }
 
+function addressListEmails(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  return value.map((a: any) => a?.email).filter(Boolean).join(', ');
+}
+
+function addressListLabel(value: unknown): string {
+  if (!Array.isArray(value)) return '';
+  return value.map((a: any) => a?.name || a?.email).filter(Boolean).join(', ');
+}
+
 function StatusBadge({ status }: { status: string }) {
   const styles: Record<string, string> = {
     SCHEDULED: 'bg-blue-50 text-blue-600',
@@ -52,7 +62,7 @@ export function ScheduledEmailList() {
       // Standalone scheduled email — open compose with its content as a pending draft
       setPendingDraft({
         body: email.bodyText || '',
-        to: (email.toAddresses as any[])?.map((a: any) => a.email).join(', '),
+        to: addressListEmails(email.toAddresses),
         subject: email.subject,
       });
       setSelectedFolder('inbox');
@@ -88,9 +98,7 @@ export function ScheduledEmailList() {
     <ScrollArea.Root className="min-h-0 flex-1">
       <ScrollArea.Viewport className="h-full w-full">
         {items.map((email) => {
-          const recipients = (email.toAddresses as any[])
-            .map((a: any) => a.name || a.email)
-            .join(', ');
+          const recipients = addressListLabel(email.toAddresses);
 
           return (
             <div

@@ -12,10 +12,25 @@ function shapeContact(c: any) {
   };
 }
 
+function looksLikeEmailLocalPart(value: string, email: string): boolean {
+  const local = email.split('@')[0]?.toLowerCase().replace(/[._+\-0-9]/g, '') ?? '';
+  const normalized = value.toLowerCase().replace(/[._+\-0-9\s]/g, '');
+  return normalized.length > 0 && (normalized === local || local.includes(normalized) || normalized.includes(local));
+}
+
+function isMeaningfulHeaderName(fromName: string | undefined | null, fromAddress: string): fromName is string {
+  const name = fromName?.trim();
+  if (!name) return false;
+  if (name.includes('@')) return false;
+  if (looksLikeEmailLocalPart(name, fromAddress)) return false;
+  return true;
+}
+
 /**
  * Returns a function that resolves an email address to a display name.
- * Uses a cached name map from the contacts/persons system.
- * Falls back to the provided fromName or email address.
+ * Prefer the current message's From display name when it is meaningful; cached
+ * contact/person names can be stale or mis-merged for brand/newsletter senders
+ * that reuse shared ESP infrastructure.
  */
 export function useContactNameResolver() {
   const { isAuthenticated } = useConvexAuth();
@@ -24,6 +39,7 @@ export function useContactNameResolver() {
   const resolveName = useCallback(
     (fromAddress: string | undefined | null, fromName: string | undefined | null): string => {
       if (!fromAddress) return fromName || 'Unknown';
+      if (isMeaningfulHeaderName(fromName, fromAddress)) return fromName.trim();
       const map = nameMap ?? {};
       const resolved = map[fromAddress.toLowerCase()];
       if (resolved) return resolved;

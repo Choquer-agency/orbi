@@ -62,7 +62,7 @@ export const searchThreads = query({
     const allPersons = await ctx.db
       .query("persons")
       .withIndex("by_user_displayName", (q) => q.eq("userId", userId))
-      .collect();
+      .take(500);
     const matchedPersons = allPersons
       .filter((p) => ciIncludes(p.displayName, term))
       .slice(0, 5);
@@ -71,12 +71,12 @@ export const searchThreads = query({
       const contacts = await ctx.db
         .query("contacts")
         .withIndex("by_person", (q) => q.eq("personId", p._id))
-        .collect();
+        .take(50);
       for (const c of contacts) personEmails.add(c.email.toLowerCase());
     }
 
     // ── Pull recent emails per account, filter in-memory ──────────────────
-    const perAccountLimit = 1000;
+    const perAccountLimit = 200;
     const emailsArrays = await Promise.all(
       accountIds.map((aid) =>
         ctx.db
@@ -93,7 +93,7 @@ export const searchThreads = query({
         ciIncludes(e.subject, term) ||
         ciIncludes(e.fromAddress, term) ||
         ciIncludes(e.fromName, term) ||
-        ciIncludes(e.bodyText, term)
+        ciIncludes(e.snippet, term)
       ) {
         return true;
       }

@@ -17,6 +17,45 @@ import type {
 // endpoint is registered in convex/ai/http.ts at POST /ai/chat/stream.
 const STREAM_URL = `${import.meta.env.VITE_CONVEX_SITE_URL}/ai/chat/stream`;
 
+function normalizeDraftHtml(value: string): string {
+  const raw = value.trim();
+  if (!raw) return '';
+  if (/<\/?[a-z][\s\S]*>/i.test(raw)) return raw;
+  return raw
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${paragraph.replace(/\n/g, '<br/>')}</p>`)
+    .join('');
+}
+
+function stripHtml(html: string): string {
+  return normalizeDraftHtml(html)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
+    .replace(/<li[^>]*>/gi, '• ')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<\/?(?:ul|ol)[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function syncOpenDraftFromAi(draft: AiChatMessage['draft'] | undefined) {
+  if (!draft) return;
+  const ui = useUiStore.getState();
+  if (!ui.pendingDraft) return;
+  if (draft.threadId && ui.pendingDraft.threadId && draft.threadId !== ui.pendingDraft.threadId) return;
+  const htmlBody = normalizeDraftHtml(draft.body);
+  ui.setPendingDraft({
+    ...ui.pendingDraft,
+    body: stripHtml(htmlBody),
+    bodyHtml: htmlBody,
+    to: draft.to ?? ui.pendingDraft.to,
+    subject: draft.subject ?? ui.pendingDraft.subject,
+    threadId: draft.threadId ?? ui.pendingDraft.threadId,
+    aiOriginal: ui.pendingDraft.aiOriginal ?? { body: stripHtml(htmlBody) },
+  });
+}
+
 // ── Main hook ──
 
 export function useAiChat() {
@@ -232,6 +271,7 @@ export function useAiChat() {
         const finalMsg = useAiChatStore
           .getState()
           .messages.find((m) => m.id === streamingMsgId);
+        syncOpenDraftFromAi(finalMsg?.draft);
         if (finalMsg && conversationId) {
           persistAssistantMessage(convex, conversationId, finalMsg);
         }
@@ -295,6 +335,7 @@ export function useAiChat() {
             const fallbackMsg = useAiChatStore
               .getState()
               .messages.find((m) => m.id === streamingMsgId);
+            syncOpenDraftFromAi(fallbackMsg?.draft);
             if (fallbackMsg && conversationId) {
               persistAssistantMessage(convex, conversationId, fallbackMsg);
             }
@@ -308,6 +349,7 @@ export function useAiChat() {
               contactResults: result.contactResults,
               draft: result.draft,
             });
+            syncOpenDraftFromAi(result.draft);
           }
         } catch {
           if (streamingMsgId) {

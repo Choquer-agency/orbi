@@ -193,7 +193,7 @@ export const submitFeedback = mutation({
       subjectSnippet,
     });
 
-    if (args.emailId && args.suggestedCategory !== args.finalCategory) {
+    if (args.emailId) {
       const cls = await ctx.db
         .query("emailClassifications")
         .withIndex("by_email", (q) => q.eq("emailId", args.emailId!))
@@ -207,11 +207,13 @@ export const submitFeedback = mutation({
       }
     }
 
-    if (args.threadId && isTriageCategory(args.finalCategory)) {
+    if (args.threadId) {
       const thread = await ctx.db.get(args.threadId);
       if (thread) {
         const filtered = thread.labels.filter((l) => !l.startsWith("triage:"));
-        filtered.push(`triage:${args.finalCategory}`);
+        if (isTriageCategory(args.finalCategory)) {
+          filtered.push(`triage:${args.finalCategory}`);
+        }
         await ctx.db.patch(args.threadId, { labels: filtered });
       }
     }

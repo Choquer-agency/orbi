@@ -282,7 +282,7 @@ const streamChat = httpAction(async (ctx, req) => {
                         undefined,
                       subject: input.subject,
                       body: input.body,
-                      threadId: body.threadId,
+                      threadId: (input.thread_id as string | undefined) || body.threadId,
                       greetingUsed: input.greeting_used,
                       signoffUsed: input.signoff_used,
                       correctionsApplied: ctxResult.correctionsApplied,

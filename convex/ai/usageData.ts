@@ -84,8 +84,11 @@ export const _featureDailyTotals = internalQuery({
             q.eq("feature", feature).gte("createdAt", since),
           )
           .collect()
-      : await ctx.db.query("aiUsageLogs").collect();
-    const recent = feature ? rows : rows.filter((r) => r.createdAt >= since);
+      : await ctx.db
+          .query("aiUsageLogs")
+          .withIndex("by_createdAt", (q) => q.gte("createdAt", since))
+          .collect();
+    const recent = rows;
     const totals = new Map<string, { calls: number; inputTokens: number; outputTokens: number; estimatedCostUsd: number }>();
     for (const row of recent) {
       const t = totals.get(row.feature) ?? {
@@ -139,8 +142,11 @@ export const _featureWindow = internalQuery({
             q.eq("feature", feature).gte("createdAt", since),
           )
           .collect()
-      : await ctx.db.query("aiUsageLogs").collect();
-    const recent = feature ? rows : rows.filter((r) => r.createdAt >= since);
+      : await ctx.db
+          .query("aiUsageLogs")
+          .withIndex("by_createdAt", (q) => q.gte("createdAt", since))
+          .collect();
+    const recent = rows;
     const byFeature = new Map<string, AggregateBucket>();
     const byModel = new Map<string, AggregateBucket>();
     for (const row of recent) {
@@ -161,8 +167,10 @@ export const _topUsersByCost = internalQuery({
   args: { hours: v.number(), limit: v.optional(v.number()) },
   handler: async (ctx, { hours, limit }) => {
     const since = Date.now() - hours * HOUR_MS;
-    const rows = await ctx.db.query("aiUsageLogs").collect();
-    const recent = rows.filter((r) => r.createdAt >= since);
+    const recent = await ctx.db
+      .query("aiUsageLogs")
+      .withIndex("by_createdAt", (q) => q.gte("createdAt", since))
+      .collect();
     const byUser = new Map<string, AggregateBucket>();
     for (const row of recent) {
       if (!row.userId) continue;

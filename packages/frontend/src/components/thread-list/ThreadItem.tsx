@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { memo, useRef, type KeyboardEvent, type MouseEvent } from 'react';
 import { AlarmClockOff, Archive, CalendarDays, Clock, Forward, FolderInput, Inbox, Mail, MailOpen, Moon, Reply, Star, Sun, Trash2 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as ContextMenu from '@radix-ui/react-context-menu';
@@ -23,11 +23,12 @@ interface ThreadItemProps {
   onShiftClick: (id: string) => void;
   onCtrlClick: (id: string) => void;
   accountColor?: string;
+  onPrefetch?: (id: string) => void;
 }
 
 const SWIPE_REVEAL = 80; // Distance to reveal action buttons
 
-export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onShiftClick, onCtrlClick, accountColor }: ThreadItemProps) {
+function ThreadItemImpl({ thread, isSelected, isMultiSelected, onSelect, onShiftClick, onCtrlClick, accountColor, onPrefetch }: ThreadItemProps) {
   const updateThread = useUpdateThread();
   const unsnoozeThread = useUnsnoozeThread();
   const setPendingReplyMode = useUiStore((s) => s.setPendingReplyMode);
@@ -38,7 +39,7 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
   const resolveName = useContactNameResolver();
   const latestEmail = thread.emails?.[0];
   const commentCount = thread._count?.comments ?? 0;
-  const triageCategories = ['marketing', 'spam'];
+  const triageCategories = ['marketing', 'spam', 'notification'];
   const hasTriageLabel = thread.labels?.some((l: string) => l.startsWith('triage:'));
   const hasTriageClassification = latestEmail?.classification && triageCategories.includes(latestEmail.classification.category);
   const classification = (hasTriageLabel || hasTriageClassification) ? latestEmail?.classification : null;
@@ -123,38 +124,47 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
   const menuItemClass = 'flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] outline-none transition-colors text-text-primary data-[highlighted]:bg-surface';
   const dangerItemClass = 'flex cursor-pointer items-center gap-2.5 rounded-md px-2.5 py-1.5 text-[13px] outline-none transition-colors text-red-600 data-[highlighted]:bg-red-50';
 
+  const selectThread = (e: MouseEvent | KeyboardEvent) => {
+    if ('shiftKey' in e && e.shiftKey) {
+      e.preventDefault();
+      onShiftClick(thread.id);
+    } else if ('metaKey' in e && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      onCtrlClick(thread.id);
+    } else {
+      onSelect(thread.id);
+    }
+  };
+
   const rowContent = (
-    <button
-      onClick={(e) => {
-        if (e.shiftKey) {
-          e.preventDefault();
-          onShiftClick(thread.id);
-        } else if (e.metaKey || e.ctrlKey) {
-          e.preventDefault();
-          onCtrlClick(thread.id);
-        } else {
-          onSelect(thread.id);
-        }
+    <div
+      role="button"
+      tabIndex={0}
+      onPointerEnter={() => onPrefetch?.(thread.id)}
+      onFocus={() => onPrefetch?.(thread.id)}
+      onClick={selectThread}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') selectThread(e);
       }}
       aria-label={`${!thread.isRead ? 'Unread: ' : ''}${thread.subject || 'No subject'}, from ${senderName}, ${formatRelativeTime(thread.lastReceivedAt ?? thread.lastMessageAt)}`}
       className={cn(
-        'group relative flex w-full min-w-0 gap-3 overflow-hidden px-5 text-left transition-colors',
-        isMobile ? 'py-3.5' : 'py-2.5',
+        'group relative flex w-full min-w-0 cursor-pointer items-start gap-3 overflow-hidden px-5 text-left transition-colors focus:outline-none focus-visible:outline-none',
+        isMobile ? 'py-3' : 'py-2.5',
         isMultiSelected
-          ? 'bg-primary/10 ring-1 ring-inset ring-primary/20'
+          ? 'bg-primary/15 ring-1 ring-inset ring-primary/30'
           : isSelected
-            ? 'bg-selected'
-            : 'hover:bg-surface-warm',
+            ? 'bg-surface-sidebar-active'
+            : 'hover:bg-surface-sidebar-hover',
       )}
     >
-      {/* Avatar with account color ring */}
+      {/* Avatar with account color ring — aligned with the sender-name line */}
       <Avatar.Root
-        className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full"
-        style={accountColor ? { boxShadow: `0 0 0 2px white, 0 0 0 3.5px ${accountColor}` } : undefined}
+        className="mt-[1px] flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full"
+        style={accountColor ? { boxShadow: `0 0 0 2px var(--color-surface), 0 0 0 3.5px ${accountColor}` } : undefined}
       >
         <Avatar.Fallback
           className={cn(
-            'flex h-full w-full items-center justify-center rounded-full text-[9px] font-bold',
+            'flex h-full w-full items-center justify-center rounded-full text-[10px] font-bold',
             avatarColor.bg,
             avatarColor.text,
           )}
@@ -183,41 +193,43 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
             {thread.subject}
           </p>
           {thread.messageCount > 1 && (
-            <span className="shrink-0 rounded bg-surface px-1 py-0.5 text-[10px] text-text-tertiary">
+            <span className="shrink-0 rounded-full bg-orange-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
               {thread.messageCount}
             </span>
           )}
         </div>
-        <p className="overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-text-tertiary">
-          {latestEmail?.snippet || ''}
-        </p>
-        {/* Badges */}
-        {(commentCount > 0 || thread.isStarred || classification || thread.hasDraft || thread.snoozedUntil) && (
-          <div className="mt-0.5 flex items-center gap-1.5">
-            {thread.snoozedUntil && (
-              <span className="flex items-center gap-0.5 rounded bg-amber-50 px-1 py-0.5 text-[10px] font-medium text-amber-600">
-                <Clock className="h-2.5 w-2.5" />
-                {formatRelativeTime(thread.snoozedUntil)}
-              </span>
-            )}
-            {thread.hasDraft && (
-              <span className="rounded bg-amber-50 px-1 py-0.5 text-[10px] font-medium text-amber-600">
-                Draft
-              </span>
-            )}
-            {classification && (
-              <CategoryPill category={classification.category} />
-            )}
-            {commentCount > 0 && (
-              <span className="rounded bg-comments-bg px-1 py-0.5 text-[10px] font-medium text-amber-600">
-                {commentCount}
-              </span>
-            )}
-            {thread.isStarred && (
-              <Star className="h-2.5 w-2.5 fill-yellow-400 text-yellow-400" />
-            )}
-          </div>
-        )}
+        {/* Snippet + inline badges — single row so all threads have a uniform height */}
+        <div className="flex items-center gap-1.5">
+          <p className="min-w-0 flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-[11px] text-text-tertiary">
+            {latestEmail?.snippet || ''}
+          </p>
+          {(commentCount > 0 || thread.isStarred || classification || thread.hasDraft || thread.snoozedUntil) && (
+            <div className="flex shrink-0 items-center gap-1">
+              {thread.snoozedUntil && (
+                <span className="flex items-center gap-0.5 rounded-md bg-amber-100 px-1.5 text-[10px] font-semibold leading-[16px] text-amber-700 ring-1 ring-inset ring-amber-200">
+                  <Clock className="h-2.5 w-2.5" />
+                  {formatRelativeTime(thread.snoozedUntil)}
+                </span>
+              )}
+              {thread.hasDraft && (
+                <span className="rounded-md bg-amber-100 px-1.5 text-[10px] font-semibold leading-[16px] text-amber-700 ring-1 ring-inset ring-amber-200">
+                  Draft
+                </span>
+              )}
+              {classification && (
+                <CategoryPill category={classification.category} />
+              )}
+              {commentCount > 0 && (
+                <span className="rounded-md bg-amber-100 px-1.5 text-[10px] font-semibold leading-[16px] text-amber-700 ring-1 ring-inset ring-amber-200">
+                  {commentCount}
+                </span>
+              )}
+              {thread.isStarred && (
+                <Star className="h-2.5 w-2.5 fill-yellow-400 text-yellow-400" />
+              )}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Unread indicator */}
@@ -227,7 +239,7 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
 
       {/* Hover quick actions — desktop only */}
       {!isMobile && (
-        <div className="absolute right-2 top-2.5 flex gap-0.5 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+        <div className="pointer-events-none absolute right-2 top-2.5 flex gap-0.5 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100">
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -295,7 +307,7 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
           </button>
         </div>
       )}
-    </button>
+    </div>
   );
 
   // Mobile: wrap in swipeable motion container
@@ -506,6 +518,41 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
     </ContextMenu.Root>
   );
 }
+
+// Stable memo: re-render only when the thread, selection, or account color
+// actually changes. This prevents scroll-induced rerenders from re-running
+// every row's hover/transition styles, which was causing the "blink" effect
+// as rows entered/left the virtualized viewport.
+export const ThreadItem = memo(
+  ThreadItemImpl,
+  (prev, next) => {
+    if (prev.isSelected !== next.isSelected) return false;
+    if (prev.isMultiSelected !== next.isMultiSelected) return false;
+    if (prev.accountColor !== next.accountColor) return false;
+    if (prev.onSelect !== next.onSelect) return false;
+    if (prev.onShiftClick !== next.onShiftClick) return false;
+    if (prev.onCtrlClick !== next.onCtrlClick) return false;
+    const a = prev.thread;
+    const b = next.thread;
+    if (a === b) return true;
+    return (
+      a.id === b.id &&
+      a.isRead === b.isRead &&
+      a.isStarred === b.isStarred &&
+      a.isArchived === b.isArchived &&
+      a.isTrashed === b.isTrashed &&
+      a.snoozedUntil === b.snoozedUntil &&
+      a.subject === b.subject &&
+      a.messageCount === b.messageCount &&
+      a.lastReceivedAt === b.lastReceivedAt &&
+      a.lastMessageAt === b.lastMessageAt &&
+      a.hasDraft === b.hasDraft &&
+      (a._count?.comments ?? 0) === (b._count?.comments ?? 0) &&
+      (a.emails?.[0]?.snippet ?? '') === (b.emails?.[0]?.snippet ?? '') &&
+      (a.emails?.[0]?.fromAddress ?? '') === (b.emails?.[0]?.fromAddress ?? '')
+    );
+  },
+);
 
 function SnoozeContextMenuItems({ threadId }: { threadId: string }) {
   const snoozeThread = useSnoozeThread();

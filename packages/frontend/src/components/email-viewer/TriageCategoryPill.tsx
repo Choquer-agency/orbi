@@ -6,6 +6,7 @@ import { ALL_TRIAGE_OPTIONS, TRIAGE_FOLDER_LABELS } from './TriageBanner';
 
 const PILL_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   primary: { bg: 'bg-emerald-50', text: 'text-emerald-700', border: 'border-emerald-200' },
+  notification: { bg: 'bg-indigo-50', text: 'text-indigo-700', border: 'border-indigo-200' },
   marketing: { bg: 'bg-pink-50', text: 'text-pink-700', border: 'border-pink-200' },
   spam: { bg: 'bg-orange-50', text: 'text-orange-700', border: 'border-orange-200' },
 };

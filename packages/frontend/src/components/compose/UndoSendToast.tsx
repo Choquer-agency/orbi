@@ -1,8 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { X, Eye, Pencil, Send } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
+import { useMutation as useConvexMutation } from 'convex/react';
+import { api as convexApi } from '../../../../../convex/_generated/api';
+import type { Id } from '../../../../../convex/_generated/dataModel';
 import { useUndoSendStore, type PendingUndoEmail } from '../../stores/undoSendStore';
-import { api } from '../../lib/api';
 import DOMPurify from 'dompurify';
 import toast from 'react-hot-toast';
 import { Tooltip } from '../ui/Tooltip';
@@ -140,15 +142,17 @@ function EditPanel({ email }: { email: PendingUndoEmail }) {
     textareaRef.current?.focus();
   }, []);
 
+  const editPending = useConvexMutation(convexApi.emails.editPendingSend);
+
   const handleSave = async () => {
     setSaving(true);
     try {
       const bodyHtml = `<p>${body.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br/>')}</p>`;
 
-      await api.patch(`/emails/${email.id}`, {
+      await editPending({
+        emailId: email.id as Id<'emails'>,
         bodyText: body,
         bodyHtml,
-        snippet: body.slice(0, 200),
       });
 
       email.body = body;
@@ -191,10 +195,12 @@ function EditPanel({ email }: { email: PendingUndoEmail }) {
 export function UndoSendToast() {
   const { pendingEmails, removePendingEmail } = useUndoSendStore();
   const queryClient = useQueryClient();
+  const undoSendMutation = useConvexMutation(convexApi.emails.undoSend);
+  const sendNowMutation = useConvexMutation(convexApi.emails.sendNow);
 
   const handleCancel = useCallback(async (email: PendingUndoEmail) => {
     try {
-      await api.post(`/emails/${email.id}/undo`);
+      await undoSendMutation({ emailId: email.id as Id<'emails'> });
       removePendingEmail(email.id);
       toast.success('Send cancelled');
 
@@ -215,7 +221,7 @@ export function UndoSendToast() {
 
   const handleSendNow = useCallback(async (email: PendingUndoEmail) => {
     try {
-      await api.post(`/emails/${email.id}/send-now`);
+      await sendNowMutation({ emailId: email.id as Id<'emails'> });
       removePendingEmail(email.id);
 
       if (email.threadId) {

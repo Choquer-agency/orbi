@@ -4,6 +4,7 @@ const APPLE_ID = process.env.APPLE_ID;
 const APPLE_PASSWORD = process.env.APPLE_APP_SPECIFIC_PASSWORD;
 const APPLE_TEAM_ID = process.env.APPLE_TEAM_ID;
 const SIGNING_IDENTITY = process.env.APPLE_SIGNING_IDENTITY;
+const UPDATE_BASE_URL = process.env.ORBI_UPDATE_BASE_URL;
 
 const canSign = Boolean(SIGNING_IDENTITY);
 const canNotarize = Boolean(APPLE_ID && APPLE_PASSWORD && APPLE_TEAM_ID);
@@ -18,6 +19,9 @@ module.exports = {
     asar: true,
     extraResource: [path.resolve(__dirname, '../frontend/dist')],
     protocols: [{ name: 'Orbi Mail', schemes: ['orbi-mail'] }],
+    extraMetadata: UPDATE_BASE_URL
+      ? { orbiUpdateBaseUrl: UPDATE_BASE_URL.replace(/\/$/, '') }
+      : undefined,
     osxSign: canSign
       ? {
           identity: SIGNING_IDENTITY,
@@ -50,6 +54,11 @@ module.exports = {
     {
       name: '@electron-forge/maker-zip',
       platforms: ['darwin'],
+      config: UPDATE_BASE_URL
+        ? (arch) => ({
+            macUpdateManifestBaseUrl: `${UPDATE_BASE_URL.replace(/\/$/, '')}/darwin/${arch}`,
+          })
+        : undefined,
     },
   ],
   plugins: [],

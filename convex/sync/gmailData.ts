@@ -189,10 +189,89 @@ export const _upsertThread = internalMutation({
     };
 
     if (existing) {
+      // Gmail's history.list also surfaces no-op delta events (server label
+      // recomputes, importance recalculations, anti-spam tagging). Skip the
+      // patch when nothing meaningful changed to keep write traffic + live
+      // query re-fires minimal.
+      const same =
+        existing.subject === data.subject &&
+        existing.snippet === data.snippet &&
+        existing.isRead === data.isRead &&
+        existing.isStarred === data.isStarred &&
+        existing.isArchived === data.isArchived &&
+        existing.isTrashed === data.isTrashed &&
+        existing.messageCount === data.messageCount &&
+        existing.lastMessageAt === data.lastMessageAt &&
+        (existing.lastReceivedAt ?? undefined) ===
+          (data.lastReceivedAt ?? undefined) &&
+        sameStringArray(existing.labels, data.labels) &&
+        sameStringArray(existing.participantEmails, data.participantEmails);
+      if (same) return existing._id;
       await ctx.db.patch(existing._id, data);
       return existing._id;
     }
     return await ctx.db.insert("threads", data);
+  },
+});
+
+function sameStringArray(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// Thread fingerprint — lets the Gmail sync action short-circuit before
+// calling _upsertThread.
+export const _getThreadFingerprint = internalQuery({
+  args: {
+    accountId: v.id("mailAccounts"),
+    providerThreadId: v.string(),
+  },
+  handler: async (ctx, { accountId, providerThreadId }) => {
+    const t = await ctx.db
+      .query("threads")
+      .withIndex("by_account_providerThreadId", (q) =>
+        q.eq("accountId", accountId).eq("providerThreadId", providerThreadId),
+      )
+      .unique();
+    if (!t) return null;
+    return {
+      id: t._id,
+      subject: t.subject,
+      snippet: t.snippet,
+      isRead: t.isRead,
+      isStarred: t.isStarred,
+      isArchived: t.isArchived,
+      isTrashed: t.isTrashed,
+      labels: t.labels,
+      participantEmails: t.participantEmails,
+      messageCount: t.messageCount,
+      lastMessageAt: t.lastMessageAt,
+      lastReceivedAt: t.lastReceivedAt,
+    };
+  },
+});
+
+// Lightweight fingerprint used by the Gmail sync action to skip _upsertEmail
+// (and the preprocess step) entirely when the delta payload didn't change
+// anything we store.
+export const _getEmailFingerprint = internalQuery({
+  args: { providerMessageId: v.string() },
+  handler: async (ctx, { providerMessageId }) => {
+    const e = await ctx.db
+      .query("emails")
+      .withIndex("by_providerMessageId", (q) =>
+        q.eq("providerMessageId", providerMessageId),
+      )
+      .unique();
+    if (!e) return null;
+    return {
+      id: e._id,
+      threadId: e.threadId,
+      isRead: e.isRead,
+      isStarred: e.isStarred,
+      labels: e.labels,
+    };
   },
 });
 
@@ -221,6 +300,14 @@ export const _upsertEmail = internalMutation({
     subject: v.string(),
     bodyText: v.optional(v.string()),
     bodyHtml: v.optional(v.string()),
+    // Optional — the sync action pre-processes the body before calling this
+    // mutation and passes the cleaned/trimmed strings through. When absent
+    // (e.g. backfill paths that haven't been migrated), the client falls
+    // back to its own sanitization.
+    bodyHtmlClean: v.optional(v.string()),
+    bodyHtmlTrimmed: v.optional(v.string()),
+    hasQuotedHistory: v.optional(v.boolean()),
+    isForwarded: v.optional(v.boolean()),
     snippet: v.optional(v.string()),
     isRead: v.boolean(),
     isStarred: v.boolean(),
@@ -242,6 +329,15 @@ export const _upsertEmail = internalMutation({
       .unique();
 
     if (existing) {
+      // No-op skip: Gmail's history.list fires deltas for label recomputes,
+      // importance recalculations and inbox category reshuffles. Most arrive
+      // with the same {threadId, isRead, isStarred, labels} we already have.
+      const same =
+        existing.threadId === args.threadId &&
+        existing.isRead === args.isRead &&
+        existing.isStarred === args.isStarred &&
+        sameStringArray(existing.labels, args.labels);
+      if (same) return { emailId: existing._id, isNew: false };
       await ctx.db.patch(existing._id, {
         threadId: args.threadId,
         isRead: args.isRead,
@@ -251,6 +347,10 @@ export const _upsertEmail = internalMutation({
       return { emailId: existing._id, isNew: false };
     }
 
+    // New writes split heavy body bytes into the sibling `emailBodies` table
+    // and leave bodyHtml/bodyText undefined on the row, so scans of `emails`
+    // stay tiny. The viewer reads from `emailBodies` (with row fallback for
+    // legacy emails that still have in-row bodies).
     const emailId = await ctx.db.insert("emails", {
       accountId: args.accountId,
       threadId: args.threadId,
@@ -264,8 +364,8 @@ export const _upsertEmail = internalMutation({
       ccAddresses: args.ccAddresses,
       bccAddresses: args.bccAddresses,
       subject: args.subject,
-      bodyText: args.bodyText,
-      bodyHtml: args.bodyHtml,
+      hasQuotedHistory: args.hasQuotedHistory,
+      isForwarded: args.isForwarded,
       snippet: args.snippet,
       isRead: args.isRead,
       isStarred: args.isStarred,
@@ -277,6 +377,17 @@ export const _upsertEmail = internalMutation({
       sendStatus: "NONE",
       sendAttempts: 0,
     });
+    if (args.bodyHtml || args.bodyText || args.bodyHtmlClean) {
+      await ctx.db.insert("emailBodies", {
+        emailId,
+        bodyText: args.bodyText,
+        bodyHtml: args.bodyHtml,
+        bodyHtmlClean: args.bodyHtmlClean,
+        bodyHtmlTrimmed: args.bodyHtmlTrimmed,
+        hasQuotedHistory: args.hasQuotedHistory,
+        isForwarded: args.isForwarded,
+      });
+    }
     return { emailId, isNew: true };
   },
 });

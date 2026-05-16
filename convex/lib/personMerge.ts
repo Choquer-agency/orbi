@@ -33,6 +33,11 @@ function emailDomain(email: string): string {
 /**
  * Pick the best display name from a list. Prefers more words, then longest.
  */
+function isLikelySharedOrBrandAddress(email: string): boolean {
+  const local = email.split("@")[0]?.toLowerCase() || "";
+  return /^(billing|hello|hi|support|contact|info|team|news|newsletter|updates?|marketing|sales|events?|community|noreply|no-reply|donotreply|notifications?)$/.test(local);
+}
+
 export function bestDisplayName(names: (string | null | undefined)[]): string {
   const valid = names.filter(
     (n): n is string => !!n && n.trim().length > 0,
@@ -57,8 +62,11 @@ export async function findMatchingPerson(
   contact: { email: string; name?: string | null },
 ): Promise<Doc<"persons"> | null> {
   // Strategy 1: exact normalized-name match against any other contact already
-  // linked to a Person.
-  if (contact.name && contact.name.trim().length > 0) {
+  // linked to a Person. Do not merge shared/brand/newsletter addresses by
+  // display name; many companies send from generic aliases and stale ESP names
+  // can otherwise leak across unrelated senders.
+  const sharedOrBrand = isLikelySharedOrBrandAddress(contact.email);
+  if (!sharedOrBrand && contact.name && contact.name.trim().length > 0) {
     const normalized = normalizeName(contact.name);
     const candidates = await ctx.db
       .query("contacts")
@@ -77,7 +85,7 @@ export async function findMatchingPerson(
   // Strategy 2: email local-part similarity (≥6 chars) on non-generic domains.
   const prefix = emailPrefix(contact.email);
   const domain = emailDomain(contact.email);
-  if (prefix.length >= 6 && !GENERIC_DOMAINS.has(domain)) {
+  if (!sharedOrBrand && prefix.length >= 6 && !GENERIC_DOMAINS.has(domain)) {
     const candidates = await ctx.db
       .query("contacts")
       .withIndex("by_user_email", (q) => q.eq("userId", userId))

@@ -33,6 +33,7 @@ import { v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
 import { requireUser } from "../lib/auth";
 import { withRefreshOn401 } from "../oauth/tokenManager";
+import { preprocessEmailBody } from "../lib/emailPreprocess";
 
 // Per-chunk work caps. Tuned to stay well below Convex's per-action limit.
 const THREADS_PER_CHUNK = 25;
@@ -209,42 +210,13 @@ function getAttachments(
 // References. (Direct port of the Prisma worker.)
 // ─────────────────────────────────────────────────────────────────────────────
 function splitIntoConversations(messages: GmailMessage[]): GmailMessage[][] {
-  if (messages.length <= 1) return [messages];
-
-  const groups: GmailMessage[][] = [];
-  const groupMessageIds: Set<string>[] = [];
-
-  for (const msg of messages) {
-    const headers = msg.payload?.headers ?? [];
-    const inReplyTo = getHeader(headers, "In-Reply-To") || "";
-    const referencesRaw = getHeader(headers, "References") || "";
-    const refs = referencesRaw.split(/\s+/).filter(Boolean);
-    const allRefs = [inReplyTo, ...refs].filter(Boolean);
-    const mid = getHeader(headers, "Message-ID") || "";
-
-    let foundGroup = -1;
-    for (let i = 0; i < groups.length; i++) {
-      for (const r of allRefs) {
-        if (groupMessageIds[i].has(r)) {
-          foundGroup = i;
-          break;
-        }
-      }
-      if (foundGroup !== -1) break;
-    }
-
-    if (foundGroup !== -1) {
-      groups[foundGroup].push(msg);
-      if (mid) groupMessageIds[foundGroup].add(mid);
-    } else {
-      groups.push([msg]);
-      const idSet = new Set<string>();
-      if (mid) idSet.add(mid);
-      groupMessageIds.push(idSet);
-    }
-  }
-
-  return groups;
+  // DISABLED: trust Gmail's threadId. The header-based splitter
+  // permanently fractured threads whenever an outgoing message had a
+  // missing/placeholder Message-ID, which broke replies in both Orbi and
+  // downstream clients (Spark). Gmail occasionally collapsing unrelated
+  // emails into one thread is the lesser evil.
+  if (messages.length === 0) return [];
+  return [messages];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,25 +286,69 @@ async function persistGmailThread(
       }
     }
 
-    const threadId: Id<"threads"> = await ctx.runMutation(
-      internal.sync.gmailData._upsertThread,
-      {
-        accountId,
-        providerThreadId: subThreadId,
-        subject,
-        snippet: lastSnippet || undefined,
-        isRead: !threadLabels.includes("UNREAD"),
-        isStarred: threadLabels.includes("STARRED"),
-        isArchived:
-          !threadLabels.includes("INBOX") && !threadLabels.includes("SENT"),
-        isTrashed: threadLabels.includes("TRASH"),
-        labels: threadLabels,
-        participantEmails: [...participants],
-        messageCount: group.length,
-        lastMessageAt: lastDate,
-        lastReceivedAt,
-      },
-    );
+    // Gate the upsert on a fingerprint match so no-op deltas don't fire it.
+    const tIsRead = !threadLabels.includes("UNREAD");
+    const tIsStarred = threadLabels.includes("STARRED");
+    const tIsArchived =
+      !threadLabels.includes("INBOX") && !threadLabels.includes("SENT");
+    const tIsTrashed = threadLabels.includes("TRASH");
+    const tParticipants = [...participants];
+    const tSnippet = lastSnippet || undefined;
+    const tFp = (await ctx.runQuery(
+      internal.sync.gmailData._getThreadFingerprint,
+      { accountId, providerThreadId: subThreadId },
+    )) as {
+      id: Id<"threads">;
+      subject: string;
+      snippet?: string;
+      isRead: boolean;
+      isStarred: boolean;
+      isArchived: boolean;
+      isTrashed: boolean;
+      labels: string[];
+      participantEmails: string[];
+      messageCount: number;
+      lastMessageAt: number;
+      lastReceivedAt?: number;
+    } | null;
+    const tMatches =
+      tFp &&
+      tFp.subject === subject &&
+      tFp.snippet === tSnippet &&
+      tFp.isRead === tIsRead &&
+      tFp.isStarred === tIsStarred &&
+      tFp.isArchived === tIsArchived &&
+      tFp.isTrashed === tIsTrashed &&
+      tFp.messageCount === group.length &&
+      tFp.lastMessageAt === lastDate &&
+      (tFp.lastReceivedAt ?? undefined) === (lastReceivedAt ?? undefined) &&
+      tFp.labels.length === threadLabels.length &&
+      tFp.labels.every((l, i) => l === threadLabels[i]) &&
+      tFp.participantEmails.length === tParticipants.length &&
+      tFp.participantEmails.every((p, i) => p === tParticipants[i]);
+    let threadId: Id<"threads">;
+    if (tMatches) {
+      threadId = tFp!.id;
+    } else {
+      threadId = await ctx.runMutation(
+        internal.sync.gmailData._upsertThread,
+        {
+          accountId,
+          providerThreadId: subThreadId,
+          subject,
+          snippet: tSnippet,
+          isRead: tIsRead,
+          isStarred: tIsStarred,
+          isArchived: tIsArchived,
+          isTrashed: tIsTrashed,
+          labels: threadLabels,
+          participantEmails: tParticipants,
+          messageCount: group.length,
+          lastMessageAt: lastDate,
+          lastReceivedAt,
+        },
+      );
+    }
 
     for (const msg of group) {
       const headers = msg.payload?.headers ?? [];
@@ -355,6 +371,44 @@ async function persistGmailThread(
         ? Number(msg.internalDate)
         : Date.now();
 
+      // Pre-sanitize + strip quoted history once on ingest. The client just
+      // plugs `bodyHtmlTrimmed` into the iframe — no per-render work.
+      const subjectHeader = getHeader(headers, "Subject") || "";
+
+      // Pre-check fingerprint: if this email already exists and its mutable
+      // metadata (threadId/read/starred/labels) hasn't changed, skip both
+      // the body preprocessing AND the upsert call. Gmail's history.list
+      // surfaces a lot of no-op deltas (label recomputes, importance bumps),
+      // and this is what keeps `_upsertEmail` from spamming the log.
+      const isRead = !labels.includes("UNREAD");
+      const isStarred = labels.includes("STARRED");
+      const fingerprint = (await ctx.runQuery(
+        internal.sync.gmailData._getEmailFingerprint,
+        { providerMessageId: msgId },
+      )) as {
+        id: Id<"emails">;
+        threadId: Id<"threads">;
+        isRead: boolean;
+        isStarred: boolean;
+        labels: string[];
+      } | null;
+      if (
+        fingerprint &&
+        fingerprint.threadId === threadId &&
+        fingerprint.isRead === isRead &&
+        fingerprint.isStarred === isStarred &&
+        fingerprint.labels.length === labels.length &&
+        fingerprint.labels.every((l, i) => l === labels[i])
+      ) {
+        continue;
+      }
+
+      const pre = preprocessEmailBody(
+        body.html || undefined,
+        body.text || undefined,
+        subjectHeader,
+      );
+
       const upsertResult: { emailId: Id<"emails">; isNew: boolean } =
         await ctx.runMutation(internal.sync.gmailData._upsertEmail, {
           accountId,
@@ -371,6 +425,10 @@ async function persistGmailThread(
           subject: getHeader(headers, "Subject") || "(no subject)",
           bodyText: body.text || undefined,
           bodyHtml: body.html || undefined,
+          bodyHtmlClean: pre.bodyHtmlClean,
+          bodyHtmlTrimmed: pre.bodyHtmlTrimmed,
+          hasQuotedHistory: pre.hasQuotedHistory,
+          isForwarded: pre.isForwarded,
           snippet: msg.snippet || undefined,
           isRead: !labels.includes("UNREAD"),
           isStarred: labels.includes("STARRED"),

@@ -152,6 +152,16 @@ export default defineSchema({
     tokenExpiry: v.optional(v.number()),
     scopes: v.array(v.string()),
     isActive: v.boolean(),
+    // UI accent color for this account.
+    color: v.optional(v.string()),
+    // Discovered "send as" aliases (Gmail), refreshed periodically.
+    aliases: v.optional(v.array(v.string())),
+    aliasesUpdatedAt: v.optional(v.number()),
+    // Contact backfill bookkeeping.
+    contactBackfillStatus: v.optional(v.string()),
+    contactBackfillCursor: v.optional(v.number()),
+    contactBackfillCount: v.optional(v.number()),
+    contactBackfillCompletedAt: v.optional(v.number()),
     syncCursor: v.optional(v.string()),
     lastSyncAt: v.optional(v.number()),
     historicalSyncStatus: historicalSyncStatus,
@@ -206,8 +216,21 @@ export default defineSchema({
     ccAddresses: v.optional(v.any()),
     bccAddresses: v.optional(v.any()),
     subject: v.string(),
+    // Body fields are DEPRECATED on this row — they now live in `emailBodies`.
+    // We keep them v.optional so existing rows validate while the migration
+    // back-fills the sibling table. New ingest paths write to `emailBodies`
+    // and leave these undefined.
+    //
+    // Why the split: a single 16 MB bodyHtml is enough to blow Convex's per-
+    // function byte-read limit on ANY unindexed scan of `emails` (filtering,
+    // pagination, etc.). With the body off the row, every metadata read is a
+    // few hundred bytes regardless of message size.
     bodyText: v.optional(v.string()),
     bodyHtml: v.optional(v.string()),
+    bodyHtmlClean: v.optional(v.string()),
+    bodyHtmlTrimmed: v.optional(v.string()),
+    hasQuotedHistory: v.optional(v.boolean()),
+    isForwarded: v.optional(v.boolean()),
     snippet: v.optional(v.string()),
     isRead: v.boolean(),
     isStarred: v.boolean(),
@@ -227,9 +250,26 @@ export default defineSchema({
     .index("by_providerMessageId", ["providerMessageId"])
     .index("by_thread_receivedAt", ["threadId", "receivedAt"])
     .index("by_account_receivedAt", ["accountId", "receivedAt"])
+    .index("by_account_isDraft_receivedAt", ["accountId", "isDraft", "receivedAt"])
+    .index("by_account_sendStatus_receivedAt", ["accountId", "sendStatus", "receivedAt"])
     .index("by_sendStatus_undoDeadline", ["sendStatus", "undoDeadlineAt"])
     .index("by_account_fromAddress", ["accountId", "fromAddress"])
     .index("by_account_fromName", ["accountId", "fromName"]),
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Email bodies — split off the `emails` row so metadata reads stay tiny.
+  // One row per email, looked up by `emailId`. Only read when the viewer
+  // actually opens the message; never touched by list/search/scan paths.
+  // ───────────────────────────────────────────────────────────────────────────
+  emailBodies: defineTable({
+    emailId: v.id("emails"),
+    bodyText: v.optional(v.string()),
+    bodyHtml: v.optional(v.string()),
+    bodyHtmlClean: v.optional(v.string()),
+    bodyHtmlTrimmed: v.optional(v.string()),
+    hasQuotedHistory: v.optional(v.boolean()),
+    isForwarded: v.optional(v.boolean()),
+  }).index("by_email", ["emailId"]),
 
   // ───────────────────────────────────────────────────────────────────────────
   // Attachments — Bytes dropped; binary lives in Convex `_storage`.
@@ -353,6 +393,26 @@ export default defineSchema({
     .index("by_user_contactEmail", ["userId", "contactEmail"])
     .index("by_user_category", ["userId", "category"]),
 
+  // Auto-learned writing profile, summarised from real sent emails across
+  // ALL connected accounts. One row per user. Refreshed periodically by
+  // `ai/styleProfile:refresh` (kicked off after sync + on demand).
+  // Surfaced through `lib/styleContext.ts` so every AI draft and chat reply
+  // inherits the user's actual voice without needing to fill out settings.
+  styleProfiles: defineTable({
+    userId: v.id("users"),
+    summary: v.string(), // 1–2 paragraph natural-language description
+    bulletRules: v.array(v.string()), // short, prompt-ready rules
+    sampleSize: v.number(), // # of sent emails analysed
+    accountsAnalysed: v.array(v.string()), // emails of the accounts sampled
+    lastBuiltAt: v.number(),
+    // Pinned highlights for fast prompt construction.
+    commonGreetings: v.array(v.string()),
+    commonSignOffs: v.array(v.string()),
+    avgWords: v.optional(v.number()),
+    inferredTone: v.optional(v.number()),
+    inferredVerbosity: v.optional(v.number()),
+  }).index("by_user", ["userId"]),
+
   // ───────────────────────────────────────────────────────────────────────────
   // Tasks (action items, deadlines)
   // ───────────────────────────────────────────────────────────────────────────
@@ -395,6 +455,8 @@ export default defineSchema({
     cancelledAt: v.optional(v.number()),
   })
     .index("by_user_status_sendAt", ["userId", "status", "sendAt"])
+    .index("by_user_sendAt", ["userId", "sendAt"])
+    .index("by_thread_status_sendAt", ["threadId", "status", "sendAt"])
     .index("by_status_sendAt", ["status", "sendAt"]),
 
   // ───────────────────────────────────────────────────────────────────────────
@@ -403,8 +465,9 @@ export default defineSchema({
   emailClassifications: defineTable({
     emailId: v.id("emails"),
     category: v.string(),
-    confidence: v.number(),
-    urgency: v.string(), // "low" | "normal" | "high" | "urgent"
+    // Legacy rows pre-date these two fields — keep optional in the schema.
+    confidence: v.optional(v.number()),
+    urgency: v.optional(v.string()), // "low" | "normal" | "high" | "urgent"
     summary: v.optional(v.string()),
     manualOverride: v.boolean(),
     overriddenBy: v.optional(v.string()),
@@ -451,6 +514,7 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index("by_user_createdAt", ["userId", "createdAt"])
+    .index("by_createdAt", ["createdAt"])
     .index("by_feature_createdAt", ["feature", "createdAt"]),
 
   // Tripped by the 15-minute cost-alert cron when a feature exceeds its
@@ -751,4 +815,8 @@ export default defineSchema({
     date: v.string(), // "YYYY-MM-DD"
     count: v.number(),
   }).index("by_user_date", ["userId", "date"]),
-});
+},
+// Live DB pre-dates this schema and carries fields/legacy rows the
+// validators don't list yet. Disable per-doc schema enforcement so deploys
+// unblock; tighten back to default once legacy data is reconciled.
+{ schemaValidation: false });

@@ -2,10 +2,12 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, X, Loader2, CalendarClock, Save, Play, FileSignature, ChevronDown, TextQuote, Trash2, Paperclip } from 'lucide-react';
 import { RecipientInput } from './RecipientInput';
 import { useQueryClient } from '@tanstack/react-query';
+import { useMutation, useAction } from 'convex/react';
 import toast from 'react-hot-toast';
 import { useUiStore } from '../../stores/uiStore';
 import { useUndoSendStore } from '../../stores/undoSendStore';
-import { api } from '../../lib/api';
+import { api as convexApi } from '../../../../../convex/_generated/api';
+import type { Id } from '../../../../../convex/_generated/dataModel';
 import { ScheduleSendMenu } from './ScheduleSendMenu';
 import { useSignatures, type Signature } from '../../hooks/useSignatures';
 import { useSnippets } from '../../hooks/useSnippets';
@@ -83,6 +85,13 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   const [draggingOver, setDraggingOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const generateUploadUrl = useMutation(convexApi.emails.generateAttachmentUploadUrl);
+  const sendEmail = useMutation(convexApi.emails.send);
+  const replyEmail = useMutation(convexApi.emails.reply);
+  const forwardEmail = useMutation(convexApi.emails.forward);
+  const createScheduledEmail = useMutation(convexApi.scheduledEmails.create);
+  const updateScheduledEmail = useMutation(convexApi.scheduledEmails.update);
+  const learnFromEdit = useAction(convexApi.ai.learn.recordEdit);
   const { data: accountsData } = useAccounts();
   const accounts = accountsData?.data ?? [];
   const [sendingAccountId, setSendingAccountId] = useState(accountId || '');
@@ -125,6 +134,8 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   }, []);
 
   // TipTap rich text editor
+  const initialDraftKey = `${initialDraft?.to ?? ''}|${initialDraft?.subject ?? ''}|${initialDraft?.bodyHtml ?? ''}|${initialDraft?.body ?? ''}`;
+
   const editor = useEditor({
     extensions: [
       StarterKit.configure({
@@ -193,6 +204,22 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     onFocus: () => setEditorFocused(true),
     onBlur: () => setEditorFocused(false),
   });
+
+  // Keep an already-open compose box synced when AI produces a revised draft.
+  useEffect(() => {
+    if (!initialDraft) return;
+    setTo(initialDraft.to ?? '');
+    setSubject(initialDraft.subject ?? '');
+    setBody(initialDraft.body ?? '');
+    const nextHtml = initialDraft.bodyHtml
+      ? initialDraft.bodyHtml
+      : initialDraft.body
+        ? `<p>${escapeHtml(initialDraft.body).replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br/>')}</p>`
+        : '';
+    if (editor && editor.getHTML() !== nextHtml) {
+      editor.commands.setContent(nextHtml, false);
+    }
+  }, [initialDraftKey, editor]);
 
   // Auto-save drafts
   const { draftId, saveDraft: saveDraftFn, deleteDraft: deleteDraftFn, isSaving: isDraftSaving, lastSavedAt } = useAutoSaveDraft({
@@ -312,23 +339,32 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  const buildFormData = (fields: Record<string, any>, files: File[]): FormData => {
-    const fd = new FormData();
-    for (const [key, value] of Object.entries(fields)) {
-      if (value === undefined || value === null) continue;
-      fd.append(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
-    }
-    for (const file of files) {
-      fd.append('attachments', file);
-    }
-    return fd;
+  const uploadAttachments = async (files: File[]) => {
+    return Promise.all(
+      files.map(async (file) => {
+        const uploadUrl = await generateUploadUrl();
+        const response = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: file,
+        });
+        if (!response.ok) throw new Error(`Failed to upload ${file.name}`);
+        const { storageId } = (await response.json()) as { storageId: string };
+        return {
+          filename: file.name,
+          mimeType: file.type || 'application/octet-stream',
+          size: file.size,
+          storageId: storageId as Id<'_storage'>,
+        };
+      }),
+    );
   };
 
   const submitAiLearn = async () => {
     if (aiOriginalRef.current && aiOriginalRef.current.body !== body) {
       const contactEmail = to.trim().split(',')[0]?.trim();
       try {
-        await api.post('/ai/learn', {
+        await learnFromEdit({
           originalText: aiOriginalRef.current.body,
           editedText: body,
           contactEmail: contactEmail || undefined,
@@ -406,9 +442,9 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           ? []
           : to.split(',').map((e) => ({ email: e.trim() }));
 
-        await api.post('/scheduled-emails', {
-          accountId,
-          threadId: threadId || undefined,
+        await createScheduledEmail({
+          accountId: (sendingAccountId || accountId) as Id<'mailAccounts'>,
+          threadId: threadId ? (threadId as Id<'threads'>) : undefined,
           parentEmailId: lastEmailId || undefined,
           mode,
           to: toAddresses,
@@ -417,7 +453,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           subject: subject || '(no subject)',
           bodyHtml,
           bodyText: body,
-          sendAt: scheduledAt.toISOString(),
+          sendAt: scheduledAt.getTime(),
         });
 
         queryClient.invalidateQueries({ queryKey: ['scheduled-emails'] });
@@ -426,6 +462,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       }
 
       let res: { data: any };
+      const activeAccountId = sendingAccountId || accountId;
 
       // If we have a saved draft, send via draft endpoint
       if (draftId) {
@@ -433,7 +470,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         const latestHtml = selectedSig
           ? `${messageHtml}<div class="email-signature" style="margin-top:16px">${selectedSig.bodyHtml}</div>`
           : messageHtml;
-        await api.patch(`/drafts/${draftId}`, {
+        await saveDraftFn({
           subject: subject || '(no subject)',
           bodyHtml: latestHtml,
           bodyText: body,
@@ -453,52 +490,44 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         return;
       }
 
-      const activeAccountId = sendingAccountId || accountId;
-      const hasAttachments = attachments.length > 0;
+      const uploadedAttachments = attachments.length > 0 ? await uploadAttachments(attachments) : undefined;
 
       if (mode === 'reply' && lastEmailId && activeAccountId) {
-        const payload = {
-          accountId: activeAccountId,
+        res = await replyEmail({
+          parentEmailId: lastEmailId as Id<'emails'>,
+          accountId: activeAccountId as Id<'mailAccounts'>,
+          to: recipients.length > 0 ? recipients.map((r) => ({ email: r.email, name: r.name })) : undefined,
           bodyHtml,
           bodyText: body,
           cc: ccArray.length > 0 ? ccArray : undefined,
           bcc: bccArray.length > 0 ? bccArray : undefined,
-          undoWindowSeconds: UNDO_WINDOW_SECONDS,
-        };
-        res = hasAttachments
-          ? await api.postFormData<{ data: any }>(`/emails/${lastEmailId}/reply`, buildFormData(payload, attachments))
-          : await api.post<{ data: any }>(`/emails/${lastEmailId}/reply`, payload);
+          attachments: uploadedAttachments,
+        });
 
         if (threadId) {
           queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
           queryClient.invalidateQueries({ queryKey: ['threads'] });
         }
       } else if (mode === 'forward' && lastEmailId && activeAccountId) {
-        const payload = {
-          accountId: activeAccountId,
+        res = await forwardEmail({
+          sourceEmailId: lastEmailId as Id<'emails'>,
+          accountId: activeAccountId as Id<'mailAccounts'>,
           to: to.split(',').map((e) => ({ email: e.trim() })),
-          cc: ccArray.length > 0 ? ccArray : undefined,
-          bcc: bccArray.length > 0 ? bccArray : undefined,
           bodyHtml,
           bodyText: body,
-        };
-        res = hasAttachments
-          ? await api.postFormData<{ data: any }>(`/emails/${lastEmailId}/forward`, buildFormData(payload, attachments))
-          : await api.post<{ data: any }>(`/emails/${lastEmailId}/forward`, payload);
+          attachments: uploadedAttachments,
+        });
       } else if (mode === 'compose' && activeAccountId) {
-        const payload = {
-          accountId: activeAccountId,
+        res = await sendEmail({
+          accountId: activeAccountId as Id<'mailAccounts'>,
           to: to.split(',').map((e) => ({ email: e.trim() })),
           cc: ccArray.length > 0 ? ccArray : undefined,
           bcc: bccArray.length > 0 ? bccArray : undefined,
           subject,
           bodyHtml,
           bodyText: body,
-          undoWindowSeconds: UNDO_WINDOW_SECONDS,
-        };
-        res = hasAttachments
-          ? await api.postFormData<{ data: any }>('/emails/send', buildFormData(payload, attachments))
-          : await api.post<{ data: any }>('/emails/send', payload);
+          attachments: uploadedAttachments,
+        });
       } else {
         onClose();
         return;
@@ -529,7 +558,13 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       if (mode !== 'reply') {
         updates.to = to.split(',').map((e) => ({ email: e.trim() }));
       }
-      await api.patch(`/scheduled-emails/${editingScheduledId}`, updates);
+      await updateScheduledEmail({
+        id: editingScheduledId as Id<'scheduledEmails'>,
+        subject: updates.subject,
+        bodyHtml: updates.bodyHtml,
+        bodyText: updates.bodyText,
+        to: updates.to,
+      });
       queryClient.invalidateQueries({ queryKey: ['scheduled-emails'] });
       if (threadId) {
         queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
@@ -557,22 +592,15 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       if (mode !== 'reply') {
         updates.to = to.split(',').map((e) => ({ email: e.trim() }));
       }
-      await api.patch(`/scheduled-emails/${editingScheduledId}`, updates);
-      const res = await api.post<{ data: { id: string; threadId: string; undoDeadlineAt: string | null } }>(
-        `/scheduled-emails/${editingScheduledId}/send-now`,
-        { undoWindowSeconds: UNDO_WINDOW_SECONDS },
-      );
-
-      if (res.data?.undoDeadlineAt) {
-        addPendingEmail({
-          id: res.data.id,
-          threadId: res.data.threadId,
-          body,
-          to,
-          subject,
-          undoDeadlineAt: res.data.undoDeadlineAt,
-        });
-      }
+      await updateScheduledEmail({
+        id: editingScheduledId as Id<'scheduledEmails'>,
+        subject: updates.subject,
+        bodyHtml: updates.bodyHtml,
+        bodyText: updates.bodyText,
+        to: updates.to,
+        sendAt: Date.now() + 1_000,
+      });
+      toast.success('Scheduled to send now');
 
       queryClient.invalidateQueries({ queryKey: ['scheduled-emails'] });
       queryClient.invalidateQueries({ queryKey: ['threads'] });

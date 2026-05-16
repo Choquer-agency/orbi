@@ -40,7 +40,7 @@ const TONE_LABELS: Record<number, { label: string; instruction: string }> = {
 };
 
 async function recordAiUsage(
-  ctx: { runMutation: (...args: unknown[]) => Promise<unknown> },
+  ctx: any,
   userId: Id<"users">,
   inputTokens?: number,
   outputTokens?: number,

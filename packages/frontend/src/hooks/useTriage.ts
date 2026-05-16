@@ -65,6 +65,11 @@ const suggestionCache = new Map<
 >();
 const SUGGESTION_TTL = 5 * 60 * 1000;
 
+export function clearTriageSuggestionCache(threadId?: string) {
+  if (threadId) suggestionCache.delete(threadId);
+  else suggestionCache.clear();
+}
+
 export function useTriageSuggestion(threadId: string | null) {
   const fn = useAction(api.triage.getSuggestion);
   const [data, setData] = useState<TriageSuggestion | undefined>(undefined);

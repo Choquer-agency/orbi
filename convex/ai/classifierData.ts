@@ -49,6 +49,33 @@ export const _getRecentTriageFeedback = internalQuery({
   },
 });
 
+export const _getSenderTriageRule = internalQuery({
+  args: { userId: v.id("users"), senderAddress: v.string() },
+  handler: async (ctx, { userId, senderAddress }) => {
+    const sender = senderAddress.toLowerCase().trim();
+    if (!sender) return null;
+    const rows = await ctx.db
+      .query("triageFeedback")
+      .withIndex("by_user_sender", (q) =>
+        q.eq("userId", userId).eq("senderAddress", sender),
+      )
+      .order("desc")
+      .take(10);
+    if (rows.length === 0) return null;
+
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+      counts.set(row.finalCategory, (counts.get(row.finalCategory) ?? 0) + 1);
+    }
+    const [category, count] = [...counts.entries()].sort((a, b) => b[1] - a[1])[0];
+    return {
+      category,
+      confidence: count >= 2 ? 0.99 : 0.95,
+      examples: rows.length,
+    };
+  },
+});
+
 export const _persistClassification = internalMutation({
   args: {
     emailId: v.id("emails"),

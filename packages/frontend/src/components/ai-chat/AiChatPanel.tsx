@@ -33,6 +33,7 @@ import type {
   ContactResult,
 } from '../../stores/aiChatStore';
 import { getAvatarColor } from '../../lib/constants';
+import { getCategoryLabel } from '../ui/CategoryPill';
 import { useIsMobile } from '../../hooks/useIsMobile';
 
 
@@ -146,8 +147,19 @@ export function AiChatPanel() {
     navigator.clipboard.writeText(text);
   };
 
+  const normalizeDraftHtml = (value: string) => {
+    const raw = value.trim();
+    if (!raw) return '';
+    const hasHtml = /<\/?[a-z][\s\S]*>/i.test(raw);
+    if (hasHtml) return raw;
+    return raw
+      .split(/\n{2,}/)
+      .map((paragraph) => `<p>${paragraph.replace(/\n/g, '<br/>')}</p>`)
+      .join('');
+  };
+
   const stripHtml = (html: string) =>
-    html
+    normalizeDraftHtml(html)
       .replace(/<br\s*\/?>/gi, '\n')
       .replace(/<\/p>\s*<p[^>]*>/gi, '\n\n')
       .replace(/<li[^>]*>/gi, '• ')
@@ -158,10 +170,11 @@ export function AiChatPanel() {
       .trim();
 
   const handleCreateDraft = (draft: DraftData) => {
-    const plainBody = stripHtml(draft.body);
+    const htmlBody = normalizeDraftHtml(draft.body);
+    const plainBody = stripHtml(htmlBody);
     setPendingDraft({
       body: plainBody,
-      bodyHtml: draft.body,
+      bodyHtml: htmlBody,
       to: draft.to,
       subject: draft.subject,
       threadId: draft.threadId,
@@ -174,6 +187,13 @@ export function AiChatPanel() {
 
   const isEmpty = messages.length === 0;
 
+  const navigateToThread = (threadId: string, highlightSnippet?: string | null) => {
+    // setSelectedFolder clears selectedThreadId, so select the folder first.
+    useUiStore.getState().setSelectedFolder('inbox');
+    setSelectedThread(threadId);
+    if (highlightSnippet) setHighlightText(highlightSnippet);
+  };
+
   /** Shared message content renderer (rich cards, follow-ups, actions) */
   const renderMessageContent = (msg: typeof messages[0]) => (
     <>
@@ -181,10 +201,7 @@ export function AiChatPanel() {
       {msg.priorityInbox && msg.priorityInbox.length > 0 && (
         <PriorityInboxCards
           items={msg.priorityInbox}
-          onNavigate={(threadId) => {
-            setSelectedThread(threadId);
-            useUiStore.getState().setSelectedFolder('inbox');
-          }}
+          onNavigate={(threadId) => navigateToThread(threadId)}
         />
       )}
 
@@ -192,10 +209,7 @@ export function AiChatPanel() {
       {msg.tasks && msg.tasks.length > 0 && (
         <TaskListView
           items={msg.tasks}
-          onNavigate={(threadId) => {
-            setSelectedThread(threadId);
-            useUiStore.getState().setSelectedFolder('inbox');
-          }}
+          onNavigate={(threadId) => navigateToThread(threadId)}
         />
       )}
 
@@ -225,11 +239,7 @@ export function AiChatPanel() {
         return (
           <SearchResultCards
             results={filtered}
-            onNavigate={(threadId, highlightSnippet) => {
-              setSelectedThread(threadId);
-              useUiStore.getState().setSelectedFolder('inbox');
-              if (highlightSnippet) setHighlightText(highlightSnippet);
-            }}
+            onNavigate={(threadId, highlightSnippet) => navigateToThread(threadId, highlightSnippet)}
             searchTerm={(() => {
               const msgIdx = messages.indexOf(msg);
               const userMsg = msgIdx > 0 ? messages[msgIdx - 1] : null;
@@ -249,10 +259,7 @@ export function AiChatPanel() {
             return (
               <button
                 key={ref.id}
-                onClick={() => {
-                  setSelectedThread(ref.id);
-                  if (searchTerm) setHighlightText(searchTerm);
-                }}
+                onClick={() => navigateToThread(ref.id, searchTerm)}
                 className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-primary backdrop-blur-sm transition-colors hover:bg-white"
               >
                 {ref.subject}
@@ -285,7 +292,7 @@ export function AiChatPanel() {
             )}
             <div
               className="prose prose-sm max-w-none text-[12px] leading-relaxed text-text-secondary [&_p]:my-1"
-              dangerouslySetInnerHTML={{ __html: msg.draft.body }}
+              dangerouslySetInnerHTML={{ __html: normalizeDraftHtml(msg.draft.body) }}
             />
           </div>
           <div className="border-t border-border/40 px-3 py-2">
@@ -755,7 +762,7 @@ function PriorityInboxCards({
                 {/* Category pill */}
                 {item.category && item.category !== 'other' && (
                   <span className="shrink-0 rounded bg-surface px-1.5 py-0.5 text-[9px] font-medium text-text-tertiary">
-                    {item.category.replace(/_/g, ' ')}
+                    {getCategoryLabel(item.category)}
                   </span>
                 )}
                 <span className="shrink-0 text-[10px] text-text-tertiary">

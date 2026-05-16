@@ -76,6 +76,73 @@ interface ContactResult {
   emails?: string[];
 }
 
+const lc = (s: string | undefined | null) => (s || "").toLowerCase();
+const normalize = (s: string | undefined | null) => lc(s).replace(/[^a-z0-9@.]+/g, " ").trim();
+function levenshtein(a: string, b: string) {
+  if (Math.abs(a.length - b.length) > 2) return 99;
+  const dp = Array.from({ length: a.length + 1 }, (_, r) =>
+    Array.from({ length: b.length + 1 }, (_, c) => (r === 0 ? c : c === 0 ? r : 0)),
+  );
+  for (let r = 1; r <= a.length; r++) {
+    for (let c = 1; c <= b.length; c++) {
+      dp[r][c] = Math.min(
+        dp[r - 1][c] + 1,
+        dp[r][c - 1] + 1,
+        dp[r - 1][c - 1] + (a[r - 1] === b[c - 1] ? 0 : 1),
+      );
+    }
+  }
+  return dp[a.length][b.length];
+}
+function fuzzyIncludes(value: string | undefined | null, needle: string | undefined) {
+  if (!needle) return true;
+  const hay = normalize(value);
+  const n = normalize(needle);
+  if (!n) return true;
+  if (hay.includes(n)) return true;
+  const nParts = n.split(/\s+/).filter(Boolean);
+  const hayParts = hay.split(/[\s._@-]+/).filter(Boolean);
+  return nParts.every((part) =>
+    hayParts.some((token) => token.includes(part) || part.includes(token) || levenshtein(token, part) <= (part.length <= 5 ? 1 : 2)),
+  );
+}
+function addressList(value: unknown): Array<{ email?: string; name?: string }> {
+  return Array.isArray(value) ? (value as Array<{ email?: string; name?: string }>) : [];
+}
+
+const LOW_SIGNAL_CATEGORIES = new Set(["notification", "marketing", "spam", "newsletter", "junk"]);
+function looksLikeLowSignalEmail(email: {
+  fromAddress: string;
+  fromName?: string;
+  subject: string;
+  bodyText?: string;
+  snippet?: string;
+}) {
+  const from = lc(email.fromAddress);
+  const fromName = lc(email.fromName);
+  const subject = lc(email.subject);
+  const body = lc(email.bodyText || email.snippet);
+  const sender = `${from} ${fromName}`;
+  if (
+    from.includes("calendar-notification@google.com") ||
+    sender.includes("calendar-server") ||
+    sender.includes("calendar-notification") ||
+    subject.includes("invitation:") ||
+    subject.includes("updated invitation:") ||
+    subject.includes("accepted:") ||
+    subject.includes("declined:") ||
+    body.includes("google calendar") ||
+    body.includes("calendar invitation")
+  ) return true;
+  if (/(^|[._-])(no-?reply|do-?not-?reply|donotreply)(@|[._-])/.test(from)) return true;
+  if (
+    /\b(newsletter|digest)\b/i.test(`${fromName} ${subject}`) ||
+    /(click\s+here\s+to\s+)?unsubscribe\b[^\n]{0,80}(here|link|now|from this list|email)/i.test(body) ||
+    /view (this email )?in (your )?browser/i.test(body)
+  ) return true;
+  return false;
+}
+
 // ── Internal: build context for a chat request ──────────────────────────────
 
 export const buildContext = internalQuery({
@@ -98,6 +165,20 @@ export const buildContext = internalQuery({
     const systemParts: string[] = [BASE_SYSTEM_PROMPT];
     let primaryRecipient: string | undefined;
 
+    // Sender identity + all account emails. Do this before deriving the
+    // recipient from thread participants so aliases / non-orbi user domains
+    // are excluded correctly.
+    const accounts = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .collect();
+    const ownedEmails = new Set<string>();
+    for (const account of accounts) {
+      ownedEmails.add(account.email.toLowerCase());
+      const aliases = (account as { aliases?: string[] }).aliases ?? [];
+      for (const alias of aliases) ownedEmails.add(alias.toLowerCase());
+    }
+
     if (args.threadId) {
       const { contextText, participantEmails } = await buildThreadContext(
         ctx,
@@ -106,7 +187,7 @@ export const buildContext = internalQuery({
       if (contextText) {
         systemParts.push(`\n\n## Current Thread Context\n${contextText}`);
         primaryRecipient = participantEmails.find(
-          (e) => !e.endsWith("@orbi.agency"),
+          (e) => !ownedEmails.has(e.toLowerCase()),
         );
       }
     }
@@ -140,11 +221,6 @@ export const buildContext = internalQuery({
       systemParts.push(parts.join("\n"));
     }
 
-    // Sender identity + all account emails
-    const accounts = await ctx.db
-      .query("mailAccounts")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
-      .collect();
     if (accounts.length > 0) {
       const activeAccount = args.accountId
         ? accounts.find((a) => a._id === args.accountId)
@@ -154,9 +230,9 @@ export const buildContext = internalQuery({
           `\n\n## Sender Identity\nYou are drafting on behalf of: ${activeAccount.displayName || activeAccount.email} (${activeAccount.email})`,
         );
       }
-      const allEmails = accounts.map((a) => a.email);
+      const allEmails = Array.from(ownedEmails);
       systemParts.push(
-        `\n\n## User's Email Addresses\nThe user owns these email addresses: ${allEmails.join(", ")}. Emails FROM these addresses were sent by the user.`,
+        `\n\n## User's Email Addresses\nThe user owns these email addresses and aliases: ${allEmails.join(", ")}. Emails FROM these addresses were sent by the user. Do not draft replies to these addresses unless the user explicitly asks to email themselves.`,
       );
     }
 
@@ -187,10 +263,12 @@ export const _searchEmails = internalQuery({
     const query = (i.query as string) || "";
     const from = i.from as string | undefined;
     const to = i.to as string | undefined;
+    const ccOnly = i.cc_only as boolean | undefined;
     const dateFrom = i.date_from as string | undefined;
     const dateTo = i.date_to as string | undefined;
     const hasAttachments = i.has_attachments as boolean | undefined;
     const sentOnly = i.sent_only as boolean | undefined;
+    const includeNoise = i.include_noise as boolean | undefined;
     const unreadOnly = i.unread_only as boolean | undefined;
     const category = i.category as string | undefined;
     const urgency = i.urgency as string | undefined;
@@ -212,6 +290,7 @@ export const _searchEmails = internalQuery({
       fromAddress: string;
       fromName?: string;
       toAddresses: unknown;
+      ccAddresses?: unknown;
       subject: string;
       bodyText?: string;
       bodyHtml?: string;
@@ -219,7 +298,7 @@ export const _searchEmails = internalQuery({
       receivedAt: number;
       hasAttachments: boolean;
     }> = [];
-    const perAccountTake = Math.min(500, limit * 25);
+    const perAccountTake = includeNoise ? Math.min(500, limit * 25) : 500;
     for (const acc of accounts) {
       const rows = await ctx.db
         .query("emails")
@@ -229,7 +308,8 @@ export const _searchEmails = internalQuery({
       candidates.push(...rows);
     }
 
-    const lc = (s: string | undefined | null) => (s || "").toLowerCase();
+    const addressMatches = (value: unknown, needle: string) =>
+      addressList(value).some((a) => fuzzyIncludes(a.email, needle) || fuzzyIncludes(a.name, needle));
     const dateFromMs = dateFrom ? new Date(dateFrom).getTime() : undefined;
     const dateToMs = dateTo
       ? (() => {
@@ -245,28 +325,33 @@ export const _searchEmails = internalQuery({
       if (query) {
         const q = query.toLowerCase();
         const hit =
-          lc(e.bodyText).includes(q) ||
-          lc(e.bodyHtml).includes(q) ||
-          lc(e.subject).includes(q) ||
-          lc(e.snippet).includes(q) ||
-          lc(e.fromName).includes(q);
+          fuzzyIncludes(e.bodyText, q) ||
+          fuzzyIncludes(e.bodyHtml, q) ||
+          fuzzyIncludes(e.subject, q) ||
+          fuzzyIncludes(e.snippet, q) ||
+          fuzzyIncludes(e.fromName, q) ||
+          fuzzyIncludes(e.fromAddress, q);
         if (!hit) continue;
       }
       if (from) {
-        const f = from.toLowerCase();
-        if (!lc(e.fromAddress).includes(f) && !lc(e.fromName).includes(f)) {
+        if (!fuzzyIncludes(e.fromAddress, from) && !fuzzyIncludes(e.fromName, from)) {
           continue;
         }
       }
       if (to) {
-        // Look at thread participantEmails for exact email match.
         const thread = await ctx.db.get(e.threadId);
         if (!thread) continue;
-        const tLc = to.toLowerCase();
-        const inThread = thread.participantEmails.some((pe) =>
-          pe.toLowerCase().includes(tLc),
+        const inRecipients =
+          addressMatches(e.toAddresses, to) ||
+          addressMatches(e.ccAddresses, to) ||
+          thread.participantEmails.some((pe) => fuzzyIncludes(pe, to));
+        if (!inRecipients) continue;
+      }
+      if (ccOnly) {
+        const userWasCc = addressList(e.ccAddresses).some((a) =>
+          userEmails.some((email) => lc(a.email) === email),
         );
-        if (!inThread) continue;
+        if (!userWasCc) continue;
       }
       if (dateFromMs !== undefined && e.receivedAt < dateFromMs) continue;
       if (dateToMs !== undefined && e.receivedAt > dateToMs) continue;
@@ -276,14 +361,19 @@ export const _searchEmails = internalQuery({
         const thread = await ctx.db.get(e.threadId);
         if (!thread || thread.isRead) continue;
       }
+      const cls = await ctx.db
+        .query("emailClassifications")
+        .withIndex("by_email", (q) => q.eq("emailId", e._id))
+        .unique();
       if (category || urgency) {
-        const cls = await ctx.db
-          .query("emailClassifications")
-          .withIndex("by_email", (q) => q.eq("emailId", e._id))
-          .unique();
         if (!cls) continue;
         if (category && cls.category !== category) continue;
         if (urgency && cls.urgency !== urgency) continue;
+      }
+      const explicitLowSignalCategory = category && LOW_SIGNAL_CATEGORIES.has(category.toLowerCase());
+      if (!includeNoise && !explicitLowSignalCategory) {
+        const classifiedLowSignal = cls?.category && LOW_SIGNAL_CATEGORIES.has(cls.category.toLowerCase());
+        if (classifiedLowSignal || looksLikeLowSignalEmail(e)) continue;
       }
       matched.push(e);
       if (matched.length >= limit) break;
@@ -366,15 +456,15 @@ export const _lookupContact = internalQuery({
     const matchedPersons = [];
     for (const p of allPersons) {
       const matches =
-        p.displayName.toLowerCase().includes(lc) ||
-        (p.company || "").toLowerCase().includes(lc);
+        fuzzyIncludes(p.displayName, lc) ||
+        fuzzyIncludes(p.company, lc);
       // Also check linked contacts' emails
       const contactRows = await ctx.db
         .query("contacts")
         .withIndex("by_person", (q) => q.eq("personId", p._id))
         .collect();
       const emailMatch = contactRows.some((c) =>
-        c.email.toLowerCase().includes(lc),
+        fuzzyIncludes(c.email, lc) || fuzzyIncludes(c.name, lc),
       );
       if (matches || emailMatch) {
         matchedPersons.push({ p, contacts: contactRows });
@@ -412,9 +502,9 @@ export const _lookupContact = internalQuery({
       .collect();
     const filtered = allContacts.filter(
       (c) =>
-        (c.name || "").toLowerCase().includes(lc) ||
-        c.email.toLowerCase().includes(lc) ||
-        (c.company || "").toLowerCase().includes(lc),
+        fuzzyIncludes(c.name, lc) ||
+        fuzzyIncludes(c.email, lc) ||
+        fuzzyIncludes(c.company, lc),
     );
     filtered.sort((a, b) => (b.emailCount || 0) - (a.emailCount || 0));
     const top = filtered.slice(0, limit);

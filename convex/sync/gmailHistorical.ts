@@ -563,35 +563,7 @@ function getAttachments(
 function splitIntoConversations(
   messages: GmailThreadMessage[],
 ): GmailThreadMessage[][] {
-  if (messages.length <= 1) return [messages];
-  const groups: GmailThreadMessage[][] = [];
-  const groupMessageIds: Set<string>[] = [];
-  for (const msg of messages) {
-    const headers = msg.payload?.headers ?? [];
-    const inReplyTo = getHeader(headers, "In-Reply-To") || "";
-    const referencesRaw = getHeader(headers, "References") || "";
-    const refs = referencesRaw.split(/\s+/).filter(Boolean);
-    const allRefs = [inReplyTo, ...refs].filter(Boolean);
-    const mid = getHeader(headers, "Message-ID") || "";
-    let foundGroup = -1;
-    for (let i = 0; i < groups.length; i++) {
-      for (const r of allRefs) {
-        if (groupMessageIds[i].has(r)) {
-          foundGroup = i;
-          break;
-        }
-      }
-      if (foundGroup !== -1) break;
-    }
-    if (foundGroup !== -1) {
-      groups[foundGroup].push(msg);
-      if (mid) groupMessageIds[foundGroup].add(mid);
-    } else {
-      groups.push([msg]);
-      const idSet = new Set<string>();
-      if (mid) idSet.add(mid);
-      groupMessageIds.push(idSet);
-    }
-  }
-  return groups;
+  // DISABLED — see convex/sync/gmail.ts for rationale.
+  if (messages.length === 0) return [];
+  return [messages];
 }

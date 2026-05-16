@@ -1,27 +1,53 @@
-import { useCallback, useRef } from 'react';
+import { Suspense, lazy, useCallback, useRef } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { useUiStore } from '../../stores/uiStore';
 import { ThreadList } from '../thread-list/ThreadList';
-import { EmailViewer } from '../email-viewer/EmailViewer';
-import { AiChatPanel } from '../ai-chat/AiChatPanel';
-import { Dashboard } from '../dashboard/Dashboard';
-import { ContactsTable } from '../contacts/ContactsPage';
-import { ContactDetailView } from '../contacts/ContactDetailView';
+
 import { HeaderIcons } from './Header';
 import { MobileBottomNav } from './MobileBottomNav';
-import { MobileComposeSheet } from '../compose/MobileComposeSheet';
+
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
-import { useSocket } from '../../hooks/useSocket';
 import { usePushNotifications } from '../../hooks/usePushNotifications';
 import { useBiometricLock } from '../../hooks/useBiometricLock';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { UndoSendToast } from '../compose/UndoSendToast';
-import { KeyboardShortcutsWidget } from '../ui/KeyboardShortcutsWidget';
 import { BiometricLockOverlay } from '../ui/BiometricLockOverlay';
-import { SettingsPanel } from '../settings/SettingsPanel';
-import { MobileSettingsView } from '../settings/MobileSettingsView';
+
 import { OfflineBanner } from '../ui/OfflineBanner';
 import { isIOS } from '../../lib/platform';
+
+const AiChatPanel = lazy(() =>
+  import('../ai-chat/AiChatPanel').then((module) => ({ default: module.AiChatPanel })),
+);
+const EmailViewer = lazy(() =>
+  import('../email-viewer/EmailViewer').then((module) => ({ default: module.EmailViewer })),
+);
+const Dashboard = lazy(() =>
+  import('../dashboard/Dashboard').then((module) => ({ default: module.Dashboard })),
+);
+const ContactsTable = lazy(() =>
+  import('../contacts/ContactsPage').then((module) => ({ default: module.ContactsTable })),
+);
+const ContactDetailView = lazy(() =>
+  import('../contacts/ContactDetailView').then((module) => ({ default: module.ContactDetailView })),
+);
+const MobileComposeSheet = lazy(() =>
+  import('../compose/MobileComposeSheet').then((module) => ({ default: module.MobileComposeSheet })),
+);
+const SettingsPanel = lazy(() =>
+  import('../settings/SettingsPanel').then((module) => ({ default: module.SettingsPanel })),
+);
+const MobileSettingsView = lazy(() =>
+  import('../settings/MobileSettingsView').then((module) => ({ default: module.MobileSettingsView })),
+);
+
+const PanelFallback = ({ label = 'Loading…' }: { label?: string }) => (
+  <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
+    {label}
+  </div>
+);
+
+const AiChatFallback = () => <PanelFallback label="Loading AI…" />;
 
 // iOS-style slide transitions for mobile view switching
 const mobileSlideVariants = {
@@ -53,7 +79,6 @@ export function AppLayout() {
 
   const prefersReducedMotion = useReducedMotion();
   useKeyboardShortcuts();
-  useSocket();
   usePushNotifications();
   const { isLocked, isAuthenticating, unlock } = useBiometricLock();
 
@@ -131,10 +156,18 @@ export function AppLayout() {
       <UndoSendToast />
 
       {/* Settings modal */}
-      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <Suspense fallback={<PanelFallback />}>
+          <SettingsPanel onClose={() => setSettingsOpen(false)} />
+        </Suspense>
+      )}
 
       {/* Mobile compose sheet */}
-      {isCompact && composingNew && <MobileComposeSheet />}
+      {isCompact && composingNew && (
+        <Suspense fallback={null}>
+          <MobileComposeSheet />
+        </Suspense>
+      )}
 
       {/* Header icons — floating top-right on the gradient */}
       {!isCompact && (
@@ -155,7 +188,9 @@ export function AppLayout() {
             exit={prefersReducedMotion ? { opacity: 0 } : { y: '100%' }}
             transition={prefersReducedMotion ? { duration: 0.15 } : { type: 'spring', stiffness: 400, damping: 30 }}
           >
-            <AiChatPanel />
+            <Suspense fallback={<AiChatFallback />}>
+              <AiChatPanel />
+            </Suspense>
           </motion.div>
         )}
       </AnimatePresence>
@@ -171,7 +206,9 @@ export function AppLayout() {
             exit={prefersReducedMotion ? reducedMotionVariants.exitBack : mobileSlideVariants.exitBack}
             transition={prefersReducedMotion ? reducedMotionTransition : mobileSlideTransition}
           >
-            <MobileSettingsView onClose={() => setMobileActiveView('list')} />
+            <Suspense fallback={<PanelFallback />}>
+              <MobileSettingsView onClose={() => setMobileActiveView('list')} />
+            </Suspense>
           </motion.div>
         )}
       </AnimatePresence>
@@ -190,11 +227,15 @@ export function AppLayout() {
         >
           {isDashboard ? (
             <div className="min-w-0 flex-1 overflow-hidden">
-              <Dashboard />
+              <Suspense fallback={<PanelFallback />}>
+                <Dashboard />
+              </Suspense>
             </div>
           ) : isContacts && !hasContactOrPerson ? (
             <div className="min-w-0 flex-1 overflow-hidden">
-              <ContactsTable />
+              <Suspense fallback={<PanelFallback />}>
+                <ContactsTable />
+              </Suspense>
             </div>
           ) : isContacts && hasContactOrPerson ? (
             <>
@@ -204,7 +245,9 @@ export function AppLayout() {
                   style={{ width: isCompact ? '100%' : `${threadListWidth}vw` }}
                   className="shrink-0 overflow-hidden border-r border-border"
                 >
-                  <ContactDetailView />
+                  <Suspense fallback={<PanelFallback />}>
+                    <ContactDetailView />
+                  </Suspense>
                 </div>
               )}
               {/* Resize handle */}
@@ -217,9 +260,11 @@ export function AppLayout() {
               {/* Email viewer for selected thread */}
               {(!isCompact || mobileActiveView === 'viewer') && (
                 <div className="min-w-0 flex-1">
-                  <EmailViewer
-                    onBack={mobileBack}
-                  />
+                  <Suspense fallback={<PanelFallback />}>
+                    <EmailViewer
+                      onBack={mobileBack}
+                    />
+                  </Suspense>
                 </div>
               )}
             </>
@@ -251,7 +296,9 @@ export function AppLayout() {
                   variants={prefersReducedMotion ? reducedMotionVariants : mobileSlideVariants}
                   transition={prefersReducedMotion ? reducedMotionTransition : mobileSlideTransition}
                 >
-                  <EmailViewer onBack={mobileBack} />
+                  <Suspense fallback={<PanelFallback />}>
+                    <EmailViewer onBack={mobileBack} />
+                  </Suspense>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -276,7 +323,9 @@ export function AppLayout() {
               {/* Desktop: Email Viewer */}
               {showEmailViewer && (
                 <div className="min-w-0 flex-1">
-                  <EmailViewer onBack={mobileBack} />
+                  <Suspense fallback={<PanelFallback />}>
+                    <EmailViewer onBack={mobileBack} />
+                  </Suspense>
                 </div>
               )}
             </>
@@ -290,15 +339,15 @@ export function AppLayout() {
           style={{ width: `${aiChatWidth}%` }}
           className="shrink-0 pt-10 transition-panel"
         >
-          <AiChatPanel />
+          <Suspense fallback={<AiChatFallback />}>
+            <AiChatPanel />
+          </Suspense>
         </div>
       )}
 
       {/* Mobile bottom navigation */}
       {isCompact && <MobileBottomNav />}
 
-      {/* Keyboard shortcuts widget — pinned bottom-right (desktop only) */}
-      {!isCompact && <KeyboardShortcutsWidget />}
     </div>
   );
 }

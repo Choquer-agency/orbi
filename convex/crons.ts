@@ -36,7 +36,7 @@ crons.interval(
 crons.interval(
   "follow-up-scan",
   { hours: 1 },
-  internal.followUps.processFollowUpScans,
+  (internal.followUps as any).processFollowUpScans,
   {},
 );
 

@@ -9,7 +9,10 @@
     "@auth/core": "0.37.0",
     "@convex-dev/auth": "^0.0.83",
     "@parse/node-apn": "^8.0.0",
-    "convex": "^1.37.0"
+    "@types/sanitize-html": "^2.16.1",
+    "cheerio": "^1.2.0",
+    "convex": "^1.37.0",
+    "sanitize-html": "^2.17.4"
   },
   "scripts": {
     "dev": "concurrently \"npx convex dev\" \"npm run dev -w packages/frontend\"",
@@ -25,15 +28,16 @@
     "build:electron-frontend": "npm run build -w packages/shared && cd packages/frontend && npx vite build --mode electron",
     "package:mac": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin",
     "package:mac:arm64": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=arm64",
-    "package:mac:x64": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=x64"
+    "package:mac:x64": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=x64",
+    "package:mac:universal": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=universal"
   },
   "devDependencies": {
-    "concurrently": "^9.1.2",
-    "typescript": "^5.7.3",
-    "eslint": "^9.20.0",
-    "@typescript-eslint/parser": "^8.24.0",
     "@typescript-eslint/eslint-plugin": "^8.24.0",
+    "@typescript-eslint/parser": "^8.24.0",
+    "concurrently": "^9.1.2",
+    "eslint": "^9.20.0",
     "prettier": "^3.5.3",
-    "tsx": "^4.19.3"
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
   }
 }

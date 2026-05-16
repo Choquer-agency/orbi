@@ -24,6 +24,7 @@ import { internal } from "../_generated/api";
 import { v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
 import { withRefreshOn401 } from "../oauth/tokenManager";
+import { preprocessEmailBody } from "../lib/emailPreprocess";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
@@ -250,26 +251,71 @@ async function syncConversationMessages(
     }
   }
 
-  // 1. Upsert the thread.
-  const threadId: Id<"threads"> = await ctx.runMutation(
-    internal.sync.microsoftData._upsertThread,
+  // 1. Upsert the thread — gated by a fingerprint check so we don't
+  //    call into the mutation (and re-fire `threads.list`) when nothing
+  //    about the conversation has actually changed.
+  const threadIsArchived =
+    !threadLabels.includes("INBOX") && !threadLabels.includes("SENT");
+  const threadIsTrashed = threadLabels.includes("TRASH");
+  const participantList = [...participants];
+  const fp = (await ctx.runQuery(
+    internal.sync.microsoftData._getThreadFingerprint,
     {
       accountId: cctx.accountId,
       providerThreadId: conversationId,
-      subject,
-      snippet,
-      isRead: !hasUnread,
-      isStarred: hasStarred,
-      isArchived:
-        !threadLabels.includes("INBOX") && !threadLabels.includes("SENT"),
-      isTrashed: threadLabels.includes("TRASH"),
-      labels: threadLabels,
-      participantEmails: [...participants],
-      messageCount: messages.length,
-      lastMessageAt: lastDate,
-      ...(lastReceivedAt !== undefined ? { lastReceivedAt } : {}),
     },
-  );
+  )) as {
+    id: Id<"threads">;
+    subject: string;
+    snippet?: string;
+    isRead: boolean;
+    isStarred: boolean;
+    isArchived: boolean;
+    isTrashed: boolean;
+    labels: string[];
+    participantEmails: string[];
+    messageCount: number;
+    lastMessageAt: number;
+    lastReceivedAt?: number;
+  } | null;
+  let threadId: Id<"threads">;
+  const fpMatches =
+    fp &&
+    fp.subject === subject &&
+    fp.snippet === snippet &&
+    fp.isRead === !hasUnread &&
+    fp.isStarred === hasStarred &&
+    fp.isArchived === threadIsArchived &&
+    fp.isTrashed === threadIsTrashed &&
+    fp.messageCount === messages.length &&
+    fp.lastMessageAt === lastDate &&
+    (fp.lastReceivedAt ?? undefined) === (lastReceivedAt ?? undefined) &&
+    fp.labels.length === threadLabels.length &&
+    fp.labels.every((l, i) => l === threadLabels[i]) &&
+    fp.participantEmails.length === participantList.length &&
+    fp.participantEmails.every((p, i) => p === participantList[i]);
+  if (fpMatches) {
+    threadId = fp!.id;
+  } else {
+    threadId = await ctx.runMutation(
+      internal.sync.microsoftData._upsertThread,
+      {
+        accountId: cctx.accountId,
+        providerThreadId: conversationId,
+        subject,
+        snippet,
+        isRead: !hasUnread,
+        isStarred: hasStarred,
+        isArchived: threadIsArchived,
+        isTrashed: threadIsTrashed,
+        labels: threadLabels,
+        participantEmails: participantList,
+        messageCount: messages.length,
+        lastMessageAt: lastDate,
+        ...(lastReceivedAt !== undefined ? { lastReceivedAt } : {}),
+      },
+    );
+  }
 
   // 2. Upsert each message and dispatch post-insert work for new ones.
   for (const msg of messages) {
@@ -293,6 +339,36 @@ async function syncConversationMessages(
       ? new Date(msg.sentDateTime).getTime()
       : undefined;
 
+    // Pre-check: if the email already exists and nothing about it changed,
+    // skip both the body preprocessing and the upsert mutation entirely.
+    // This is what eliminates the steady `_upsertEmail` log spam from
+    // Microsoft Graph's chatty delta feed.
+    const msgLabelsForCheck = msgLabels;
+    const isRead = !!msg.isRead;
+    const isStarred = msg.flag?.flagStatus === "flagged";
+    const fingerprint = (await ctx.runQuery(
+      internal.sync.microsoftData._getEmailFingerprint,
+      { providerMessageId: msg.id },
+    )) as {
+      id: Id<"emails">;
+      threadId: Id<"threads">;
+      isRead: boolean;
+      isStarred: boolean;
+      labels: string[];
+    } | null;
+    if (
+      fingerprint &&
+      fingerprint.threadId === threadId &&
+      fingerprint.isRead === isRead &&
+      fingerprint.isStarred === isStarred &&
+      fingerprint.labels.length === msgLabelsForCheck.length &&
+      fingerprint.labels.every((l, i) => l === msgLabelsForCheck[i])
+    ) {
+      continue;
+    }
+
+    const pre = preprocessEmailBody(bodyHtml, bodyText, msg.subject || "");
+
     const upsertResult = (await ctx.runMutation(
       internal.sync.microsoftData._upsertEmail,
       {
@@ -310,6 +386,10 @@ async function syncConversationMessages(
         subject: msg.subject || "(no subject)",
         bodyText,
         bodyHtml,
+        bodyHtmlClean: pre.bodyHtmlClean,
+        bodyHtmlTrimmed: pre.bodyHtmlTrimmed,
+        hasQuotedHistory: pre.hasQuotedHistory,
+        isForwarded: pre.isForwarded,
         snippet: msg.bodyPreview,
         isRead: !!msg.isRead,
         isStarred: msg.flag?.flagStatus === "flagged",

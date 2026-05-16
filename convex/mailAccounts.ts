@@ -74,6 +74,33 @@ export const get = query({
   },
 });
 
+/** Back-compat: legacy clients call api.mailAccounts.anyHistoricalSync. */
+export const anyHistoricalSync = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUser(ctx);
+    const accounts = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+
+    const syncingAccounts = accounts.filter(
+      (a) => a.historicalSyncStatus === "IN_PROGRESS",
+    );
+    // This function exists only for older deployed clients. The missing
+    // function report came from code that is not in the current repo, so keep
+    // the safest legacy shape: an iterable array of syncing accounts. Returning
+    // an object here can crash stale clients that do `[...(result ?? [])]`.
+    return syncingAccounts.map((a) => ({
+      id: a._id,
+      email: a.email,
+      provider: a.provider,
+      historicalSyncStatus: a.historicalSyncStatus,
+      historicalSyncProgress: a.historicalSyncProgress ?? null,
+    }));
+  },
+});
+
 /** GET /api/accounts/:id/sync-status */
 export const getSyncStatus = query({
   args: { accountId: v.id("mailAccounts") },

@@ -10,11 +10,13 @@ import {
 } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import * as Avatar from '@radix-ui/react-avatar';
+import { useEffect } from 'react';
 import * as ScrollArea from '@radix-ui/react-scroll-area';
 import { useUnreadCount, useNotifications, useMarkAsRead, useMarkAllRead } from '../../hooks/useNotifications';
 import { usePendingComments, useDashboardTasks, useToggleTask } from '../../hooks/useDashboard';
 import { useUiStore } from '../../stores/uiStore';
 import { getAvatarColor } from '../../lib/constants';
+import { updateBadgeCount } from '../../lib/desktopNotifications';
 import { cn, getInitials, truncate } from '../../lib/utils';
 
 function timeAgo(dateStr: string): string {
@@ -44,6 +46,10 @@ export function NotificationPopover() {
   const [tab, setTab] = useState<Tab>('all');
   const { data: unreadData } = useUnreadCount();
   const unreadCount = unreadData?.data?.count ?? 0;
+
+  useEffect(() => {
+    updateBadgeCount(unreadCount);
+  }, [unreadCount]);
 
   const { data: notifData } = useNotifications();
   const markAsRead = useMarkAsRead();

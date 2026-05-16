@@ -69,13 +69,14 @@ Strategy:
 - ALWAYS check the current thread context first if one is provided. The user is likely asking about the thread they are viewing. Answer directly from the context if possible.
 - Only use search tools when the answer is NOT in the current thread context, or when the user explicitly asks about other emails.
 - When asked to find specific data (tracking numbers, order numbers, prices, dates, amounts, codes), you MUST use get_thread_detail after search_emails to read the full thread content. Search result snippets are truncated and may not contain the specific data. Always read the full thread before answering.
-- When asked about a person or client, look them up first to get their exact email, then search.
+- When asked about a person or client, look them up first to get their exact email, then search. Contact lookup and email search support fuzzy matching, so use them even if the user's spelling may be slightly off.
 - When asked to triage or prioritize, use get_priority_inbox rather than searching.
 - You can chain multiple tools: search → get_thread_detail → answer. This is the expected pattern for finding specific information. Don't stop at search results — read the thread.
 - When the user asks "what should I respond to", use get_priority_inbox.
 - When the user asks about deadlines or promises, use get_tasks_and_deadlines.
 - When you need a recipient's email address and the user hasn't provided it (and it's not in the compose context), ALWAYS use lookup_contact to find matches rather than asking the user to type the email. If the user mentions a name like "Dorothy", look them up immediately. Only ask the user to type or clarify if lookup_contact returns zero results or too many ambiguous matches.
 - When you find the answer, give it directly and concisely. Don't just describe what you found — extract and present the specific information the user asked for (e.g., the actual tracking number, not "the email contains tracking info").
+- When searching for normal/user-actionable emails, exclude notification, marketing, and spam by default. Only include those categories if the user explicitly asks for notifications, calendar invites, marketing/newsletters, spam, or a specific excluded category.
 - When searching, use targeted queries and low limits. If the user asks a specific question (e.g., "tracking number for X order"), search with limit 3-5, not 10. Only the relevant emails should appear in results.
 - After finding the answer, mention only the specific emails that contained the answer. Do not show all search results — only the ones that matter.
 
@@ -108,6 +109,11 @@ export const TOOLS: Anthropic.Tool[] = [
         subject: {
           type: "string",
           description: "Email subject. Only set for new emails, not replies.",
+        },
+        thread_id: {
+          type: "string",
+          description:
+            "Existing thread ID if this draft is a reply to a specific thread. Use the threadId returned by search/get_thread_detail when applicable.",
         },
         body: {
           type: "string",
@@ -202,8 +208,12 @@ export const TOOLS: Anthropic.Tool[] = [
           description:
             "Search keywords or phrases. Can be empty if using filters alone.",
         },
-        from: { type: "string", description: "Filter by sender email or name." },
-        to: { type: "string", description: "Filter by recipient email or name." },
+        from: { type: "string", description: "Filter by sender email or name. Fuzzy name matching is supported." },
+        to: { type: "string", description: "Filter by recipient email or name. Fuzzy name matching is supported." },
+        cc_only: {
+          type: "boolean",
+          description: "When true, only return emails where one of the user's addresses was CC'd. Use for requests like 'emails I am cc'd in'.",
+        },
         date_from: {
           type: "string",
           description: 'Start date (ISO format, e.g. "2026-01-01").',
@@ -221,10 +231,14 @@ export const TOOLS: Anthropic.Tool[] = [
           description: "Only return emails sent by the user (not received).",
         },
         unread_only: { type: "boolean", description: "Only return unread emails." },
+        include_noise: {
+          type: "boolean",
+          description: "Set true only when the user explicitly asks for notifications, calendar invites, marketing/newsletters, spam, or other low-signal automated emails. Default false excludes those.",
+        },
         category: {
           type: "string",
           description:
-            "Filter by AI classification category: revision_request, billing, new_inquiry, project_update, meeting_scheduling, feedback, support_request, internal, newsletter, other.",
+            "Filter by AI classification category: revision_request, billing, new_inquiry, project_update, meeting_scheduling, feedback, support_request, internal, notification, marketing, spam, other.",
         },
         urgency: {
           type: "string",
@@ -570,7 +584,7 @@ function processOutputTool(
         to: (input.to as string) || primaryRecipient || undefined,
         subject: input.subject as string | undefined,
         body: input.body as string,
-        threadId: threadId || undefined,
+        threadId: (input.thread_id as string | undefined) || threadId || undefined,
         greetingUsed: input.greeting_used as string | undefined,
         signoffUsed: input.signoff_used as string | undefined,
       },

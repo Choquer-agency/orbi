@@ -1,14 +1,11 @@
 import { useEffect } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
 import { useUiStore } from '../stores/uiStore';
-import { useThreads, useUpdateThread } from './useThreads';
-import { useAccounts, useSyncAccount } from './useAccounts';
+import { useUpdateThread } from './useThreads';
+import { getVisibleThreadNavigationRows } from '../lib/threadNavigationState';
 
 export function useKeyboardShortcuts() {
   const {
     selectedThreadId,
-    selectedAccountId,
-    selectedFolder,
     setSelectedThread,
     toggleNavDropdown,
     setNavDropdownOpen,
@@ -17,12 +14,7 @@ export function useKeyboardShortcuts() {
     clearSelection,
     toggleThreadSelection,
   } = useUiStore();
-  const { data } = useThreads({ accountId: selectedAccountId ?? undefined, folder: selectedFolder !== 'dashboard' ? selectedFolder : 'inbox' });
-  const threads = (data as any)?.pages ? (data as any).pages.flatMap((p: any) => p.data) : (data?.data ?? []);
   const updateThread = useUpdateThread();
-  const queryClient = useQueryClient();
-  const { data: accountsData } = useAccounts();
-  const syncAccount = useSyncAccount();
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -44,10 +36,15 @@ export function useKeyboardShortcuts() {
         return;
       }
 
-      // Escape: close panels/dropdown, clear selection
+      // Escape: close panels/dropdown, clear selection, close open thread
       if (e.key === 'Escape') {
         if (selectedThreadIds.size > 0) {
           clearSelection();
+        } else if (selectedThreadId) {
+          // Blur whatever currently has focus so the thread list doesn't end
+          // up with a focus ring after the viewer closes.
+          (document.activeElement as HTMLElement | null)?.blur?.();
+          setSelectedThread(null);
         }
         setNavDropdownOpen(false);
         return;
@@ -57,7 +54,8 @@ export function useKeyboardShortcuts() {
       if (isEditable) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
 
-      const currentIndex = threads.findIndex((t: any) => t.id === selectedThreadId);
+      const threads = getVisibleThreadNavigationRows();
+      const currentIndex = threads.findIndex((t) => t.id === selectedThreadId);
 
       switch (e.key) {
         case 'j': {
@@ -90,7 +88,7 @@ export function useKeyboardShortcuts() {
         case 's': {
           // Star
           if (selectedThreadId) {
-            const thread = threads.find((t: any) => t.id === selectedThreadId);
+            const thread = threads.find((t) => t.id === selectedThreadId);
             if (thread) {
               updateThread.mutate({ id: selectedThreadId, isStarred: !thread.isStarred });
             }
@@ -141,17 +139,13 @@ export function useKeyboardShortcuts() {
     return () => document.removeEventListener('keydown', handler);
   }, [
     selectedThreadId,
-    threads,
     setSelectedThread,
     toggleNavDropdown,
     setNavDropdownOpen,
     updateThread,
     setComposingNew,
-    queryClient,
     selectedThreadIds,
     clearSelection,
     toggleThreadSelection,
-    accountsData,
-    syncAccount,
   ]);
 }

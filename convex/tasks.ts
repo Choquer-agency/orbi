@@ -23,16 +23,52 @@ export const list = query({
     const take = Math.min(limit, 100);
     const skip = (page - 1) * take;
 
-    let rows = (await ctx.db.query("tasks").collect()).filter(
-      (t) => t.userId === userId,
-    );
-
+    let rows;
     if (status === "open") {
-      rows = rows.filter((t) => t.status === "OPEN");
+      rows = await ctx.db
+        .query("tasks")
+        .withIndex("by_user_status_deadline", (q) =>
+          q.eq("userId", userId).eq("status", "OPEN"),
+        )
+        .take(skip + take);
     } else if (status === "done") {
-      rows = rows.filter(
-        (t) => t.status === "DONE" || t.status === "AUTO_RESOLVED",
-      );
+      const [done, autoResolved] = await Promise.all([
+        ctx.db
+          .query("tasks")
+          .withIndex("by_user_status_deadline", (q) =>
+            q.eq("userId", userId).eq("status", "DONE"),
+          )
+          .take(skip + take),
+        ctx.db
+          .query("tasks")
+          .withIndex("by_user_status_deadline", (q) =>
+            q.eq("userId", userId).eq("status", "AUTO_RESOLVED"),
+          )
+          .take(skip + take),
+      ]);
+      rows = [...done, ...autoResolved];
+    } else {
+      const [open, done, autoResolved] = await Promise.all([
+        ctx.db
+          .query("tasks")
+          .withIndex("by_user_status_deadline", (q) =>
+            q.eq("userId", userId).eq("status", "OPEN"),
+          )
+          .take(skip + take),
+        ctx.db
+          .query("tasks")
+          .withIndex("by_user_status_deadline", (q) =>
+            q.eq("userId", userId).eq("status", "DONE"),
+          )
+          .take(skip + take),
+        ctx.db
+          .query("tasks")
+          .withIndex("by_user_status_deadline", (q) =>
+            q.eq("userId", userId).eq("status", "AUTO_RESOLVED"),
+          )
+          .take(skip + take),
+      ]);
+      rows = [...open, ...done, ...autoResolved];
     }
 
     rows.sort((a, b) => {

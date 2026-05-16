@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { FileSignature, Plus, Trash2, Star, Pencil, Check } from 'lucide-react';
+import { FileSignature, Plus, Trash2, Star, Pencil, Check, Code, Eye } from 'lucide-react';
 import {
   useSignatures,
   useCreateSignature,
@@ -31,6 +31,12 @@ function SignatureEditor({
   const [bodyHtml, setBodyHtml] = useState(initial?.bodyHtml ?? '');
   const [isDefault, setIsDefault] = useState(initial?.isDefault ?? false);
   const [accountId, setAccountId] = useState<string | null>(initial?.accountId ?? null);
+  // "source" = raw HTML textarea (preserves complex markup like Spark/Outlook
+  // table-based signatures exactly), "preview" = WYSIWYG contentEditable.
+  // Default to source when the existing signature already contains markup
+  // that contentEditable would mangle (tables, complex inline styles).
+  const looksComplex = /<(table|tbody|tr|td|th|style)\b/i.test(initial?.bodyHtml ?? '');
+  const [mode, setMode] = useState<'preview' | 'source'>(looksComplex ? 'source' : 'preview');
 
   return (
     <div className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
@@ -41,16 +47,54 @@ function SignatureEditor({
         placeholder="Signature name (e.g., Work, Personal)"
         className="w-full rounded-lg border border-border bg-white px-3 py-1.5 text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40"
       />
-      <div
-        contentEditable
-        suppressContentEditableWarning
-        dangerouslySetInnerHTML={{ __html: bodyHtml }}
-        onBlur={(e) => setBodyHtml(e.currentTarget.innerHTML)}
-        className="min-h-[80px] w-full rounded-lg border border-border bg-white px-3 py-2 text-[12px] text-text-primary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40 [&_a]:text-primary [&_a]:underline"
-        data-placeholder="Type your signature HTML here..."
-      />
+      <div className="flex items-center justify-end gap-1 -mb-1">
+        <button
+          type="button"
+          onClick={() => setMode('preview')}
+          className={cn(
+            'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors',
+            mode === 'preview'
+              ? 'bg-white text-text-primary shadow-sm'
+              : 'text-text-tertiary hover:text-text-secondary',
+          )}
+        >
+          <Eye className="h-3 w-3" /> Preview
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode('source')}
+          className={cn(
+            'flex items-center gap-1 rounded px-2 py-1 text-[10px] font-medium transition-colors',
+            mode === 'source'
+              ? 'bg-white text-text-primary shadow-sm'
+              : 'text-text-tertiary hover:text-text-secondary',
+          )}
+        >
+          <Code className="h-3 w-3" /> HTML
+        </button>
+      </div>
+      {mode === 'preview' ? (
+        <div
+          contentEditable
+          suppressContentEditableWarning
+          dangerouslySetInnerHTML={{ __html: bodyHtml }}
+          onBlur={(e) => setBodyHtml(e.currentTarget.innerHTML)}
+          className="min-h-[80px] w-full rounded-lg border border-border bg-white px-3 py-2 text-[12px] text-text-primary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40 [&_a]:text-primary [&_a]:underline"
+          data-placeholder="Type your signature HTML here..."
+        />
+      ) : (
+        <textarea
+          value={bodyHtml}
+          onChange={(e) => setBodyHtml(e.target.value)}
+          placeholder="Paste raw HTML (<table>, <img>, inline styles preserved exactly)"
+          spellCheck={false}
+          className="min-h-[200px] w-full rounded-lg border border-border bg-white px-3 py-2 font-mono text-[11px] text-text-primary placeholder:text-text-tertiary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40"
+        />
+      )}
       <p className="text-[10px] text-text-tertiary">
-        Supports HTML formatting. Use bold, links, and line breaks.
+        {mode === 'preview'
+          ? 'Type your signature — formatting buttons coming. For pasted HTML (Spark, Outlook, etc.) use the HTML tab.'
+          : 'Raw HTML is saved exactly as written. Tables, inline styles, and images are preserved.'}
       </p>
       <div className="flex items-center gap-4">
         <label className="flex items-center gap-2 text-[11px] text-text-secondary cursor-pointer">

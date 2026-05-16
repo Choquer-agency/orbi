@@ -11,6 +11,14 @@ const recipient = v.object({
   name: v.optional(v.string()),
 });
 
+function normalizeAddressList(value: unknown): Array<{ email?: string; name?: string }> {
+  if (Array.isArray(value)) return value as Array<{ email?: string; name?: string }>;
+  if (!value) return [];
+  if (typeof value === "string") return value ? [{ email: value }] : [];
+  if (typeof value === "object") return [value as { email?: string; name?: string }];
+  return [];
+}
+
 const composeMode = v.union(
   v.literal("compose"),
   v.literal("reply"),
@@ -58,12 +66,32 @@ export const create = mutation({
 
     const now = Date.now();
 
+    let resolvedSubject = args.subject || "";
+    if (!resolvedSubject && (args.mode === "reply" || args.mode === "forward")) {
+      if (args.parentEmailId) {
+        const parent = await ctx.db.get(args.parentEmailId);
+        if (parent) {
+          resolvedSubject = args.mode === "forward"
+            ? (parent.subject.startsWith("Fwd:") ? parent.subject : `Fwd: ${parent.subject}`)
+            : (parent.subject.startsWith("Re:") ? parent.subject : `Re: ${parent.subject}`);
+        }
+      }
+      if (!resolvedSubject && args.threadId) {
+        const thread = await ctx.db.get(args.threadId);
+        if (thread) {
+          resolvedSubject = args.mode === "forward"
+            ? (thread.subject.startsWith("Fwd:") ? thread.subject : `Fwd: ${thread.subject}`)
+            : (thread.subject.startsWith("Re:") ? thread.subject : `Re: ${thread.subject}`);
+        }
+      }
+    }
+
     let resolvedThreadId: Id<"threads"> | undefined = args.threadId;
     if (!resolvedThreadId) {
       resolvedThreadId = await ctx.db.insert("threads", {
         accountId: account._id,
         providerThreadId: newDraftThreadId(),
-        subject: args.subject || "(no subject)",
+        subject: resolvedSubject || "(no subject)",
         snippet: (args.bodyText || "").slice(0, 200),
         isRead: true,
         isStarred: false,
@@ -90,7 +118,7 @@ export const create = mutation({
       toAddresses: args.toAddresses ?? [],
       ccAddresses: [],
       bccAddresses: [],
-      subject: args.subject ?? "",
+      subject: resolvedSubject,
       bodyText: args.bodyText ?? "",
       bodyHtml: args.bodyHtml ?? "",
       snippet: (args.bodyText || "").slice(0, 200),
@@ -209,12 +237,14 @@ export const sendDraft = mutation({
       throw new Error("Draft has no recipients");
     }
 
+    const fallbackSubject = email.subject || (await ctx.db.get(email.threadId))?.subject || "(no subject)";
     const now = Date.now();
     const undoDeadlineAt = now + UNDO_WINDOW_MS;
 
     await ctx.db.patch(draftId, {
       isDraft: false,
       sendStatus: "PENDING_SEND",
+      subject: fallbackSubject,
       sentAt: now,
       undoDeadlineAt,
       labels: ["SENT"],
@@ -245,7 +275,7 @@ export const sendDraft = mutation({
       emailId: draftId,
     });
 
-    return { data: { id: draftId, threadId: email.threadId } };
+    return { data: { id: draftId, threadId: email.threadId, subject: fallbackSubject, undoDeadlineAt } };
   },
 });
 
@@ -264,6 +294,10 @@ export const list = query({
       .query("mailAccounts")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
+    const ownedAccountIds = new Set(accounts.map((a) => a._id));
+    if (args.accountId && !ownedAccountIds.has(args.accountId)) {
+      throw new Error("Account not found");
+    }
     const accountIds = args.accountId
       ? [args.accountId]
       : accounts.map((a) => a._id);
@@ -275,18 +309,27 @@ export const list = query({
       accountIds.map((aid) =>
         ctx.db
           .query("emails")
-          .withIndex("by_account_receivedAt", (q) => q.eq("accountId", aid))
+          .withIndex("by_account_isDraft_receivedAt", (q) =>
+            q.eq("accountId", aid).eq("isDraft", true),
+          )
           .order("desc")
           .take(limitNum),
       ),
     );
     const drafts = emailsArrays
       .flat()
-      .filter((e) => e.isDraft)
       .sort((a, b) => b.receivedAt - a.receivedAt)
       .slice(0, limitNum);
 
-    return { data: drafts.map((d) => ({ ...d, id: d._id })) };
+    return {
+      data: drafts.map((d) => ({
+        ...d,
+        id: d._id,
+        toAddresses: normalizeAddressList(d.toAddresses),
+        ccAddresses: normalizeAddressList(d.ccAddresses),
+        bccAddresses: normalizeAddressList(d.bccAddresses),
+      })),
+    };
   },
 });
 
@@ -302,11 +345,13 @@ export const count = query({
       accounts.map((a) =>
         ctx.db
           .query("emails")
-          .withIndex("by_account_receivedAt", (q) => q.eq("accountId", a._id))
+          .withIndex("by_account_isDraft_receivedAt", (q) =>
+            q.eq("accountId", a._id).eq("isDraft", true),
+          )
           .collect(),
       ),
     );
-    const total = arrays.flat().filter((e) => e.isDraft).length;
+    const total = arrays.reduce((sum, rows) => sum + rows.length, 0);
     return { data: { count: total } };
   },
 });

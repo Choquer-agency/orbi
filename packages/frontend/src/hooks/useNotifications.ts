@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
@@ -65,6 +65,11 @@ export function useMarkAsRead() {
     }
   };
   return { mutate, mutateAsync: mutate, isPending };
+}
+
+export function useMarkThreadNotificationsRead() {
+  const fn = useMutation(api.notifications.markThreadRead);
+  return useCallback((threadId: string) => fn({ threadId: threadId as Id<'threads'> }), [fn]);
 }
 
 export function useMarkAllRead() {

@@ -1,14 +1,16 @@
 import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X } from 'lucide-react';
+import { Download, X } from 'lucide-react';
+import { Tooltip } from '../ui/Tooltip';
 
 interface ImageLightboxProps {
   src: string | null;
   alt?: string;
   onClose: () => void;
+  onDownload?: (src: string, alt?: string) => void;
 }
 
-export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
+export function ImageLightbox({ src, alt, onClose, onDownload }: ImageLightboxProps) {
   const [scale, setScale] = useState(1);
   const [translate, setTranslate] = useState({ x: 0, y: 0 });
   const lastTouchDistance = useRef<number | null>(null);
@@ -77,12 +79,28 @@ export function ImageLightbox({ src, alt, onClose }: ImageLightboxProps) {
             if (e.target === e.currentTarget && scale <= 1) onClose();
           }}
         >
-          <button
-            onClick={onClose}
-            className="absolute right-4 top-4 z-10 rounded-full bg-white/20 p-2 text-white backdrop-blur-sm"
-          >
-            <X className="h-5 w-5" />
-          </button>
+          <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
+            {onDownload && (
+              <Tooltip content="Download image" side="bottom">
+                <button
+                  onClick={() => src && onDownload(src, alt)}
+                  className="flex h-8 w-8 items-center justify-center rounded-full bg-orange-500 text-white transition-colors hover:bg-orange-600"
+                  aria-label="Download image"
+                >
+                  <Download className="h-4 w-4" />
+                </button>
+              </Tooltip>
+            )}
+            <Tooltip content="Close" side="bottom">
+              <button
+                onClick={onClose}
+                className="flex h-8 w-8 items-center justify-center rounded-full bg-orange-500 text-white transition-colors hover:bg-orange-600"
+                aria-label="Close image preview"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </Tooltip>
+          </div>
           <img
             src={src}
             alt={alt || 'Image preview'}

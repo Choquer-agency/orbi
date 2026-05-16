@@ -4,14 +4,17 @@ import { ConvexAuthProvider } from "@convex-dev/auth/react";
 import { convex } from "./lib/convex";
 import './index.css'
 import App from './App.tsx'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { isNative } from './lib/platform'
 import { initCapacitorListeners } from './lib/capacitorInit'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ConvexAuthProvider client={convex}>
-      <App />
-    </ConvexAuthProvider>
+    <ErrorBoundary>
+      <ConvexAuthProvider client={convex}>
+        <App />
+      </ConvexAuthProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )
 

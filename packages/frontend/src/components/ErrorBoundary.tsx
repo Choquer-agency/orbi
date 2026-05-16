@@ -17,6 +17,10 @@ export class ErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
+  componentDidCatch(error: Error, info: { componentStack?: string }) {
+    console.error('Orbi UI crashed', { error, componentStack: info.componentStack });
+  }
+
   render() {
     if (this.state.hasError) {
       if (this.props.fallback) return this.props.fallback;
@@ -27,12 +31,20 @@ export class ErrorBoundary extends Component<Props, State> {
             <p className="mt-1 text-xs text-text-tertiary">
               {this.state.error?.message || 'An unexpected error occurred'}
             </p>
-            <button
-              onClick={() => this.setState({ hasError: false, error: null })}
-              className="mt-3 rounded-lg bg-primary px-3 py-1.5 text-xs text-white transition-colors hover:bg-primary/90"
-            >
-              Try again
-            </button>
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <button
+                onClick={() => this.setState({ hasError: false, error: null })}
+                className="rounded-lg bg-primary px-3 py-1.5 text-xs text-white transition-colors hover:bg-primary/90"
+              >
+                Try again
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                className="rounded-lg border border-border px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-surface"
+              >
+                Reload
+              </button>
+            </div>
           </div>
         </div>
       );

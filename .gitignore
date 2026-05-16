@@ -13,4 +13,5 @@ coverage/
 .claude/settings.local.json
 *.tsbuildinfo
 .convex/
+.wrangler/
 convex/_generated/

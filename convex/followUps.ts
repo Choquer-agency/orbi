@@ -8,6 +8,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
+import type { Id } from "./_generated/dataModel";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Follow-up watches — ported from packages/backend/src/routes/follow-ups.
@@ -94,10 +95,30 @@ export const list = query({
   args: { status: v.optional(v.string()) },
   handler: async (ctx, { status }) => {
     const userId = await requireUser(ctx);
-    let rows = (
-      await ctx.db.query("followUpWatches").collect()
-    ).filter((r) => r.userId === userId);
-    if (status) rows = rows.filter((r) => r.status === status);
+    // Use by_user_status_nextCheckAt; when no status filter is provided, fan
+    // out over the three concrete statuses so we never table-scan.
+    let rows: any[];
+    if (status) {
+      rows = await ctx.db
+        .query("followUpWatches")
+        .withIndex("by_user_status_nextCheckAt", (q) =>
+          q.eq("userId", userId).eq("status", status as any),
+        )
+        .collect();
+    } else {
+      const statuses = ["WATCHING", "REPLIED", "EXPIRED"] as const;
+      const batches = await Promise.all(
+        statuses.map((s) =>
+          ctx.db
+            .query("followUpWatches")
+            .withIndex("by_user_status_nextCheckAt", (q) =>
+              q.eq("userId", userId).eq("status", s),
+            )
+            .collect(),
+        ),
+      );
+      rows = batches.flat();
+    }
     rows.sort((a, b) => a.nextCheckAt - b.nextCheckAt);
 
     // Hydrate thread.subject + thread.snippet and last 5 events (matches
@@ -107,7 +128,7 @@ export const list = query({
     const threadMap = new Map(
       threads
         .filter((t): t is NonNullable<typeof t> => t !== null)
-        .map((t) => [t._id, { subject: t.subject, snippet: t.snippet }]),
+        .map((t: any) => [t._id, { subject: t.subject, snippet: t.snippet }]),
     );
 
     const hydrated = await Promise.all(
@@ -297,17 +318,9 @@ export const _applyWatchUpdate = internalMutation({
       nextCheckAt: now + nextIntervalDays * DAY_MS,
     });
 
-    // Notify the user that a follow-up draft is ready.
-    if (draftBody) {
-      await ctx.db.insert("notifications", {
-        userId: watch.userId,
-        type: "SNOOZE_REMINDER",
-        title: "Follow-up draft ready",
-        body: `A follow-up draft for ${watch.contactEmail} is ready to review.`,
-        data: { watchId, threadId: watch.threadId },
-        isRead: false,
-      });
-    }
+    // Notification emission is centralized in _notifyDraftReady so we can
+    // de-dupe and include thread/account metadata. This helper only persists
+    // the follow-up event/state transition.
   },
 });
 
@@ -319,8 +332,8 @@ export const _applyWatchUpdate = internalMutation({
  */
 export const processFollowUpScans = internalAction({
   args: {},
-  handler: async (ctx) => {
-    const due = await ctx.runQuery(internal.followUps._listDueWatches, {});
+  handler: async (ctx): Promise<{ processed: number; scheduledFollowUpTick: boolean }> => {
+    const due = (await ctx.runQuery(internal.followUps._listDueWatches, {})) as Array<{ _id: Id<"followUpWatches"> }>;
     let processed = 0;
 
     for (const watch of due) {
@@ -355,7 +368,7 @@ export const processFollowUpScans = internalAction({
     if (due.length >= FOLLOW_UP_SCAN_BATCH_LIMIT) {
       await ctx.scheduler.runAfter(
         30_000,
-        internal.followUps.processFollowUpScans,
+        (internal.followUps as any).processFollowUpScans,
         {},
       );
     }
@@ -370,12 +383,32 @@ export const _notifyDraftReady = internalMutation({
   handler: async (ctx, { watchId }) => {
     const watch = await ctx.db.get(watchId);
     if (!watch) return;
+    const thread = await ctx.db.get(watch.threadId);
+    const latestDraft = await ctx.db
+      .query("followUpEvents")
+      .withIndex("by_watch", (q) => q.eq("watchId", watchId))
+      .order("desc")
+      .filter((q) => q.eq(q.field("type"), "follow_up_drafted"))
+      .first();
+    if (!thread || !latestDraft?.draftBody) return;
+
+    const existingUnread = await ctx.db
+      .query("notifications")
+      .withIndex("by_user_isRead", (q) => q.eq("userId", watch.userId).eq("isRead", false))
+      .collect();
+    const alreadyNotified = existingUnread.some((n) => {
+      const data = n.data as { watchId?: unknown; eventId?: unknown } | undefined;
+      return String(data?.watchId ?? "") === String(watchId) &&
+        String(data?.eventId ?? "") === String(latestDraft._id);
+    });
+    if (alreadyNotified) return;
+
     await ctx.db.insert("notifications", {
       userId: watch.userId,
       type: "SNOOZE_REMINDER",
-      title: "Follow-up draft ready",
-      body: `A follow-up draft for ${watch.contactEmail} is ready to review.`,
-      data: { watchId, threadId: watch.threadId },
+      title: "Follow-up suggestion ready",
+      body: `A follow-up suggestion for ${watch.contactEmail} is ready in ${thread.subject || "this thread"}.`,
+      data: { watchId, eventId: latestDraft._id, threadId: watch.threadId, accountId: thread.accountId },
       isRead: false,
     });
   },

@@ -231,10 +231,92 @@ export const _upsertThread = internalMutation({
     };
 
     if (existing) {
+      // Microsoft Graph's delta feed fires on tons of server-side state
+      // changes that don't affect anything the user sees (anti-spam tagging,
+      // focused-vs-other reshuffles, web-link preview cache, etc.).
+      // Skip the patch when the meaningful fields are unchanged — saves
+      // write bandwidth and avoids re-firing every connected client's
+      // `threads.list` subscription on a no-op.
+      const same =
+        existing.subject === data.subject &&
+        existing.snippet === data.snippet &&
+        existing.isRead === data.isRead &&
+        existing.isStarred === data.isStarred &&
+        existing.isArchived === data.isArchived &&
+        existing.isTrashed === data.isTrashed &&
+        existing.messageCount === data.messageCount &&
+        existing.lastMessageAt === data.lastMessageAt &&
+        (existing.lastReceivedAt ?? undefined) ===
+          (data.lastReceivedAt ?? undefined) &&
+        sameStringArray(existing.labels, data.labels) &&
+        sameStringArray(existing.participantEmails, data.participantEmails);
+      if (same) return existing._id;
       await ctx.db.patch(existing._id, data);
       return existing._id;
     }
     return await ctx.db.insert("threads", data);
+  },
+});
+
+function sameStringArray(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// Same idea for threads: lets the sync action short-circuit before calling
+// _upsertThread (and re-firing every connected client's threads.list).
+export const _getThreadFingerprint = internalQuery({
+  args: {
+    accountId: v.id("mailAccounts"),
+    providerThreadId: v.string(),
+  },
+  handler: async (ctx, { accountId, providerThreadId }) => {
+    const t = await ctx.db
+      .query("threads")
+      .withIndex("by_account_providerThreadId", (q) =>
+        q.eq("accountId", accountId).eq("providerThreadId", providerThreadId),
+      )
+      .unique();
+    if (!t) return null;
+    return {
+      id: t._id,
+      subject: t.subject,
+      snippet: t.snippet,
+      isRead: t.isRead,
+      isStarred: t.isStarred,
+      isArchived: t.isArchived,
+      isTrashed: t.isTrashed,
+      labels: t.labels,
+      participantEmails: t.participantEmails,
+      messageCount: t.messageCount,
+      lastMessageAt: t.lastMessageAt,
+      lastReceivedAt: t.lastReceivedAt,
+    };
+  },
+});
+
+// Lightweight metadata fingerprint for the sync loop: lets the action skip
+// calling _upsertEmail entirely (no body parse, no preprocess, no log line)
+// when the Graph delta payload matches what we already store. Returns null
+// when the email doesn't exist yet so the caller knows to insert.
+export const _getEmailFingerprint = internalQuery({
+  args: { providerMessageId: v.string() },
+  handler: async (ctx, { providerMessageId }) => {
+    const e = await ctx.db
+      .query("emails")
+      .withIndex("by_providerMessageId", (q) =>
+        q.eq("providerMessageId", providerMessageId),
+      )
+      .unique();
+    if (!e) return null;
+    return {
+      id: e._id,
+      threadId: e.threadId,
+      isRead: e.isRead,
+      isStarred: e.isStarred,
+      labels: e.labels,
+    };
   },
 });
 
@@ -258,6 +340,10 @@ export const _upsertEmail = internalMutation({
     subject: v.string(),
     bodyText: v.optional(v.string()),
     bodyHtml: v.optional(v.string()),
+    bodyHtmlClean: v.optional(v.string()),
+    bodyHtmlTrimmed: v.optional(v.string()),
+    hasQuotedHistory: v.optional(v.boolean()),
+    isForwarded: v.optional(v.boolean()),
     snippet: v.optional(v.string()),
     isRead: v.boolean(),
     isStarred: v.boolean(),
@@ -279,6 +365,16 @@ export const _upsertEmail = internalMutation({
       .unique();
 
     if (existing) {
+      // Skip the patch when nothing the user can see has changed. Microsoft
+      // Graph's delta feed fires for any server-side metadata change on a
+      // message (anti-spam tagging, focused-vs-other shuffles, importance
+      // recomputes), so this fires very frequently with identical payloads.
+      const same =
+        existing.threadId === args.threadId &&
+        existing.isRead === args.isRead &&
+        existing.isStarred === args.isStarred &&
+        sameStringArray(existing.labels, args.labels);
+      if (same) return { emailId: existing._id, isNew: false };
       await ctx.db.patch(existing._id, {
         threadId: args.threadId,
         isRead: args.isRead,
@@ -301,8 +397,8 @@ export const _upsertEmail = internalMutation({
       ccAddresses: args.ccAddresses,
       bccAddresses: args.bccAddresses,
       subject: args.subject,
-      bodyText: args.bodyText,
-      bodyHtml: args.bodyHtml,
+      hasQuotedHistory: args.hasQuotedHistory,
+      isForwarded: args.isForwarded,
       snippet: args.snippet,
       isRead: args.isRead,
       isStarred: args.isStarred,
@@ -314,6 +410,17 @@ export const _upsertEmail = internalMutation({
       sendStatus: "NONE",
       sendAttempts: 0,
     });
+    if (args.bodyHtml || args.bodyText || args.bodyHtmlClean) {
+      await ctx.db.insert("emailBodies", {
+        emailId,
+        bodyText: args.bodyText,
+        bodyHtml: args.bodyHtml,
+        bodyHtmlClean: args.bodyHtmlClean,
+        bodyHtmlTrimmed: args.bodyHtmlTrimmed,
+        hasQuotedHistory: args.hasQuotedHistory,
+        isForwarded: args.isForwarded,
+      });
+    }
     return { emailId, isNew: true };
   },
 });
