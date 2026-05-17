@@ -28,13 +28,17 @@ export const _getNotificationForDelivery = internalQuery({
       .query("notificationPreferences")
       .withIndex("by_user", (q) => q.eq("userId", notification.userId))
       .unique();
-    // Compute current unread count for the badge.
-    const unread = await ctx.db
+    // Compute current unread count for the badge. Cap at 100 — the badge UI
+    // only displays "99+" for higher counts anyway. The previous unbounded
+    // .collect() was the single most expensive query in the app (321 GB read
+    // over 20 days) because every push delivery scanned every unread row,
+    // including fat legacy email-body data referenced by the notification.
+    const unreadSample = await ctx.db
       .query("notifications")
       .withIndex("by_user_isRead", (q) =>
         q.eq("userId", notification.userId).eq("isRead", false),
       )
-      .collect();
+      .take(100);
     return {
       notification: {
         _id: notification._id,
@@ -54,7 +58,7 @@ export const _getNotificationForDelivery = internalQuery({
             quietHoursTimezone: prefs.quietHoursTimezone ?? null,
           }
         : null,
-      badgeCount: unread.length,
+      badgeCount: unreadSample.length,
     };
   },
 });

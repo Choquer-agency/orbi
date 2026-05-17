@@ -485,7 +485,14 @@ async function syncConversationMessages(
 // ─────────────────────────────────────────────────────────────────────────────
 export const syncAllActiveAccounts = internalAction({
   args: {},
-  handler: async (ctx): Promise<{ scheduled: number }> => {
+  handler: async (ctx): Promise<{ scheduled: number; disabled?: boolean }> => {
+    // Kill-switch: set MICROSOFT_SYNC_DISABLED=true on the Convex deployment
+    // to stop the every-minute MS cron from firing. Useful when Graph's
+    // delta endpoint is returning 4xx on the user's tenant and we'd rather
+    // pause than burn compute on failed requests.
+    if (process.env.MICROSOFT_SYNC_DISABLED === "true") {
+      return { scheduled: 0, disabled: true };
+    }
     const accounts: Array<{ _id: Id<"mailAccounts"> }> = await ctx.runQuery(
       internal.sync.microsoftData._listActiveAccounts,
       {},
@@ -717,11 +724,18 @@ async function runDeltaPagination(
 }
 
 /**
- * Walk /me/messages/delta with $top=1 until we hit a deltaLink page. Used to
- * seed a fresh cursor at the end of a full sync.
+ * Walk the inbox-scoped delta endpoint with $top=1 until we hit a deltaLink
+ * page. Used to seed a fresh cursor at the end of a full sync.
+ *
+ * Note: /me/messages/delta returns "Change tracking is not supported against
+ * 'microsoft.graph.message'" on certain Microsoft 365 SKUs (observed on
+ * bryce@penni.ca, a custom-domain Business tenant). The folder-scoped
+ * endpoint /me/mailFolders/inbox/messages/delta works on all SKUs we've
+ * tested. Trade-off: we only track inbox here — sent/drafts/etc. sync
+ * through their own paths.
  */
 async function getInitialDeltaLink(accessToken: string): Promise<string | null> {
-  let url = `/me/messages/delta?$select=${MESSAGE_SELECT_FIELDS}&$top=1`;
+  let url = `/me/mailFolders/inbox/messages/delta?$select=${MESSAGE_SELECT_FIELDS}&$top=1`;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const page = await graphFetch(url, accessToken);

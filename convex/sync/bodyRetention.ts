@@ -22,7 +22,10 @@ import { internal } from "../_generated/api";
 // have instant-open bodies; mail older than two weeks is rare to revisit and
 // fast-enough to re-fetch when needed.
 const RETENTION_DAYS = 14;
-const BATCH_SIZE = 500; // Bounds DB writes per cron tick.
+// emailBodies rows can be 100-500 KB each (full marketing-email HTML), so a
+// 500-row take() trivially blows Convex's 16 MB byte cap. Keep this small
+// and reschedule aggressively until the backlog clears.
+const BATCH_SIZE = 25;
 
 export const stripOldBodies = internalAction({
   args: {},
@@ -32,12 +35,12 @@ export const stripOldBodies = internalAction({
       internal.sync.bodyRetention._stripBatch,
       { cutoffMs, batchSize: BATCH_SIZE },
     );
-    // More bodies left to strip — keep going. Tight enough loop that a heavy
-    // initial backlog gets processed within a few hours instead of waiting
-    // 24 h between batches.
-    if (deleted >= BATCH_SIZE) {
+    // Always reschedule until a batch returns 0 — even when this batch hit
+    // the BATCH_SIZE cap. We tick every 5 seconds during backlog burn-down
+    // so 3000+ legacy bodies get cleared within ~15-20 minutes.
+    if (deleted > 0) {
       await ctx.scheduler.runAfter(
-        30_000,
+        5_000,
         internal.sync.bodyRetention.stripOldBodies,
         {},
       );
@@ -46,32 +49,59 @@ export const stripOldBodies = internalAction({
   },
 });
 
-// Mutation that does the actual work. Picks one batch of emailBodies whose
-// parent email is older than `cutoffMs`, then deletes the body rows. Storage
-// blobs referenced by inline attachments are NOT touched — those live in a
-// separate table that the user controls via the regular attachment lifecycle.
+// Walks `emails` by ascending receivedAt — i.e. oldest first — looking up
+// the sibling emailBodies row and deleting any that fall outside the
+// retention window. Also drops legacy in-row body fields on the parent
+// (`emails.bodyHtml` etc) which were left around by the migration.
+//
+// We can't query `emailBodies` directly because its _creationTime reflects
+// the migration timestamp, not the email's age. The emails table has a
+// proper index on receivedAt that we use here.
 export const _stripBatch = internalMutation({
   args: { cutoffMs: v.number(), batchSize: v.number() },
   handler: async (ctx, { cutoffMs, batchSize }) => {
-    // We don't have an index on emailBodies by parent receivedAt. The cheapest
-    // viable scan: walk emailBodies in insertion order, check the parent
-    // email row, delete when old enough. Stop after we've examined `batchSize`
-    // candidates (NOT after `batchSize` deletes) so we don't get stuck on a
-    // run of already-stripped rows.
-    const candidates = await ctx.db.query("emailBodies").take(batchSize);
+    // Find candidate email rows — accountId is the leading index field, so
+    // we have to iterate per account. Each account scan reads at most
+    // batchSize rows worth of bytes; emails table is tiny once bodies are
+    // moved off.
+    const accounts = await ctx.db.query("mailAccounts").collect();
     let deleted = 0;
-    for (const body of candidates) {
-      const email = await ctx.db.get(body.emailId);
-      if (!email) {
-        // Orphaned body row — the email was deleted but the body lingered.
-        // Drop it.
-        await ctx.db.delete(body._id);
-        deleted++;
-        continue;
-      }
-      if (email.receivedAt < cutoffMs) {
-        await ctx.db.delete(body._id);
-        deleted++;
+    for (const acc of accounts) {
+      if (deleted >= batchSize) break;
+      const oldEmails = await ctx.db
+        .query("emails")
+        .withIndex("by_account_receivedAt", (q) =>
+          q.eq("accountId", acc._id).lt("receivedAt", cutoffMs),
+        )
+        .order("asc")
+        .take(Math.min(batchSize - deleted, 50));
+      for (const email of oldEmails) {
+        const body = await ctx.db
+          .query("emailBodies")
+          .withIndex("by_email", (q) => q.eq("emailId", email._id))
+          .unique();
+        if (body) {
+          await ctx.db.delete(body._id);
+          deleted++;
+        }
+        // Also clear any legacy in-row body fields the migration left behind.
+        if (
+          email.bodyHtml ||
+          email.bodyText ||
+          email.bodyHtmlClean ||
+          email.bodyHtmlTrimmed
+        ) {
+          await ctx.db.patch(email._id, {
+            bodyHtml: undefined,
+            bodyText: undefined,
+            bodyHtmlClean: undefined,
+            bodyHtmlTrimmed: undefined,
+          });
+          // Count the legacy-clear as work too so the scheduler keeps
+          // ticking. Otherwise an account with all bodies-in-row but no
+          // sibling rows would stop after one pass.
+          if (!body) deleted++;
+        }
       }
     }
     return deleted;

@@ -337,7 +337,9 @@ async function syncConversationBatch(
 async function getInitialDeltaLink(
   accessToken: string,
 ): Promise<string | null> {
-  let url = `/me/messages/delta?$select=${MESSAGE_SELECT_FIELDS}&$top=1`;
+  // Inbox-scoped delta — /me/messages/delta is unsupported on some MS365 SKUs
+  // (see microsoft.ts:getInitialDeltaLink for the full note).
+  let url = `/me/mailFolders/inbox/messages/delta?$select=${MESSAGE_SELECT_FIELDS}&$top=1`;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const page = (await graphFetch(url, accessToken)) as Page & {
