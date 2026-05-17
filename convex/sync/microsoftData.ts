@@ -93,6 +93,38 @@ export const _setSyncCursor = internalMutation({
   },
 });
 
+// ─── Folder map cache (A4) ──────────────────────────────────────────────────
+// Microsoft folder ids are stable per mailbox but the sync chunk re-fetches
+// them every minute today. This pair caches them on the mailAccount row with
+// a 30-minute TTL.
+
+export const _readMsFolderMapCache = internalQuery({
+  args: { accountId: v.id("mailAccounts") },
+  handler: async (ctx, { accountId }) => {
+    const acc = await ctx.db.get(accountId);
+    if (!acc) return null;
+    const cache = (acc as { msFolderMapCache?: { entries: Array<{ folderId: string; labels: string[] }>; expiresAt: number } }).msFolderMapCache;
+    if (!cache) return null;
+    if (cache.expiresAt < Date.now()) return null;
+    return cache.entries;
+  },
+});
+
+export const _writeMsFolderMapCache = internalMutation({
+  args: {
+    accountId: v.id("mailAccounts"),
+    entries: v.array(
+      v.object({ folderId: v.string(), labels: v.array(v.string()) }),
+    ),
+    ttlMs: v.number(),
+  },
+  handler: async (ctx, { accountId, entries, ttlMs }) => {
+    await ctx.db.patch(accountId, {
+      msFolderMapCache: { entries, expiresAt: Date.now() + ttlMs },
+    });
+  },
+});
+
 export const _setHistoricalProgress = internalMutation({
   args: {
     accountId: v.id("mailAccounts"),
@@ -539,16 +571,19 @@ export const _onNewEmailInserted = internalMutation({
       receivedAt: email.receivedAt,
     });
 
-    // 3. Schedule AI classification for inbound mail only. Outbound promise
-    // follow-ups are handled here without an LLM call so mail sent from
-    // Outlook web/desktop still gets tracked.
-    if (!isOutbound) {
+    // 3. Schedule AI classification for RECENT inbound mail only. Older mail
+    // (>90 days) is almost always backfill — we don't pay Claude to label
+    // emails from 2023 that the user already triaged manually long ago.
+    // Outbound promise follow-ups are handled below without an LLM call.
+    const CLASSIFY_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+    const isRecent = email.receivedAt > Date.now() - CLASSIFY_WINDOW_MS;
+    if (!isOutbound && isRecent) {
       await ctx.scheduler.runAfter(
         0,
         internal.ai.classifier.classifyEmailWithContext,
         { emailId, userId: account.userId },
       );
-    } else {
+    } else if (isOutbound) {
       // Synthetic "sent" classification so downstream filters still surface
       // outbound mail without an LLM call.
       const existingClassification = await ctx.db
@@ -587,7 +622,8 @@ export const _onNewEmailInserted = internalMutation({
     }
 
     // 4. Notify the user (per-type prefs are enforced inside the helper).
-    if (!isOutbound) {
+    // Gate on recency: don't fire push notifications for backfilled history.
+    if (!isOutbound && isRecent) {
       await ctx.scheduler.runAfter(
         0,
         internal.notifications.createIfAllowed,

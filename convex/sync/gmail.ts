@@ -232,13 +232,18 @@ async function persistGmailThread(
     messages: GmailMessage[];
     userEmails: string[];
   },
-): Promise<{ newEmailIds: Id<"emails">[]; bodyTextByEmailId: Record<string, string | null> }> {
+): Promise<{
+  newEmailIds: Id<"emails">[];
+  bodyTextByEmailId: Record<string, string | null>;
+  isOutboundByEmailId: Record<string, boolean>;
+}> {
   const { accountId, gmailThreadId, messages, userEmails } = args;
   const newEmailIds: Id<"emails">[] = [];
   const bodyTextByEmailId: Record<string, string | null> = {};
+  const isOutboundByEmailId: Record<string, boolean> = {};
 
   if (messages.length === 0) {
-    return { newEmailIds, bodyTextByEmailId };
+    return { newEmailIds, bodyTextByEmailId, isOutboundByEmailId };
   }
 
   const groups = splitIntoConversations(messages);
@@ -442,6 +447,13 @@ async function persistGmailThread(
       if (upsertResult.isNew) {
         newEmailIds.push(upsertResult.emailId);
         bodyTextByEmailId[upsertResult.emailId] = body.text || null;
+        // Per-message outbound check: this specific email is outbound iff its
+        // From: header matches one of the user's mailbox addresses. Don't fall
+        // back to thread-level SENT label — a thread can mix inbound + outbound
+        // messages and we don't want to mis-tag inbound replies as outbound.
+        const fromLower = from.email?.toLowerCase();
+        isOutboundByEmailId[upsertResult.emailId] =
+          !!fromLower && userEmails.includes(fromLower);
         if (attachments.length > 0) {
           await ctx.runMutation(internal.sync.gmailData._insertAttachments, {
             emailId: upsertResult.emailId,
@@ -460,7 +472,7 @@ async function persistGmailThread(
     });
   }
 
-  return { newEmailIds, bodyTextByEmailId };
+  return { newEmailIds, bodyTextByEmailId, isOutboundByEmailId };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -797,40 +809,18 @@ async function syncOneThread(
   const messages = thread.messages ?? [];
   if (messages.length === 0) return;
 
-  const { newEmailIds, bodyTextByEmailId } = await persistGmailThread(ctx, {
-    accountId,
-    gmailThreadId,
-    messages,
-    userEmails,
-  });
+  const { newEmailIds, bodyTextByEmailId, isOutboundByEmailId } =
+    await persistGmailThread(ctx, {
+      accountId,
+      gmailThreadId,
+      messages,
+      userEmails,
+    });
 
   // Dispatch downstream work for genuinely new messages only.
   for (const emailId of newEmailIds) {
-    // Determine inbound vs outbound for this message: easiest is to re-read
-    // the email row, but we already know enough — we need fromAddress, which
-    // _onNewEmailInserted will look up itself. We pass bodyText so the
-    // contact extractor can pull a name from the signature.
     const bodyText = bodyTextByEmailId[emailId] ?? null;
-    // Find the message that produced this id (by scanning messages array).
-    // In practice we set isOutbound based on whether the sender is in
-    // userEmails; the mutation looks up the email row again to be safe.
-    let isOutbound = false;
-    for (const m of messages) {
-      if (m.id) {
-        const headers = m.payload?.headers ?? [];
-        const from = parseAddress(getHeader(headers, "From") || "");
-        if (
-          from.email &&
-          userEmails.includes(from.email.toLowerCase()) &&
-          // Match by message id is impossible without the persisted
-          // providerMessageId here; we approximate by checking labels.
-          (m.labelIds?.includes("SENT") ?? false)
-        ) {
-          isOutbound = true;
-          break;
-        }
-      }
-    }
+    const isOutbound = isOutboundByEmailId[emailId] ?? false;
     await ctx.runMutation(internal.sync.gmailData._onNewEmailInserted, {
       emailId,
       accountId,

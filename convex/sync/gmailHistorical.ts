@@ -174,6 +174,14 @@ export const _continueHistorical = internalAction({
       lastBatchAt: Date.now(),
     };
 
+    // Cap backfill at 3 years. Older mail stays in the user's Gmail account
+    // but doesn't get pulled into Convex on the initial sync. Gmail's `after:`
+    // search operator expects YYYY/MM/DD.
+    const BACKFILL_YEARS = 3;
+    const cutoff = new Date();
+    cutoff.setFullYear(cutoff.getFullYear() - BACKFILL_YEARS);
+    const cutoffStr = `${cutoff.getFullYear()}/${String(cutoff.getMonth() + 1).padStart(2, "0")}/${String(cutoff.getDate()).padStart(2, "0")}`;
+
     let list: GmailThreadListResponse;
     try {
       list = await withRefreshOn401(ctx, accountId, async (token) => {
@@ -181,7 +189,7 @@ export const _continueHistorical = internalAction({
           "https://gmail.googleapis.com/gmail/v1/users/me/threads",
         );
         url.searchParams.set("maxResults", String(BATCH_SIZE));
-        url.searchParams.set("q", "-in:spam -in:trash");
+        url.searchParams.set("q", `-in:spam -in:trash after:${cutoffStr}`);
         if (pageToken) url.searchParams.set("pageToken", pageToken);
         return await gmailFetch<GmailThreadListResponse>(url.toString(), token);
       });

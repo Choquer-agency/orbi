@@ -541,16 +541,19 @@ export const _onNewEmailInserted = internalMutation({
       receivedAt: email.receivedAt,
     });
 
-    // 3. Schedule AI classification for inbound mail only. Outbound promise
-    // follow-ups are handled here without an LLM call so mail sent from the
-    // native client (Gmail web/iOS) still gets tracked.
-    if (!isOutbound) {
+    // 3. Schedule AI classification for RECENT inbound mail only. Older mail
+    // (>90 days) is almost always backfill — we don't pay Claude to label
+    // emails the user already triaged manually long ago. Outbound promise
+    // follow-ups are handled below without an LLM call.
+    const CLASSIFY_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+    const isRecent = email.receivedAt > Date.now() - CLASSIFY_WINDOW_MS;
+    if (!isOutbound && isRecent) {
       await ctx.scheduler.runAfter(
         0,
         internal.ai.classifier.classifyEmailWithContext,
         { emailId, userId: account.userId },
       );
-    } else {
+    } else if (isOutbound) {
       // Persist a synthetic "sent" classification so downstream filters that
       // group by category still surface outbound mail. No LLM cost.
       const existingClassification = await ctx.db
@@ -589,7 +592,8 @@ export const _onNewEmailInserted = internalMutation({
     }
 
     // 4. Notify the user (per-type prefs are enforced inside the helper).
-    if (!isOutbound) {
+    // Gate on recency: don't fire push notifications for backfilled history.
+    if (!isOutbound && isRecent) {
       await ctx.scheduler.runAfter(
         0,
         internal.notifications.createIfAllowed,

@@ -51,4 +51,16 @@ crons.interval(
   {},
 );
 
+// ── Old-mail purge ─────────────────────────────────────────────────────────
+// Daily 3 AM UTC sweep of mail older than the retention window (3 years).
+// Off by default — gated by env var ENABLE_OLD_EMAIL_CLEANUP=true inside the
+// action so we can dry-run before enabling. Mail stays in Gmail/Outlook;
+// only the local Convex copy is purged.
+crons.daily(
+  "purge-old-emails",
+  { hourUTC: 3, minuteUTC: 0 },
+  internal.sync.cleanup.purgeOldEmails,
+  {},
+);
+
 export default crons;

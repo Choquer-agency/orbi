@@ -143,9 +143,22 @@ function getInternetHeader(
   return headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value;
 }
 
+// Mirrors microsoft.ts. See that file for the cache TTL rationale.
+const FOLDER_MAP_TTL_MS = 30 * 60 * 1000;
+
 async function buildFolderMap(
+  ctx: ActionCtx,
+  accountId: Id<"mailAccounts">,
   accessToken: string,
 ): Promise<Map<string, string[]>> {
+  const cached = (await ctx.runQuery(
+    internal.sync.microsoftData._readMsFolderMapCache,
+    { accountId },
+  )) as Array<{ folderId: string; labels: string[] }> | null;
+  if (cached) {
+    return new Map(cached.map((e) => [e.folderId, e.labels]));
+  }
+
   const map = new Map<string, string[]>();
   const wellKnown: { name: string; label: string }[] = [
     { name: "inbox", label: "INBOX" },
@@ -166,6 +179,14 @@ async function buildFolderMap(
       // ignore missing folders
     }
   }
+  await ctx.runMutation(internal.sync.microsoftData._writeMsFolderMapCache, {
+    accountId,
+    entries: Array.from(map.entries()).map(([folderId, labels]) => ({
+      folderId,
+      labels,
+    })),
+    ttlMs: FOLDER_MAP_TTL_MS,
+  });
   return map;
 }
 
@@ -347,9 +368,16 @@ export const startHistorical = internalAction({
     const startedAt = existing?.startedAt ?? new Date().toISOString();
     const syncedMessages = existing?.syncedMessages ?? 0;
     const totalMessages = existing?.totalMessages ?? 0;
+    // Cap backfill at 3 years. Older mail stays in Outlook but isn't pulled
+    // into Convex on initial sync. Graph wants an ISO 8601 datetime.
+    const BACKFILL_YEARS = 3;
+    const cutoff = new Date();
+    cutoff.setFullYear(cutoff.getFullYear() - BACKFILL_YEARS);
+    const cutoffIso = cutoff.toISOString();
+    const filter = `isDraft eq false and receivedDateTime ge ${cutoffIso}`;
     const resumeUrl =
       existing?.nextLink ??
-      `/me/messages?$select=${MESSAGE_SELECT_FIELDS}&$orderby=receivedDateTime desc&$top=50&$filter=isDraft eq false`;
+      `/me/messages?$select=${MESSAGE_SELECT_FIELDS}&$orderby=receivedDateTime desc&$top=50&$filter=${encodeURIComponent(filter)}`;
 
     const progress: HistoricalProgress = {
       syncedMessages,
@@ -398,7 +426,7 @@ export const _continueHistorical = internalAction({
 
     try {
       await withRefreshOn401(ctx, accountId, async (accessToken) => {
-        const folderMap = await buildFolderMap(accessToken);
+        const folderMap = await buildFolderMap(ctx, accountId, accessToken);
         const cctx: ChunkContext = {
           accountId,
           userId: accountInfo.userId,

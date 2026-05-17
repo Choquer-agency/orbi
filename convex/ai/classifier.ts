@@ -140,25 +140,56 @@ function deterministicNoiseCategory(email: {
     return "notification";
   }
 
-  const isNoReplySender = /(^|[._-])(no-?reply|do-?not-?reply|donotreply)(@|[._-])/.test(from);
+  // ── Sender heuristics ─────────────────────────────────────────────────────
+  // Various flavours of "this address never receives replies" — broader than
+  // the original no-reply regex. Covers em@, info@, noreply variants, common
+  // bounce / mailer pattern, and ESP send-domains (sendgrid, mailgun, etc).
+  const isNoReplySender =
+    /(^|[._-])(no-?reply|do-?not-?reply|donotreply|noreply)(@|[._-])/.test(from) ||
+    /(^|[._-])(mailer-daemon|mailerdaemon|bounce[-_]?\w*|postmaster)@/.test(from) ||
+    /@(em|email|mail|mailer|mailing|send|sendgrid\.net|mailgun\.org|mandrillapp\.com|sendinblue\.com|mailchimpapp\.net|amazonses\.com|sparkpostmail\.com|klaviyomail\.com)\./.test(from);
   if (isNoReplySender && !isAllowlisted) {
     return "notification";
   }
 
-  // Only treat as marketing when the body has a real unsubscribe link, a
-  // list-unsubscribe-style footer, or the sender literally identifies itself
-  // as a newsletter. Plain substring "unsubscribe" matched quoted footers in
-  // real client replies and forced them to marketing.
+  // ── Body / footer heuristics ──────────────────────────────────────────────
+  // Wider net for marketing-footer language. Real client replies sometimes
+  // quote these in trailing history, so we still require either a phrase
+  // structure (not just "unsubscribe") or an explicit list/ESP marker.
   const isMarketingFooter =
     /(click\s+here\s+to\s+)?unsubscribe\b[^\n]{0,80}(here|link|now|from this list|email)/i.test(
       bodyForCheck,
     ) ||
     /to\s+unsubscribe[, ]/i.test(bodyForCheck) ||
-    /view (this email )?in (your )?browser/i.test(bodyForCheck);
+    /view (this email )?in (your )?browser/i.test(bodyForCheck) ||
+    /manage (your )?(email )?(preferences|subscription|subscriptions)/i.test(bodyForCheck) ||
+    /update (your )?(email )?preferences/i.test(bodyForCheck) ||
+    /if you no longer wish to receive/i.test(bodyForCheck) ||
+    /you (are )?receiv(e|ing) this (email|message) because/i.test(bodyForCheck) ||
+    /sent (to|by)[^\n]{0,80}via\s+(mailchimp|sendgrid|klaviyo|hubspot|constant contact|active ?campaign|drip|convertkit|substack|beehiiv)/i.test(bodyForCheck) ||
+    /powered by\s+(mailchimp|sendgrid|klaviyo|hubspot|substack|beehiiv|constant contact)/i.test(bodyForCheck);
+
+  // Explicit newsletter/digest signals in the from-name or subject.
   const isExplicitNewsletter =
-    name.includes("newsletter") || subject.includes("newsletter") || /digest\b/i.test(subject);
+    name.includes("newsletter") ||
+    subject.includes("newsletter") ||
+    /\bdigest\b/i.test(subject) ||
+    /\b(weekly|monthly|daily)\s+(roundup|summary|update|recap)\b/i.test(subject) ||
+    /^\s*\[(newsletter|digest|weekly|monthly|update)\]/i.test(subject);
+
   if (!isAllowlisted && (isMarketingFooter || isExplicitNewsletter)) {
     return "marketing";
+  }
+
+  // ── Notification / system-mail subject heuristics ────────────────────────
+  // Generic automated alerts that don't already match the no-reply rule
+  // (some real-world systems use a person's name as the from address).
+  const isAutomatedSubject =
+    /^\s*\[?(alert|notification|reminder|action required|password reset|verify|verification|security alert)/i.test(subject) ||
+    /\byour\s+(receipt|order|shipment|tracking|invoice|statement|verification code|security code)\b/i.test(subject) ||
+    /\b(welcome to|getting started with|your trial|trial expires|subscription renew)/i.test(subject);
+  if (isAutomatedSubject && !isAllowlisted) {
+    return "notification";
   }
 
   return null;

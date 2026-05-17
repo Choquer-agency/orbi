@@ -150,9 +150,24 @@ function getInternetHeader(
  * looking up the well-known folders for this mailbox once and caching them
  * inside the sync run.
  */
+// Folder ids are mailbox-stable. We cache them on the account row with a
+// 30-minute TTL so the sync chunk doesn't spend 6 Graph calls every minute
+// resolving the same well-known folders. See microsoftData._readMsFolderMapCache.
+const FOLDER_MAP_TTL_MS = 30 * 60 * 1000;
+
 async function buildFolderMap(
+  ctx: ActionCtx,
+  accountId: Id<"mailAccounts">,
   accessToken: string,
 ): Promise<Map<string, string[]>> {
+  const cached = (await ctx.runQuery(
+    internal.sync.microsoftData._readMsFolderMapCache,
+    { accountId },
+  )) as Array<{ folderId: string; labels: string[] }> | null;
+  if (cached) {
+    return new Map(cached.map((e) => [e.folderId, e.labels]));
+  }
+
   const map = new Map<string, string[]>();
   const wellKnown: { name: string; label: string }[] = [
     { name: "inbox", label: "INBOX" },
@@ -173,6 +188,15 @@ async function buildFolderMap(
       // Folder may not exist (e.g., no archive). Skip silently.
     }
   }
+  // Persist for next sync chunk.
+  await ctx.runMutation(internal.sync.microsoftData._writeMsFolderMapCache, {
+    accountId,
+    entries: Array.from(map.entries()).map(([folderId, labels]) => ({
+      folderId,
+      labels,
+    })),
+    ttlMs: FOLDER_MAP_TTL_MS,
+  });
   return map;
 }
 
@@ -496,7 +520,7 @@ export const syncIncremental = internalAction({
     }
 
     await withRefreshOn401(ctx, accountId, async (accessToken) => {
-      const folderMap = await buildFolderMap(accessToken);
+      const folderMap = await buildFolderMap(ctx, accountId, accessToken);
       const cctx: ConversationContext = {
         accountId,
         userId: accountInfo.userId,
@@ -603,7 +627,7 @@ export const _continueSync = internalAction({
     if (!accountInfo) return;
 
     await withRefreshOn401(ctx, accountId, async (accessToken) => {
-      const folderMap = await buildFolderMap(accessToken);
+      const folderMap = await buildFolderMap(ctx, accountId, accessToken);
       const cctx: ConversationContext = {
         accountId,
         userId: accountInfo.userId,

@@ -167,6 +167,17 @@ export default defineSchema({
     historicalSyncStatus: historicalSyncStatus,
     historicalSyncProgress: v.optional(v.any()),
     historicalSyncCompletedAt: v.optional(v.number()),
+    // Microsoft folder-id lookup cache (TTL'd in microsoft.ts). Avoids 6 Graph
+    // calls per sync chunk to resolve well-known folder ids. Stored as an
+    // array of [folderId, labels[]] pairs since Convex values can't be Maps.
+    msFolderMapCache: v.optional(
+      v.object({
+        entries: v.array(
+          v.object({ folderId: v.string(), labels: v.array(v.string()) }),
+        ),
+        expiresAt: v.number(),
+      }),
+    ),
   })
     .index("by_user", ["userId"])
     .index("by_provider_email", ["provider", "email"]),
