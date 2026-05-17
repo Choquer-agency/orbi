@@ -107,4 +107,17 @@ crons.interval(
   {},
 );
 
+// ── Body retention sweep ───────────────────────────────────────────────────
+// Daily 2 AM UTC: drop emailBodies rows whose parent email is older than
+// 14 days. Keeps subject/from/snippet so list views are untouched; bodies
+// re-fetch lazily from Gmail/Outlook on open via ensureEmailBody. Always on —
+// this is how we retroactively shrink the DB for mail synced before lazy
+// bodies landed.
+crons.daily(
+  "strip-old-bodies",
+  { hourUTC: 2, minuteUTC: 0 },
+  internal.sync.bodyRetention.stripOldBodies,
+  {},
+);
+
 export default crons;
