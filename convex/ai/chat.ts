@@ -18,7 +18,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { v } from "convex/values";
 import { action, internalAction } from "../_generated/server";
-import { internal } from "../_generated/api";
+import { api, internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
 
@@ -408,7 +408,7 @@ interface ToolExecutionResult {
 // ── Tool dispatcher (called from action loop) ───────────────────────────────
 
 async function executeTool(
-  ctx: { runQuery: ActionRunQuery },
+  ctx: { runQuery: ActionRunQuery; runAction: ActionRunAction },
   toolUse: { id: string; name: string; input: Record<string, unknown> },
   userId: Id<"users">,
 ): Promise<ToolExecutionResult> {
@@ -416,10 +416,30 @@ async function executeTool(
 
   switch (name) {
     case "search_emails": {
-      const results = (await ctx.runQuery(
+      let results = (await ctx.runQuery(
         internal.ai.chatData._searchEmails,
         { userId, input },
       )) as SearchResult[];
+
+      // Provider fallback: local search only sees bodies for emails the user
+      // has opened (lazy-body sync). If the model's query has a text payload
+      // and local matches are sparse, hit Gmail/Graph full-text indexes and
+      // import any new hits, then re-run the local query.
+      const queryText = (input.query as string | undefined)?.trim();
+      if (queryText && results.length < 5) {
+        try {
+          await ctx.runAction(api.searchProvider.searchViaProvider, {
+            query: queryText,
+            maxResults: 10,
+          });
+          results = (await ctx.runQuery(
+            internal.ai.chatData._searchEmails,
+            { userId, input },
+          )) as SearchResult[];
+        } catch (err) {
+          console.warn("[chat] provider search fallback failed:", err);
+        }
+      }
       const refs = results.slice(0, 5).map((r) => ({
         id: r.threadId,
         subject: r.threadSubject,
@@ -495,6 +515,7 @@ async function executeTool(
 }
 
 type ActionRunQuery = (...args: unknown[]) => Promise<unknown>;
+type ActionRunAction = (...args: unknown[]) => Promise<unknown>;
 
 // ── Output tool processing ──────────────────────────────────────────────────
 
@@ -811,7 +832,7 @@ export const chat = action({
 
       for (const tu of dataToolUses) {
         const result: ToolExecutionResult = await executeTool(
-          ctx as unknown as { runQuery: ActionRunQuery },
+          ctx as unknown as { runQuery: ActionRunQuery; runAction: ActionRunAction },
           tu,
           userId,
         );
@@ -869,7 +890,7 @@ export const runTool = internalAction({
   },
   handler: async (ctx, { userId, toolUseId, toolName, toolInput }) => {
     return await executeTool(
-      ctx as unknown as { runQuery: ActionRunQuery },
+      ctx as unknown as { runQuery: ActionRunQuery; runAction: ActionRunAction },
       {
         id: toolUseId,
         name: toolName,
