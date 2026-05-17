@@ -465,7 +465,7 @@ export const list = query({
     // Sort by latest thread activity. The inbox should stay conversation-like:
     // if you send the latest reply, that thread still belongs near the top
     // instead of being ranked by the older last inbound message.
-    const sortBy: "lastMessageAt" | "lastReceivedAt" = "lastMessageAt";
+    const sortBy = "lastMessageAt" as "lastMessageAt" | "lastReceivedAt";
     filtered.sort((a, b) => {
       const aV =
         sortBy === "lastReceivedAt"

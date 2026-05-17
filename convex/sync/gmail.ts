@@ -779,6 +779,10 @@ async function syncOneThread(
   gmailThreadId: string,
   userEmails: string[],
 ): Promise<void> {
+  // Pull headers + snippet only. Full bodies are fetched on-demand when the
+  // user opens the message (see convex/sync/onDemandBody.ts). This is the
+  // single biggest egress reduction in the app — bodies of unopened mail
+  // (marketing, notifications) never hit Convex.
   const thread: GmailThreadResponse = await withRefreshOn401(
     ctx,
     accountId,
@@ -786,7 +790,7 @@ async function syncOneThread(
       await gmailFetch<GmailThreadResponse>(
         `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(
           gmailThreadId,
-        )}?format=full`,
+        )}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Bcc&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Reply-To&metadataHeaders=Message-ID&metadataHeaders=In-Reply-To&metadataHeaders=References&metadataHeaders=Content-Type`,
         token,
       ),
   );

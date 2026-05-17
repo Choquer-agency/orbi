@@ -28,12 +28,15 @@ import { preprocessEmailBody } from "../lib/emailPreprocess";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
+// `body` is intentionally omitted — full bodies are the biggest egress driver
+// on incremental sync (~50-500 KB of HTML per message). They're fetched
+// on-demand when the user opens the message (see convex/sync/onDemandBody.ts).
+// `bodyPreview` (~255 chars) is kept as the snippet for list rendering.
 const MESSAGE_SELECT_FIELDS = [
   "id",
   "conversationId",
   "subject",
   "bodyPreview",
-  "body",
   "from",
   "toRecipients",
   "ccRecipients",

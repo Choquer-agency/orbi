@@ -67,7 +67,16 @@ export const generateDraft = action({
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: DRAFT_MAX_TOKENS,
-      system: systemParts.join(""),
+      // Cache the system block so back-to-back draft regenerations (and
+      // multiple drafts in a 5-min window) reuse the prefix instead of
+      // re-uploading style context every time.
+      system: [
+        {
+          type: "text",
+          text: systemParts.join(""),
+          cache_control: { type: "ephemeral" },
+        },
+      ],
       messages: [{ role: "user", content: userMessage }],
       metadata: { user_id: String(userId) },
     });
@@ -79,6 +88,8 @@ export const generateDraft = action({
         model: MODEL,
         inputTokens: response.usage?.input_tokens,
         outputTokens: response.usage?.output_tokens,
+        cacheCreationInputTokens: response.usage?.cache_creation_input_tokens ?? undefined,
+        cacheReadInputTokens: response.usage?.cache_read_input_tokens ?? undefined,
         providerCallCount: 1,
         requestId: response.id,
         metadata: {

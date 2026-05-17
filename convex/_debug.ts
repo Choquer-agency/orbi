@@ -341,6 +341,67 @@ export const listAccounts = internalQuery({
   },
 });
 
+// Find the most recent threads where any email's from/to/subject matches
+// `match` (case-insensitive substring), and dump every dedup-relevant field
+// per email so we can see whether duplicates share providerMessageId or not.
+export const peekDuplicateThreads = internalQuery({
+  args: { match: v.string(), threadLimit: v.optional(v.number()) },
+  handler: async (ctx, { match, threadLimit }) => {
+    const needle = match.toLowerCase();
+    const cap = threadLimit ?? 5;
+    // Scan recent threads by subject — far smaller per-row than emails.
+    const recentThreads = await ctx.db.query("threads").order("desc").take(400);
+    const threadIds = recentThreads
+      .filter((t) => {
+        if ((t.subject || "").toLowerCase().includes(needle)) return true;
+        return (t.participantEmails || []).some((p) =>
+          p.toLowerCase().includes(needle),
+        );
+      })
+      .map((t) => t._id)
+      .slice(0, cap);
+    const out: Array<{
+      threadId: string;
+      providerThreadId?: string;
+      subject?: string;
+      messageCount?: number;
+      emails: Array<Record<string, unknown>>;
+    }> = [];
+    for (const tid of threadIds) {
+      const t = await ctx.db.get(tid);
+      if (!t) continue;
+      const emails = await ctx.db
+        .query("emails")
+        .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", tid))
+        .collect();
+      out.push({
+        threadId: t._id,
+        providerThreadId: t.providerThreadId,
+        subject: t.subject,
+        messageCount: t.messageCount,
+        emails: emails
+          .sort((a, b) => (a.receivedAt ?? 0) - (b.receivedAt ?? 0))
+          .map((e) => ({
+            id: e._id,
+            accountId: e.accountId,
+            providerMessageId: e.providerMessageId,
+            internetMessageId: e.internetMessageId,
+            inReplyTo: e.inReplyTo,
+            fromAddress: e.fromAddress,
+            toAddresses: e.toAddresses,
+            subject: e.subject,
+            sendStatus: e.sendStatus,
+            isDraft: e.isDraft,
+            labels: e.labels,
+            receivedAt: e.receivedAt,
+            sentAt: e.sentAt,
+          })),
+      });
+    }
+    return out;
+  },
+});
+
 export const setSendingStatus = internalMutation({
   args: { emailId: v.id("emails") },
   handler: async (ctx, { emailId }) => {

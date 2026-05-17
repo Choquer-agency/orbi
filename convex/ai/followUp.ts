@@ -42,8 +42,7 @@ const TONE_LABELS: Record<number, { label: string; instruction: string }> = {
 async function recordAiUsage(
   ctx: any,
   userId: Id<"users">,
-  inputTokens?: number,
-  outputTokens?: number,
+  usage: Anthropic.Usage | undefined,
   requestId?: string,
   stopReason?: string | null,
 ) {
@@ -52,8 +51,10 @@ async function recordAiUsage(
       userId,
       feature: "follow_up_draft",
       model: MODEL,
-      inputTokens,
-      outputTokens,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
+      cacheCreationInputTokens: usage?.cache_creation_input_tokens ?? undefined,
+      cacheReadInputTokens: usage?.cache_read_input_tokens ?? undefined,
       providerCallCount: 1,
       requestId,
       metadata: {
@@ -145,8 +146,7 @@ Return only the email body text, no subject line or signature.`,
     await recordAiUsage(
       ctx,
       watch.userId,
-      response.usage?.input_tokens,
-      response.usage?.output_tokens,
+      response.usage,
       response.id,
       response.stop_reason,
     );

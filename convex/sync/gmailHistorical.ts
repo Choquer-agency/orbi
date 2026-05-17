@@ -321,11 +321,13 @@ async function syncOneHistoricalThread(
   gmailThreadId: string,
   userEmails: string[],
 ): Promise<void> {
+  // Metadata-only fetch (headers + snippet). Bodies are fetched on-demand
+  // when the user opens the message. See convex/sync/onDemandBody.ts.
   const thread = await withRefreshOn401(ctx, accountId, async (token) =>
     gmailFetch<GmailThreadResponse>(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(
         gmailThreadId,
-      )}?format=full`,
+      )}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Bcc&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Reply-To&metadataHeaders=Message-ID&metadataHeaders=In-Reply-To&metadataHeaders=References&metadataHeaders=Content-Type`,
       token,
     ),
   );

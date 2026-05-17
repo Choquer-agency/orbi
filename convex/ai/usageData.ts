@@ -15,6 +15,11 @@ export const _record = internalMutation({
     model: v.string(),
     inputTokens: v.optional(v.number()),
     outputTokens: v.optional(v.number()),
+    // Prompt-caching telemetry. Populate from Anthropic
+    // response.usage.cache_creation_input_tokens / cache_read_input_tokens
+    // so we can verify cache hit rate after enabling cache_control.
+    cacheCreationInputTokens: v.optional(v.number()),
+    cacheReadInputTokens: v.optional(v.number()),
     providerCallCount: v.number(),
     requestId: v.optional(v.string()),
     metadata: v.optional(v.any()),
@@ -22,14 +27,24 @@ export const _record = internalMutation({
   handler: async (ctx, args) => {
     const inputTokens = args.inputTokens ?? 0;
     const outputTokens = args.outputTokens ?? 0;
+    const cacheCreationInputTokens = args.cacheCreationInputTokens ?? 0;
+    const cacheReadInputTokens = args.cacheReadInputTokens ?? 0;
     await ctx.db.insert("aiUsageLogs", {
       userId: args.userId,
       feature: args.feature,
       model: args.model,
       inputTokens,
       outputTokens,
+      cacheCreationInputTokens,
+      cacheReadInputTokens,
       providerCallCount: args.providerCallCount,
-      estimatedCostUsd: estimateAnthropicCostUsd(args.model, inputTokens, outputTokens),
+      estimatedCostUsd: estimateAnthropicCostUsd(
+        args.model,
+        inputTokens,
+        outputTokens,
+        cacheCreationInputTokens,
+        cacheReadInputTokens,
+      ),
       requestId: args.requestId,
       metadata: args.metadata,
       createdAt: Date.now(),
@@ -266,9 +281,16 @@ function bucketsToArray(map: Map<string, AggregateBucket>) {
   return Array.from(map.entries()).map(([key, bucket]) => ({ key, ...bucket }));
 }
 
-function estimateAnthropicCostUsd(model: string, inputTokens: number, outputTokens: number) {
+function estimateAnthropicCostUsd(
+  model: string,
+  inputTokens: number,
+  outputTokens: number,
+  cacheCreationInputTokens: number = 0,
+  cacheReadInputTokens: number = 0,
+) {
   // Approximate current Anthropic list prices per 1M tokens. Keep this as
   // telemetry, not billing truth; provider invoices remain authoritative.
+  // Cache writes are billed at 1.25x input; cache reads at 0.1x input.
   const lower = model.toLowerCase();
   if (lower === "deterministic") return 0;
   let inputPerMillion: number;
@@ -281,5 +303,11 @@ function estimateAnthropicCostUsd(model: string, inputTokens: number, outputToke
     // Sonnet (and unknown models default to Sonnet pricing so we never under-count).
     [inputPerMillion, outputPerMillion] = [3, 15];
   }
-  return (inputTokens / 1_000_000) * inputPerMillion + (outputTokens / 1_000_000) * outputPerMillion;
+  const inputCost = (inputTokens / 1_000_000) * inputPerMillion;
+  const outputCost = (outputTokens / 1_000_000) * outputPerMillion;
+  const cacheWriteCost =
+    (cacheCreationInputTokens / 1_000_000) * inputPerMillion * 1.25;
+  const cacheReadCost =
+    (cacheReadInputTokens / 1_000_000) * inputPerMillion * 0.1;
+  return inputCost + outputCost + cacheWriteCost + cacheReadCost;
 }

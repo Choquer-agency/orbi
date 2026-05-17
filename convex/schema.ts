@@ -507,6 +507,10 @@ export default defineSchema({
     model: v.string(),
     inputTokens: v.number(),
     outputTokens: v.number(),
+    // Anthropic prompt caching telemetry. Optional because rows written
+    // before caching was wired up will not have them.
+    cacheCreationInputTokens: v.optional(v.number()),
+    cacheReadInputTokens: v.optional(v.number()),
     providerCallCount: v.number(),
     estimatedCostUsd: v.number(),
     requestId: v.optional(v.string()),

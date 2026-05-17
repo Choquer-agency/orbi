@@ -539,6 +539,8 @@ async function recordAiUsage(
     feature: string;
     inputTokens?: number;
     outputTokens?: number;
+    cacheCreationInputTokens?: number;
+    cacheReadInputTokens?: number;
     providerCallCount?: number;
     requestId?: string;
     metadata?: unknown;
@@ -551,6 +553,8 @@ async function recordAiUsage(
       model: MODEL,
       inputTokens: args.inputTokens,
       outputTokens: args.outputTokens,
+      cacheCreationInputTokens: args.cacheCreationInputTokens,
+      cacheReadInputTokens: args.cacheReadInputTokens,
       providerCallCount: args.providerCallCount ?? 1,
       requestId: args.requestId,
       metadata: args.metadata,
@@ -578,13 +582,21 @@ function processOutputTool(
   };
 } {
   if (name === "generate_draft") {
+    // Models sometimes return placeholders like "current" instead of a real
+    // thread id; only trust values that look like a Convex Id, otherwise fall
+    // back to the contextual thread.
+    const rawThreadId = input.thread_id;
+    const aiThreadId =
+      typeof rawThreadId === "string" && /^[a-z0-9]{20,}$/i.test(rawThreadId)
+        ? rawThreadId
+        : null;
     return {
       reply: "Here's a draft for you:",
       draft: {
         to: (input.to as string) || primaryRecipient || undefined,
         subject: input.subject as string | undefined,
         body: input.body as string,
-        threadId: (input.thread_id as string | undefined) || threadId || undefined,
+        threadId: aiThreadId || threadId || undefined,
         greetingUsed: input.greeting_used as string | undefined,
         signoffUsed: input.signoff_used as string | undefined,
       },
@@ -707,13 +719,32 @@ export const chat = action({
     let contactResults: ContactResult[] | undefined;
     let threadReferences: { id: string; subject: string }[] | undefined;
 
+    // Cache the system prompt and the TOOLS schema (~9 KB). Two breakpoints:
+    //   BP1 caches the system prompt across same-thread/same-scope follow-ups
+    //   BP2 caches the system prompt + TOOLS together
+    // Within a single chat session BP2 hits on every subsequent round and
+    // every follow-up question, cutting input-token cost ~90% and shaving
+    // most of the per-call request egress to Anthropic.
+    const cachedSystem: Anthropic.TextBlockParam[] = [
+      {
+        type: "text",
+        text: ctxResult.systemPrompt,
+        cache_control: { type: "ephemeral" },
+      },
+    ];
+    const cachedTools: Anthropic.Tool[] = TOOLS.map((tool, idx) =>
+      idx === TOOLS.length - 1
+        ? { ...tool, cache_control: { type: "ephemeral" } }
+        : tool,
+    );
+
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       const response = await client.messages.create({
         model: MODEL,
         max_tokens: CHAT_MAX_TOKENS,
-        system: ctxResult.systemPrompt,
+        system: cachedSystem,
         messages,
-        tools: TOOLS,
+        tools: cachedTools,
         // Tag every Anthropic call with our internal user id so the Anthropic
         // Console line items can be traced back to a row in `aiUsageLogs`.
         metadata: { user_id: String(userId) },
@@ -725,6 +756,8 @@ export const chat = action({
           feature: CHAT_FEATURE_KEY,
           inputTokens: response.usage?.input_tokens,
           outputTokens: response.usage?.output_tokens,
+          cacheCreationInputTokens: response.usage?.cache_creation_input_tokens ?? undefined,
+          cacheReadInputTokens: response.usage?.cache_read_input_tokens ?? undefined,
           providerCallCount: 1,
           requestId: response.id,
           metadata: {

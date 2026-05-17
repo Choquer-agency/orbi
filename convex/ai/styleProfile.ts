@@ -181,7 +181,13 @@ async function runRefresh(ctx: any, userId: Id<"users">) {
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: MAX_TOKENS,
-      system: PROMPT,
+      system: [
+        {
+          type: "text",
+          text: PROMPT,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
       messages: [
         {
           role: "user",
@@ -198,6 +204,8 @@ async function runRefresh(ctx: any, userId: Id<"users">) {
         model: MODEL,
         inputTokens: response.usage?.input_tokens,
         outputTokens: response.usage?.output_tokens,
+        cacheCreationInputTokens: response.usage?.cache_creation_input_tokens ?? undefined,
+        cacheReadInputTokens: response.usage?.cache_read_input_tokens ?? undefined,
         providerCallCount: 1,
         requestId: response.id,
         metadata: {

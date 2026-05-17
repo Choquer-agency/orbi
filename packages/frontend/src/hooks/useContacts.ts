@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
@@ -35,17 +35,17 @@ function isMeaningfulHeaderName(fromName: string | undefined | null, fromAddress
 export function useContactNameResolver() {
   const { isAuthenticated } = useConvexAuth();
   const nameMap = useQuery(api.contacts.nameMap, isAuthenticated ? {} : 'skip');
+  const lookup = useMemo(() => new Map(nameMap ?? []), [nameMap]);
 
   const resolveName = useCallback(
     (fromAddress: string | undefined | null, fromName: string | undefined | null): string => {
       if (!fromAddress) return fromName || 'Unknown';
       if (isMeaningfulHeaderName(fromName, fromAddress)) return fromName.trim();
-      const map = nameMap ?? {};
-      const resolved = map[fromAddress.toLowerCase()];
+      const resolved = lookup.get(fromAddress.toLowerCase());
       if (resolved) return resolved;
       return fromName || fromAddress;
     },
-    [nameMap],
+    [lookup],
   );
 
   return resolveName;

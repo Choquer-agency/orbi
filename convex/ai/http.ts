@@ -56,6 +56,8 @@ async function recordAiUsage(
     feature: string;
     inputTokens?: number;
     outputTokens?: number;
+    cacheCreationInputTokens?: number;
+    cacheReadInputTokens?: number;
     providerCallCount?: number;
     requestId?: string;
     metadata?: unknown;
@@ -68,6 +70,8 @@ async function recordAiUsage(
       model: MODEL,
       inputTokens: args.inputTokens,
       outputTokens: args.outputTokens,
+      cacheCreationInputTokens: args.cacheCreationInputTokens,
+      cacheReadInputTokens: args.cacheReadInputTokens,
       providerCallCount: args.providerCallCount ?? 1,
       requestId: args.requestId,
       metadata: args.metadata,
@@ -186,14 +190,31 @@ const streamChat = httpAction(async (ctx, req) => {
 
       let assistantContent = "";
 
+      // Cache the system prompt + TOOLS once per round-trip so back-to-back
+      // tool rounds in this turn (and follow-up turns within ~5 min) reuse
+      // the same prefix instead of re-uploading it to Anthropic each call.
+      // See the matching block in chat.ts for the cache-breakpoint rationale.
+      const cachedSystem: Anthropic.TextBlockParam[] = [
+        {
+          type: "text",
+          text: ctxResult.systemPrompt,
+          cache_control: { type: "ephemeral" },
+        },
+      ];
+      const cachedTools: Anthropic.Tool[] = TOOLS.map((tool, idx) =>
+        idx === TOOLS.length - 1
+          ? { ...tool, cache_control: { type: "ephemeral" } }
+          : tool,
+      );
+
       for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
         const isLastRound = round === MAX_TOOL_ROUNDS - 1;
         const stream = client.messages.stream({
           model: MODEL,
           max_tokens: CHAT_MAX_TOKENS,
-          system: ctxResult.systemPrompt,
+          system: cachedSystem,
           messages,
-          tools: TOOLS,
+          tools: cachedTools,
           // Tag for cost attribution in Anthropic Console.
           metadata: { user_id: String(userId) },
         });
@@ -245,6 +266,8 @@ const streamChat = httpAction(async (ctx, req) => {
             feature: CHAT_FEATURE_KEY,
             inputTokens: finalMessage.usage?.input_tokens,
             outputTokens: finalMessage.usage?.output_tokens,
+            cacheCreationInputTokens: finalMessage.usage?.cache_creation_input_tokens ?? undefined,
+            cacheReadInputTokens: finalMessage.usage?.cache_read_input_tokens ?? undefined,
             providerCallCount: 1,
             requestId: finalMessage.id,
             metadata: {
@@ -271,6 +294,15 @@ const streamChat = httpAction(async (ctx, req) => {
                 unknown
               >;
               if (tool.name === "generate_draft") {
+                // Models sometimes return placeholders like "current" instead
+                // of a real thread id; only trust values that look like a
+                // Convex Id, otherwise fall back to the request's thread.
+                const rawThreadId = input.thread_id;
+                const aiThreadId =
+                  typeof rawThreadId === "string" &&
+                  /^[a-z0-9]{20,}$/i.test(rawThreadId)
+                    ? rawThreadId
+                    : null;
                 await send({
                   type: "tool_result",
                   data: {
@@ -282,7 +314,7 @@ const streamChat = httpAction(async (ctx, req) => {
                         undefined,
                       subject: input.subject,
                       body: input.body,
-                      threadId: (input.thread_id as string | undefined) || body.threadId,
+                      threadId: aiThreadId || body.threadId,
                       greetingUsed: input.greeting_used,
                       signoffUsed: input.signoff_used,
                       correctionsApplied: ctxResult.correctionsApplied,
@@ -414,9 +446,9 @@ const streamChat = httpAction(async (ctx, req) => {
             const finalStream = client.messages.stream({
               model: MODEL,
               max_tokens: CHAT_MAX_TOKENS,
-              system: ctxResult.systemPrompt,
+              system: cachedSystem,
               messages,
-              tools: TOOLS,
+              tools: cachedTools,
               metadata: { user_id: String(userId) },
             });
             for await (const event of finalStream) {
@@ -439,6 +471,8 @@ const streamChat = httpAction(async (ctx, req) => {
                 feature: CHAT_FEATURE_KEY,
                 inputTokens: finalStreamMessage.usage?.input_tokens,
                 outputTokens: finalStreamMessage.usage?.output_tokens,
+                cacheCreationInputTokens: finalStreamMessage.usage?.cache_creation_input_tokens ?? undefined,
+                cacheReadInputTokens: finalStreamMessage.usage?.cache_read_input_tokens ?? undefined,
                 providerCallCount: 1,
                 requestId: finalStreamMessage.id,
                 metadata: {

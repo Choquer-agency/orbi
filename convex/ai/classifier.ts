@@ -228,8 +228,7 @@ async function recordAiUsage(
   ctx: any,
   userId: Id<"users"> | undefined,
   feature: string,
-  inputTokens?: number,
-  outputTokens?: number,
+  usage: Anthropic.Usage | undefined,
   requestId?: string,
   stopReason?: string | null,
 ) {
@@ -238,8 +237,10 @@ async function recordAiUsage(
       userId,
       feature,
       model: MODEL,
-      inputTokens,
-      outputTokens,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
+      cacheCreationInputTokens: usage?.cache_creation_input_tokens ?? undefined,
+      cacheReadInputTokens: usage?.cache_read_input_tokens ?? undefined,
       providerCallCount: 1,
       requestId,
       metadata: {
@@ -290,7 +291,16 @@ export const classifyEmail = internalAction({
       const response = await client.messages.create({
         model: MODEL,
         max_tokens: 200,
-        system: CLASSIFICATION_PROMPT,
+        // CLASSIFICATION_PROMPT is identical across every classifier call —
+        // mark it cacheable so Anthropic only bills 10% on cache reads and
+        // we don't re-upload it on every per-email call. 5 min TTL.
+        system: [
+          {
+            type: "text",
+            text: CLASSIFICATION_PROMPT,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
         messages: [
           {
             role: "user",
@@ -303,8 +313,7 @@ export const classifyEmail = internalAction({
         ctx,
         undefined,
         "classifier",
-        response.usage?.input_tokens,
-        response.usage?.output_tokens,
+        response.usage,
         response.id,
         response.stop_reason,
       );
@@ -377,7 +386,23 @@ export const classifyEmailWithContext = internalAction({
       finalCategory: string;
     }>;
 
-    let systemPrompt = CLASSIFICATION_PROMPT;
+    // Split the system prompt into a stable (cacheable) prefix and a
+    // per-user dynamic suffix. The stable block is identical for every
+    // classification call across all users so Anthropic should serve it
+    // from the prompt cache after the first request in each 5-min window.
+    //
+    // Note: Anthropic ignores cache_control blocks below the model
+    // minimum (2048 tokens for Haiku, 1024 for Sonnet). Today
+    // CLASSIFICATION_PROMPT is under that threshold so caching is a no-op
+    // here; we keep the marker so it activates automatically if the
+    // prompt grows.
+    const systemBlocks: Anthropic.TextBlockParam[] = [
+      {
+        type: "text",
+        text: CLASSIFICATION_PROMPT,
+        cache_control: { type: "ephemeral" },
+      },
+    ];
     if (recentFeedback.length > 0) {
       const examples = recentFeedback
         .map(
@@ -385,7 +410,10 @@ export const classifyEmailWithContext = internalAction({
             `- "${f.subjectSnippet}" <${f.senderAddress}> → ${f.finalCategory}`,
         )
         .join("\n");
-      systemPrompt += `\n\nLearn from this user's recent triage decisions:\n${examples}`;
+      systemBlocks.push({
+        type: "text",
+        text: `\n\nLearn from this user's recent triage decisions:\n${examples}`,
+      });
     }
 
     const { email } = fetched;
@@ -424,7 +452,7 @@ export const classifyEmailWithContext = internalAction({
       const response = await client.messages.create({
         model: MODEL,
         max_tokens: 200,
-        system: systemPrompt,
+        system: systemBlocks,
         messages: [
           {
             role: "user",
@@ -438,8 +466,7 @@ export const classifyEmailWithContext = internalAction({
         ctx,
         userId,
         "classifier",
-        response.usage?.input_tokens,
-        response.usage?.output_tokens,
+        response.usage,
         response.id,
         response.stop_reason,
       );

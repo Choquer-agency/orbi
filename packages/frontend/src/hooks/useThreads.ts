@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useQuery, useMutation, useConvex } from 'convex/react';
+import { useQuery, useMutation, useConvex, useAction } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 import {
@@ -12,6 +12,13 @@ import {
   loadCachedThread,
   saveCachedThread,
 } from '../lib/threadBodyCache';
+
+// Convex Ids are opaque base32-ish strings. Stale values like "current" or
+// other model-emitted placeholders sometimes leak into selectedThreadId via
+// persisted UI state, so guard query callers before hitting Convex.
+function isLikelyConvexId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-z0-9]{20,}$/i.test(value);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Drop-in TanStack Query → Convex replacement.
@@ -186,9 +193,10 @@ export function useThreads(params: ThreadListParams = {}) {
 }
 
 export function useThread(threadId: Id<'threads'> | string | null) {
+  const validId = isLikelyConvexId(threadId) ? threadId : null;
   const result = useQuery(
     api.threads.get,
-    threadId ? { threadId: threadId as Id<'threads'> } : 'skip',
+    validId ? { threadId: validId as Id<'threads'> } : 'skip',
   );
 
   // ── Local body cache (Spark/Gmail-style) ──────────────────────────────
@@ -225,6 +233,35 @@ export function useThread(threadId: Id<'threads'> | string | null) {
       saveCachedThread(threadId as string, result);
     }
   }, [result, threadId]);
+
+  // On-demand body loader. Incremental sync only pulls headers + snippet to
+  // keep fetch egress low (see convex/sync/onDemandBody.ts); the body is
+  // downloaded the first time we open the thread. Convex reactivity then
+  // re-runs `api.threads.get` once the emailBodies row lands, so the viewer
+  // updates without any imperative re-fetch on our side.
+  const ensureEmailBody = useAction(api.sync.onDemandBody.ensureEmailBody);
+  const inflight = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const emails = (result as { emails?: Array<{ id: string; bodyHtml?: string; bodyHtmlClean?: string; bodyHtmlTrimmed?: string; bodyText?: string }> } | undefined)?.emails;
+    if (!emails || emails.length === 0) return;
+    for (const e of emails) {
+      const hasBody =
+        !!(e.bodyHtmlClean && e.bodyHtmlClean.length > 0) ||
+        !!(e.bodyHtmlTrimmed && e.bodyHtmlTrimmed.length > 0) ||
+        !!(e.bodyHtml && e.bodyHtml.length > 0) ||
+        !!(e.bodyText && e.bodyText.length > 0);
+      if (hasBody) continue;
+      if (inflight.current.has(e.id)) continue;
+      inflight.current.add(e.id);
+      void ensureEmailBody({ emailId: e.id as Id<'emails'> })
+        .catch((err) => {
+          console.warn('[useThread] on-demand body fetch failed', e.id, err);
+        })
+        .finally(() => {
+          inflight.current.delete(e.id);
+        });
+    }
+  }, [result, ensureEmailBody]);
 
   const data = (result ?? cached) as typeof result;
   return {

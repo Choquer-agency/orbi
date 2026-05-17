@@ -7,7 +7,7 @@
     "forge": "./forge.config.cjs"
   },
   "scripts": {
-    "dev": "concurrently \"npm run dev -w packages/frontend\" \"tsx watch src/main.ts --electron\"",
+    "dev": "tsc && electron .",
     "start": "electron .",
     "build": "tsc",
     "package": "npm run build && electron-forge package",

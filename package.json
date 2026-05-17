@@ -16,7 +16,7 @@
   },
   "scripts": {
     "dev": "concurrently \"npx convex dev\" \"npm run dev -w packages/frontend\"",
-    "dev:electron": "concurrently \"npx convex dev\" \"npm run dev -w packages/electron\"",
+    "dev:electron": "concurrently \"npx convex dev\" \"npm run dev -w packages/frontend\" \"npm run dev -w packages/electron\"",
     "convex:dev": "npx convex dev",
     "convex:deploy": "npx convex deploy",
     "build": "npm run build -w packages/shared && npm run build -w packages/frontend",

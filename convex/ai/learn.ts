@@ -68,7 +68,13 @@ export const recordEdit = action({
       const response = await client.messages.create({
         model: MODEL,
         max_tokens: LEARN_MAX_TOKENS,
-        system: CATEGORIZE_PROMPT,
+        system: [
+          {
+            type: "text",
+            text: CATEGORIZE_PROMPT,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
         messages: [
           {
             role: "user",
@@ -85,6 +91,8 @@ export const recordEdit = action({
           model: MODEL,
           inputTokens: response.usage?.input_tokens,
           outputTokens: response.usage?.output_tokens,
+          cacheCreationInputTokens: response.usage?.cache_creation_input_tokens ?? undefined,
+          cacheReadInputTokens: response.usage?.cache_read_input_tokens ?? undefined,
           providerCallCount: 1,
           requestId: response.id,
           metadata: {

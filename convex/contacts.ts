@@ -211,8 +211,10 @@ export const autocomplete = query({
 });
 
 /**
- * Returns { lowercaseEmail: displayName } for all the user's contacts that
- * have a name. Person displayName takes precedence when present.
+ * Returns [lowercaseEmail, displayName] pairs for all the user's contacts that
+ * have a name. Person displayName takes precedence when present. Returned as an
+ * array (not an object) because Convex caps object field counts at 1024 and a
+ * mailbox can easily exceed that.
  */
 export const nameMap = query({
   args: {},
@@ -233,12 +235,12 @@ export const nameMap = query({
       if (p) personMap.set(p._id, p.displayName);
     }
 
-    const out: Record<string, string> = {};
+    const out: Array<[string, string]> = [];
     for (const c of named) {
       if (c.personId && personMap.has(c.personId)) {
-        out[c.email.toLowerCase()] = personMap.get(c.personId)!;
+        out.push([c.email.toLowerCase(), personMap.get(c.personId)!]);
       } else if (c.name) {
-        out[c.email.toLowerCase()] = c.name;
+        out.push([c.email.toLowerCase(), c.name]);
       }
     }
     return out;

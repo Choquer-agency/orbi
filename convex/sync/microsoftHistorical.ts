@@ -24,12 +24,13 @@ import { withRefreshOn401 } from "../oauth/tokenManager";
 
 const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
+// `body` is intentionally omitted (see incremental sync rationale). Bodies
+// are fetched on-demand when the user opens the message.
 const MESSAGE_SELECT_FIELDS = [
   "id",
   "conversationId",
   "subject",
   "bodyPreview",
-  "body",
   "from",
   "toRecipients",
   "ccRecipients",

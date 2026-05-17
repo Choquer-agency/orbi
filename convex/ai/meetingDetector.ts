@@ -61,7 +61,16 @@ export const detect = internalAction({
     const response = await client.messages.create({
       model: MODEL,
       max_tokens: MEETING_MAX_TOKENS,
-      system: MEETING_DETECTION_PROMPT,
+      // MEETING_DETECTION_PROMPT is stable across all detector calls — mark
+      // cacheable. Activates if the prompt grows above the Haiku 2048-token
+      // minimum (currently small; cache_control is silently ignored otherwise).
+      system: [
+        {
+          type: "text",
+          text: MEETING_DETECTION_PROMPT,
+          cache_control: { type: "ephemeral" },
+        },
+      ],
       messages: [
         {
           role: "user",
@@ -76,6 +85,8 @@ export const detect = internalAction({
         model: MODEL,
         inputTokens: response.usage?.input_tokens,
         outputTokens: response.usage?.output_tokens,
+        cacheCreationInputTokens: response.usage?.cache_creation_input_tokens ?? undefined,
+        cacheReadInputTokens: response.usage?.cache_read_input_tokens ?? undefined,
         providerCallCount: 1,
         requestId: response.id,
         metadata: {

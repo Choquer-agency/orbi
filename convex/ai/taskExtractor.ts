@@ -44,8 +44,7 @@ async function recordAiUsage(
   ctx: any,
   userId: Id<"users">,
   feature: string,
-  inputTokens?: number,
-  outputTokens?: number,
+  usage: Anthropic.Usage | undefined,
   stopReason?: string | null,
   requestId?: string,
 ) {
@@ -54,8 +53,10 @@ async function recordAiUsage(
       userId,
       feature,
       model: MODEL,
-      inputTokens,
-      outputTokens,
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
+      cacheCreationInputTokens: usage?.cache_creation_input_tokens ?? undefined,
+      cacheReadInputTokens: usage?.cache_read_input_tokens ?? undefined,
       providerCallCount: 1,
       requestId,
       metadata: {
@@ -80,10 +81,12 @@ export const extractTasks = action({
     if (!contextText) return { created: 0, tasks: [] };
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-    const response = await client.messages.create({
-      model: MODEL,
-      max_tokens: EXTRACT_TASKS_MAX_TOKENS,
-      system: `You extract actionable tasks from email threads. Today's date is ${new Date().toISOString().split("T")[0]}.
+    // Split system into a stable cacheable rules block and a dynamic
+    // today's-date block so the rules can be served from cache across calls.
+    const systemBlocks: Anthropic.TextBlockParam[] = [
+      {
+        type: "text",
+        text: `You extract actionable tasks from email threads.
 
 Identify:
 - PROMISE: Things the sender/user promised to do ("I'll send you...", "We'll have it by...")
@@ -94,6 +97,17 @@ Identify:
 For deadlines, convert relative dates to absolute ISO dates based on the email dates.
 Mark tasks as DONE if a later email in the thread clearly fulfills them.
 Only extract real, actionable tasks — not general discussion points.`,
+        cache_control: { type: "ephemeral" },
+      },
+      {
+        type: "text",
+        text: `\n\nToday's date is ${new Date().toISOString().split("T")[0]}.`,
+      },
+    ];
+    const response = await client.messages.create({
+      model: MODEL,
+      max_tokens: EXTRACT_TASKS_MAX_TOKENS,
+      system: systemBlocks,
       tools: [
         {
           name: "extract_tasks",
@@ -156,8 +170,7 @@ Only extract real, actionable tasks — not general discussion points.`,
       ctx,
       userId,
       "task_extract",
-      response.usage?.input_tokens,
-      response.usage?.output_tokens,
+      response.usage,
       response.stop_reason,
       response.id,
     );
@@ -261,8 +274,7 @@ export const checkTaskResolution = internalAction({
       ctx,
       userId,
       "task_resolve",
-      response.usage?.input_tokens,
-      response.usage?.output_tokens,
+      response.usage,
       response.stop_reason,
       response.id,
     );
