@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 import { AlarmClockOff, Archive, CalendarDays, Clock, Forward, FolderInput, Inbox, Mail, MailOpen, Moon, Reply, Star, Sun, Trash2 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as ContextMenu from '@radix-ui/react-context-menu';
@@ -6,7 +6,7 @@ import { motion, useMotionValue, useMotionValueEvent, useTransform, useAnimate }
 import toast from 'react-hot-toast';
 import { useUpdateThread, useSnoozeThread, useUnsnoozeThread } from '../../hooks/useThreads';
 import { useContactNameResolver } from '../../hooks/useContacts';
-import { cn, formatRelativeTime, getInitials } from '../../lib/utils';
+import { cn, formatRelativeTime, getInitials, getCompanyLogoUrls } from '../../lib/utils';
 import { getAvatarColor } from '../../lib/constants';
 import { CategoryPill } from '../ui/CategoryPill';
 import { SnoozePopover } from './SnoozePopover';
@@ -38,11 +38,28 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
   const resolveName = useContactNameResolver();
   const latestEmail = thread.emails?.[0];
   const commentCount = thread._count?.comments ?? 0;
-  const triageCategories = ['marketing', 'spam'];
+  // Pill on the thread card reflects either:
+  //   - the AI classifier's "marketing" tag (our own signal), or
+  //   - the provider's SPAM label (Gmail / Outlook anti-spam, source of truth).
+  // We removed AI-driven spam classification — see classifier.ts — so the
+  // spam pill only fires when the upstream provider marked it as spam.
   const hasTriageLabel = thread.labels?.some((l: string) => l.startsWith('triage:'));
-  const hasTriageClassification = latestEmail?.classification && triageCategories.includes(latestEmail.classification.category);
-  const classification = (hasTriageLabel || hasTriageClassification) ? latestEmail?.classification : null;
-  const senderName = resolveName(latestEmail?.fromAddress, latestEmail?.fromName);
+  const hasGmailSpam = thread.labels?.includes('SPAM');
+  const hasMarketingClassification = latestEmail?.classification?.category === 'marketing';
+  const classification = hasGmailSpam
+    ? { category: 'spam', confidence: 1, urgency: 'low', summary: '' }
+    : (hasTriageLabel || hasMarketingClassification)
+      ? latestEmail?.classification
+      : null;
+  // If the latest email's From parsing failed (calendar invites etc.),
+  // fall back to a non-self participant from the thread.
+  let senderName = resolveName(latestEmail?.fromAddress, latestEmail?.fromName);
+  if (senderName === '—' && thread.participantEmails?.length) {
+    const fallback = thread.participantEmails.find(
+      (e: string) => e && !e.includes('@choquer'),
+    ) || thread.participantEmails[0];
+    if (fallback) senderName = resolveName(fallback, null);
+  }
   const avatarColor = getAvatarColor(senderName);
 
   // Haptic feedback on swipe threshold crossing
@@ -138,7 +155,7 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
       }}
       aria-label={`${!thread.isRead ? 'Unread: ' : ''}${thread.subject || 'No subject'}, from ${senderName}, ${formatRelativeTime(thread.lastReceivedAt ?? thread.lastMessageAt)}`}
       className={cn(
-        'group relative flex w-full min-w-0 gap-3 overflow-hidden px-5 text-left transition-colors',
+        'group relative flex w-full min-w-0 items-center gap-3 overflow-hidden pl-3 pr-5 text-left transition-colors',
         isMobile ? 'py-3.5' : 'py-2.5',
         isMultiSelected
           ? 'bg-primary/10 ring-1 ring-inset ring-primary/20'
@@ -147,21 +164,41 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
             : 'hover:bg-surface-warm',
       )}
     >
-      {/* Avatar with account color ring */}
-      <Avatar.Root
-        className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full"
-        style={accountColor ? { boxShadow: `0 0 0 2px white, 0 0 0 3.5px ${accountColor}` } : undefined}
+      {/* Unread dot — pinned to the left of the row, centered vertically */}
+      <div className="flex w-2 shrink-0 items-center justify-center">
+        {!thread.isRead && (
+          <span className="h-2 w-2 rounded-full bg-unread" />
+        )}
+      </div>
+
+      {/* Avatar wrapped in a colored ring with a surface-colored gap.
+          Three concentric layers — outer 32px disc filled with the account
+          color (2px stroke visible), a 2px cream/surface ring around the
+          inner avatar, then the 24px avatar itself. The cream gap lets the
+          color stroke "float" around the favicon.
+          The inner avatar prefers the sender's company favicon and falls
+          back to colored initials when the domain is generic or the logo
+          fails to load. */}
+      <div
+        className="flex h-[32px] w-[32px] shrink-0 items-center justify-center rounded-full"
+        style={accountColor ? { backgroundColor: accountColor } : undefined}
       >
-        <Avatar.Fallback
-          className={cn(
-            'flex h-full w-full items-center justify-center rounded-full text-[9px] font-bold',
-            avatarColor.bg,
-            avatarColor.text,
-          )}
+        <Avatar.Root
+          className="flex h-6 w-6 items-center justify-center overflow-hidden rounded-full bg-white ring-2 ring-surface"
         >
-          {getInitials(senderName)}
-        </Avatar.Fallback>
-      </Avatar.Root>
+          <SenderLogo email={latestEmail?.fromAddress} alt={senderName} />
+          <Avatar.Fallback
+            className={cn(
+              'flex h-full w-full items-center justify-center rounded-full text-[9px] font-bold',
+              avatarColor.bg,
+              avatarColor.text,
+            )}
+            delayMs={300}
+          >
+            {getInitials(senderName)}
+          </Avatar.Fallback>
+        </Avatar.Root>
+      </div>
 
       {/* Content */}
       <div className="min-w-0 flex-1 overflow-hidden">
@@ -220,10 +257,6 @@ export function ThreadItem({ thread, isSelected, isMultiSelected, onSelect, onSh
         )}
       </div>
 
-      {/* Unread indicator */}
-      {!thread.isRead && (
-        <div className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-unread" />
-      )}
 
       {/* Hover quick actions — desktop only */}
       {!isMobile && (
@@ -558,5 +591,29 @@ function SnoozeContextMenuItems({ threadId }: { threadId: string }) {
         Next week
       </ContextMenu.Item>
     </>
+  );
+}
+
+/**
+ * Renders the sender's company logo with a graceful fallback chain.
+ * Cycles through providers via Radix's onLoadingStatusChange (the underlying
+ * <Avatar.Image> uses an internal Image() loader and never fires a plain
+ * onError on the rendered <img>). Once all providers fail it returns null
+ * and the surrounding <Avatar.Fallback /> takes over with colored initials.
+ */
+function SenderLogo({ email, alt }: { email?: string | null; alt: string }) {
+  const urls = getCompanyLogoUrls(email);
+  const [attempt, setAttempt] = useState(0);
+  if (urls.length === 0 || attempt >= urls.length) return null;
+  return (
+    <Avatar.Image
+      key={urls[attempt]}
+      src={urls[attempt]}
+      alt={alt}
+      onLoadingStatusChange={(status) => {
+        if (status === 'error') setAttempt((i) => i + 1);
+      }}
+      className="h-full w-full object-contain"
+    />
   );
 }

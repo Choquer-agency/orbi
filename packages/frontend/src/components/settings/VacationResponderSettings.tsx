@@ -1,94 +1,75 @@
-import { useState, useEffect } from 'react';
-import { Plane, Loader2, Save, Plus } from 'lucide-react';
-import { api } from '../../lib/api';
+import { useState, useEffect, useMemo } from 'react';
+import { Plane, Loader2, Save, Plus, Sparkles } from 'lucide-react';
+import { useQuery, useMutation, useAction } from 'convex/react';
+import { api } from '../../../../../convex/_generated/api';
+import type { Id } from '../../../../../convex/_generated/dataModel';
 import { cn } from '../../lib/utils';
 import { useAuthStore } from '../../stores/authStore';
 
-interface OooDelegation {
-  id: string;
-  startAt: string;
-  endAt: string;
-  autoReplyEnabled: boolean;
-  autoReplyBody: string | null;
-  autoReplySubject: string | null;
-  autoReplyScope: string;
-  isActive: boolean;
-  categories: string[];
-  delegate?: { name: string; email: string };
-}
-
-interface TeamMember {
-  id: string;
-  name: string;
-  email: string;
-}
+type Tone = 'warm' | 'formal' | 'casual';
 
 export function VacationResponderSettings() {
-  const [delegation, setDelegation] = useState<OooDelegation | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const currentUserId = useAuthStore((s) => s.user?.id);
 
-  // Form state (existing delegation)
+  // ── Data ────────────────────────────────────────────────────────────────
+  const delegation = useQuery(api.ooo.get, {});
+  const users = useQuery(api.users.list, {});
+  const createDelegation = useMutation(api.ooo.create);
+  const updateDelegation = useMutation(api.ooo.update);
+  const generateAi = useAction(api.ai.vacationReply.generate);
+
+  const isLoading = delegation === undefined || users === undefined;
+
+  // ── Form state (existing delegation) ────────────────────────────────────
   const [autoReplyEnabled, setAutoReplyEnabled] = useState(false);
   const [autoReplySubject, setAutoReplySubject] = useState('');
   const [autoReplyBody, setAutoReplyBody] = useState('');
-  const [autoReplyScope, setAutoReplyScope] = useState('all');
-  const [startAt, setStartAt] = useState('');
-  const [endAt, setEndAt] = useState('');
+  const [autoReplyScope, setAutoReplyScope] = useState<string>('all');
+  const [endAtDate, setEndAtDate] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  // New delegation form state
-  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
-  const [newDelegateId, setNewDelegateId] = useState('');
+  // ── Form state (new delegation) ─────────────────────────────────────────
+  const [newDelegateId, setNewDelegateId] = useState<string>('');
   const [newStartAt, setNewStartAt] = useState('');
   const [newEndAt, setNewEndAt] = useState('');
   const [creating, setCreating] = useState(false);
 
-  const fetchDelegation = async () => {
-    try {
-      const res = await api.get<{ data: OooDelegation | null }>('/ooo/delegation');
-      if (res.data) {
-        setDelegation(res.data);
-        setAutoReplyEnabled(res.data.autoReplyEnabled);
-        setAutoReplySubject(res.data.autoReplySubject ?? '');
-        setAutoReplyBody(res.data.autoReplyBody ?? '');
-        setAutoReplyScope(res.data.autoReplyScope ?? 'all');
-        setStartAt(res.data.startAt?.split('T')[0] ?? '');
-        setEndAt(res.data.endAt?.split('T')[0] ?? '');
-      }
-    } catch {
-      // No active delegation
-    }
-  };
+  // ── AI generator state ──────────────────────────────────────────────────
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiReturnDate, setAiReturnDate] = useState('');
+  const [aiContact, setAiContact] = useState('');
+  const [aiTone, setAiTone] = useState<Tone>('warm');
+  const [aiNotes, setAiNotes] = useState('');
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
+  // Hydrate form when delegation loads / changes
   useEffect(() => {
-    (async () => {
-      try {
-        await fetchDelegation();
-        // Fetch team members for delegate picker
-        const usersRes = await api.get<{ data: TeamMember[] }>('/users');
-        const members = (usersRes.data ?? []).filter((u: TeamMember) => u.id !== currentUserId);
-        setTeamMembers(members);
-      } catch {
-        // ignore
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [currentUserId]);
+    if (!delegation) return;
+    setAutoReplyEnabled(delegation.autoReplyEnabled);
+    setAutoReplySubject(delegation.autoReplySubject ?? '');
+    setAutoReplyBody(delegation.autoReplyBody ?? '');
+    setAutoReplyScope(delegation.autoReplyScope ?? 'all');
+    setEndAtDate(toDateInput(delegation.endAt));
+  }, [delegation]);
+
+  const teamMembers = useMemo(
+    () => (users ?? []).filter((u) => u.id !== currentUserId),
+    [users, currentUserId],
+  );
 
   const handleSave = async () => {
+    if (!delegation) return;
     setSaving(true);
     try {
-      if (delegation) {
-        await api.patch(`/ooo/delegation/${delegation.id}`, {
-          autoReplyEnabled,
-          autoReplySubject: autoReplySubject || null,
-          autoReplyBody: autoReplyBody || null,
-          autoReplyScope,
-          endAt: endAt ? new Date(endAt).toISOString() : undefined,
-        });
-      }
+      await updateDelegation({
+        id: delegation._id,
+        autoReplyEnabled,
+        autoReplySubject: autoReplySubject || null,
+        autoReplyBody: autoReplyBody || null,
+        autoReplyScope,
+        endAt: endAtDate ? fromDateInput(endAtDate) : undefined,
+      });
     } catch (err) {
       console.error('Failed to save vacation settings:', err);
     } finally {
@@ -100,12 +81,11 @@ export function VacationResponderSettings() {
     if (!newDelegateId || !newStartAt || !newEndAt) return;
     setCreating(true);
     try {
-      await api.post('/ooo/delegation', {
-        delegateId: newDelegateId,
-        startAt: new Date(newStartAt).toISOString(),
-        endAt: new Date(newEndAt).toISOString(),
+      await createDelegation({
+        delegateId: newDelegateId as Id<'users'>,
+        startAt: fromDateInput(newStartAt),
+        endAt: fromDateInput(newEndAt),
       });
-      await fetchDelegation();
     } catch (err) {
       console.error('Failed to create delegation:', err);
     } finally {
@@ -113,7 +93,32 @@ export function VacationResponderSettings() {
     }
   };
 
-  if (loading) {
+  const handleGenerateAi = async () => {
+    if (!aiReturnDate) {
+      setAiError('Please pick a return date.');
+      return;
+    }
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const result = await generateAi({
+        returnDate: aiReturnDate,
+        contactWhileAway: aiContact.trim() || undefined,
+        tone: aiTone,
+        notes: aiNotes.trim() || undefined,
+      });
+      setAutoReplySubject(result.subject);
+      setAutoReplyBody(result.body);
+      setAutoReplyEnabled(true);
+      setAiOpen(false);
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'Generation failed.');
+    } finally {
+      setAiBusy(false);
+    }
+  };
+
+  if (isLoading) {
     return (
       <div className="flex items-center justify-center py-12">
         <Loader2 className="h-5 w-5 animate-spin text-text-tertiary" />
@@ -149,7 +154,6 @@ export function VacationResponderSettings() {
           <div className="rounded-lg border border-border bg-surface/50 p-4">
             <p className="text-[12px] font-semibold text-text-primary mb-3">Set up out of office</p>
             <div className="space-y-3">
-              {/* Delegate picker */}
               <div>
                 <label className="mb-1 block text-[11px] font-medium text-text-secondary">
                   Delegate to
@@ -163,7 +167,7 @@ export function VacationResponderSettings() {
                     <option value="">Select a team member...</option>
                     {teamMembers.map((member) => (
                       <option key={member.id} value={member.id}>
-                        {member.name} ({member.email})
+                        {member.name ?? member.email} {member.email ? `(${member.email})` : ''}
                       </option>
                     ))}
                   </select>
@@ -172,7 +176,6 @@ export function VacationResponderSettings() {
                 )}
               </div>
 
-              {/* Date range */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="mb-1 block text-[11px] font-medium text-text-secondary">Start date</label>
@@ -211,22 +214,20 @@ export function VacationResponderSettings() {
         </div>
       ) : (
         <div className="space-y-4">
-          {/* Status */}
           <div className="flex items-center gap-2 rounded-lg bg-amber-50/80 px-3 py-2">
             <div className={cn('h-2 w-2 rounded-full', delegation.isActive ? 'bg-green-500' : 'bg-gray-400')} />
             <span className="text-[11px] font-medium text-amber-700">
               {delegation.isActive ? 'Active' : 'Inactive'} delegation
-              {delegation.delegate && ` to ${delegation.delegate.name}`}
+              {delegation.delegate?.name && ` to ${delegation.delegate.name}`}
             </span>
           </div>
 
-          {/* Date range */}
           <div className="grid grid-cols-2 gap-3">
             <div>
               <label className="mb-1 block text-[11px] font-medium text-text-secondary">Start date</label>
               <input
                 type="date"
-                value={startAt}
+                value={toDateInput(delegation.startAt)}
                 disabled
                 className="w-full rounded-lg border border-border bg-surface/50 px-3 py-1.5 text-[12px] text-text-tertiary"
               />
@@ -235,14 +236,13 @@ export function VacationResponderSettings() {
               <label className="mb-1 block text-[11px] font-medium text-text-secondary">End date</label>
               <input
                 type="date"
-                value={endAt}
-                onChange={(e) => setEndAt(e.target.value)}
+                value={endAtDate}
+                onChange={(e) => setEndAtDate(e.target.value)}
                 className="w-full rounded-lg border border-border bg-white px-3 py-1.5 text-[12px] text-text-primary focus:border-primary focus:outline-none"
               />
             </div>
           </div>
 
-          {/* Auto-reply toggle */}
           <div className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface/50 p-3">
             <div>
               <p className="text-[12px] font-semibold text-text-primary">Auto-reply enabled</p>
@@ -257,16 +257,116 @@ export function VacationResponderSettings() {
                 autoReplyEnabled ? 'bg-primary' : 'bg-gray-300',
               )}
             >
-              <span className={cn(
-                'inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform',
-                autoReplyEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]',
-              )} />
+              <span
+                className={cn(
+                  'inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform',
+                  autoReplyEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]',
+                )}
+              />
             </button>
           </div>
 
           {autoReplyEnabled && (
             <>
-              {/* Subject */}
+              {/* AI generator ──────────────────────────────────────────── */}
+              <div className="rounded-lg border border-primary/30 bg-primary/[0.03] p-3">
+                <button
+                  onClick={() => setAiOpen((v) => !v)}
+                  className="flex w-full items-center justify-between text-left"
+                >
+                  <span className="flex items-center gap-1.5 text-[12px] font-semibold text-text-primary">
+                    <Sparkles className="h-3.5 w-3.5 text-primary" />
+                    Generate with AI
+                  </span>
+                  <span className="text-[11px] text-text-tertiary">
+                    {aiOpen ? 'Hide' : 'Open'}
+                  </span>
+                </button>
+
+                {aiOpen && (
+                  <div className="mt-3 space-y-3">
+                    <p className="text-[11px] text-text-tertiary leading-relaxed">
+                      Give a few details and we&apos;ll draft a polished auto-reply. You can edit it before saving.
+                    </p>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="mb-1 block text-[11px] font-medium text-text-secondary">Return date</label>
+                        <input
+                          type="date"
+                          value={aiReturnDate}
+                          onChange={(e) => setAiReturnDate(e.target.value)}
+                          className="w-full rounded-lg border border-border bg-white px-3 py-1.5 text-[12px] text-text-primary focus:border-primary focus:outline-none"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-[11px] font-medium text-text-secondary">Tone</label>
+                        <div className="flex gap-1">
+                          {(['warm', 'formal', 'casual'] as Tone[]).map((t) => (
+                            <button
+                              key={t}
+                              onClick={() => setAiTone(t)}
+                              className={cn(
+                                'flex-1 rounded-lg border px-2 py-1.5 text-[11px] font-medium transition-colors capitalize',
+                                aiTone === t
+                                  ? 'border-primary bg-primary/10 text-primary'
+                                  : 'border-border bg-white text-text-secondary hover:border-primary/30',
+                              )}
+                            >
+                              {t}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-[11px] font-medium text-text-secondary">
+                        Who should they contact while you&apos;re away?{' '}
+                        <span className="font-normal text-text-tertiary">(optional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={aiContact}
+                        onChange={(e) => setAiContact(e.target.value)}
+                        placeholder="e.g. Sarah at sarah@orbi.com"
+                        className="w-full rounded-lg border border-border bg-white px-3 py-1.5 text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-primary focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-[11px] font-medium text-text-secondary">
+                        Anything else to mention? <span className="font-normal text-text-tertiary">(optional)</span>
+                      </label>
+                      <textarea
+                        value={aiNotes}
+                        onChange={(e) => setAiNotes(e.target.value)}
+                        placeholder="e.g. Limited email access, urgent matters only, conference in Lisbon…"
+                        rows={3}
+                        className="w-full resize-none rounded-lg border border-border bg-white px-3 py-2 text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-primary focus:outline-none"
+                      />
+                    </div>
+
+                    {aiError && (
+                      <p className="text-[11px] text-red-600">{aiError}</p>
+                    )}
+
+                    <button
+                      onClick={handleGenerateAi}
+                      disabled={aiBusy || !aiReturnDate}
+                      className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-primary/90 disabled:opacity-50"
+                    >
+                      {aiBusy ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3 w-3" />
+                      )}
+                      Generate auto-reply
+                    </button>
+                  </div>
+                )}
+              </div>
+
               <div>
                 <label className="mb-1 block text-[11px] font-medium text-text-secondary">Reply subject</label>
                 <input
@@ -278,19 +378,17 @@ export function VacationResponderSettings() {
                 />
               </div>
 
-              {/* Message */}
               <div>
                 <label className="mb-1 block text-[11px] font-medium text-text-secondary">Reply message</label>
                 <textarea
                   value={autoReplyBody}
                   onChange={(e) => setAutoReplyBody(e.target.value)}
                   placeholder="Thanks for your email! I'm currently out of the office and will return on..."
-                  rows={4}
+                  rows={6}
                   className="w-full rounded-lg border border-border bg-white px-3 py-2 text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-primary focus:outline-none resize-none"
                 />
               </div>
 
-              {/* Scope */}
               <div>
                 <label className="mb-1.5 block text-[11px] font-medium text-text-secondary">Reply scope</label>
                 <div className="space-y-1.5">
@@ -303,7 +401,9 @@ export function VacationResponderSettings() {
                       key={option.value}
                       className={cn(
                         'flex items-start gap-2.5 rounded-lg border p-2.5 cursor-pointer transition-colors',
-                        autoReplyScope === option.value ? 'border-primary bg-primary/5' : 'border-border bg-white hover:border-primary/30',
+                        autoReplyScope === option.value
+                          ? 'border-primary bg-primary/5'
+                          : 'border-border bg-white hover:border-primary/30',
                       )}
                     >
                       <input
@@ -328,4 +428,24 @@ export function VacationResponderSettings() {
       )}
     </div>
   );
+}
+
+// ── Date helpers ──────────────────────────────────────────────────────────
+// Convex stores timestamps as millis; the <input type="date"> works in
+// YYYY-MM-DD. Parse as local-noon to dodge DST/timezone-rollover surprises.
+
+function toDateInput(ms: number | undefined | null): string {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function fromDateInput(value: string): number {
+  const m = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return Date.now();
+  const [, y, mo, d] = m;
+  return new Date(Number(y), Number(mo) - 1, Number(d), 12, 0, 0).getTime();
 }

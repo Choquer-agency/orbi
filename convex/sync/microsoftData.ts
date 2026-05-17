@@ -230,7 +230,19 @@ export const _upsertThread = internalMutation({
     };
 
     if (existing) {
-      await ctx.db.patch(existing._id, data);
+      const patch: typeof data & { isRead?: boolean } = { ...data };
+      const READ_LOCK_MS = 5 * 60 * 1000;
+      const localReadRecent =
+        existing.isRead === true &&
+        existing.readStateLocalAt !== undefined &&
+        Date.now() - existing.readStateLocalAt < READ_LOCK_MS;
+      const noNewMessage =
+        existing.lastMessageAt !== undefined &&
+        args.lastMessageAt <= existing.lastMessageAt;
+      if (localReadRecent && noNewMessage && args.isRead === false) {
+        patch.isRead = true;
+      }
+      await ctx.db.patch(existing._id, patch);
       return existing._id;
     }
     return await ctx.db.insert("threads", data);
@@ -416,7 +428,22 @@ export const _onNewEmailInserted = internalMutation({
           .first()) ?? null;
     }
     if (blocked) {
-      await ctx.db.patch(email.threadId, { isTrashed: true });
+      // Mirror gmailData: honor the user's blockedSenderImmediate retention
+      // pref. Default true → hard-delete on arrival.
+      const ret = await ctx.db
+        .query("retentionSettings")
+        .withIndex("by_user", (q) => q.eq("userId", account.userId))
+        .unique();
+      const immediate = ret?.blockedSenderImmediate ?? true;
+      if (immediate) {
+        await ctx.scheduler.runAfter(
+          0,
+          internal.retention._deleteThreadCascade,
+          { threadId: email.threadId },
+        );
+      } else {
+        await ctx.db.patch(email.threadId, { isTrashed: true });
+      }
       return;
     }
 
@@ -431,6 +458,37 @@ export const _onNewEmailInserted = internalMutation({
       receivedAt: email.receivedAt,
     });
 
+    // 2b. Outbound: extract every recipient so frequent contacts surface in
+    // compose autocomplete. Skip the user's own addresses.
+    if (isOutbound) {
+      const userAccounts = await ctx.db
+        .query("mailAccounts")
+        .withIndex("by_user", (q) => q.eq("userId", account.userId))
+        .collect();
+      const selfEmails = new Set(
+        userAccounts.map((a) => a.email.toLowerCase().trim()),
+      );
+      const rawRecipients = [
+        ...((email.toAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+        ...((email.ccAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+        ...((email.bccAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+      ];
+      for (const r of rawRecipients) {
+        const addr = (r?.email ?? "").toLowerCase().trim();
+        if (!addr || !addr.includes("@")) continue;
+        if (selfEmails.has(addr)) continue;
+        await ctx.scheduler.runAfter(0, internal.contacts.upsertFromEmail, {
+          userId: account.userId,
+          email: addr,
+          name: r?.name ?? null,
+          isSender: false,
+          isOutbound: true,
+          bodyText: null,
+          receivedAt: email.receivedAt,
+        });
+      }
+    }
+
     // 3. Schedule AI classification (Anthropic call inside an action).
     await ctx.scheduler.runAfter(
       0,
@@ -438,20 +496,27 @@ export const _onNewEmailInserted = internalMutation({
       { emailId, userId: account.userId },
     );
 
-    // 4. Notify the user (per-type prefs are enforced inside the helper).
+    // 3b. Schedule "Needs Response" scoring (inbound) or dismiss open
+    // signals on this thread (outbound). Mirror of gmailData.
     if (!isOutbound) {
       await ctx.scheduler.runAfter(
+        2_000,
+        internal.ai.needsResponse.scoreEmail,
+        { emailId, userId: account.userId },
+      );
+    } else {
+      // Outbound from another connected account / external client.
+      // In-app send flow uses kind="replied"; this branch covers the
+      // case where the reply came in through some other path.
+      await ctx.scheduler.runAfter(
         0,
-        internal.notifications.createIfAllowed,
-        {
-          userId: account.userId,
-          type: "NEW_EMAIL" as const,
-          title: email.fromName ?? email.fromAddress,
-          body: email.subject,
-          data: { threadId: email.threadId, emailId, accountId },
-        },
+        internal.ai.needsResponseData._dismissOpenSignalsForThread,
+        { threadId: email.threadId, kind: "auto-other-acc" },
       );
     }
+
+    // (Per-email NEW_EMAIL notifications removed: the bell now just shows
+    // an unread-inbox count from threads.unreadCount.)
 
     // 5. OOO auto-reply (only for inbound messages).
     if (!isOutbound) {

@@ -1,11 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Sparkles, X, Loader2, CalendarClock, Save, Play, FileSignature, ChevronDown, TextQuote, Trash2, Paperclip } from 'lucide-react';
+import { Sparkles, X, Loader2, CalendarClock, Save, Play, ChevronDown, TextQuote, Trash2, Paperclip, Maximize2, Minimize2 } from 'lucide-react';
+import { SignatureIcon } from '../icons/SignatureIcon';
 import { RecipientInput } from './RecipientInput';
 import { useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { useUiStore } from '../../stores/uiStore';
 import { useUndoSendStore } from '../../stores/undoSendStore';
 import { api } from '../../lib/api';
+import { useMutation, useAction } from 'convex/react';
+import { api as convexApi } from '../../../../../convex/_generated/api';
+import type { Id } from '../../../../../convex/_generated/dataModel';
 import { ScheduleSendMenu } from './ScheduleSendMenu';
 import { useSignatures, type Signature } from '../../hooks/useSignatures';
 import { useSnippets } from '../../hooks/useSnippets';
@@ -17,6 +21,11 @@ import { useEditor, EditorContent } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
 import Placeholder from '@tiptap/extension-placeholder';
+import Table from '@tiptap/extension-table';
+import TableRow from '@tiptap/extension-table-row';
+import TableHeader from '@tiptap/extension-table-header';
+import TableCell from '@tiptap/extension-table-cell';
+import { marked } from 'marked';
 import { haptic } from '../../lib/haptics';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { MobileFormatToolbar } from './MobileFormatToolbar';
@@ -32,6 +41,8 @@ interface ComposeInlineProps {
   replyRecipients?: { email: string; name?: string }[];
   fromEmail?: string;
   existingDraftId?: string;
+  /** Notifies the parent when the user toggles the full-height expand mode. */
+  onExpandedChange?: (expanded: boolean) => void;
 }
 
 function escapeHtml(text: string): string {
@@ -57,7 +68,7 @@ function formatScheduleLabel(date: Date): string {
   return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at ${time}`;
 }
 
-export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose, initialDraft, aiOriginal: initialAiOriginal, replyRecipients, fromEmail, existingDraftId }: ComposeInlineProps) {
+export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose, initialDraft, aiOriginal: initialAiOriginal, replyRecipients, fromEmail, existingDraftId, onExpandedChange }: ComposeInlineProps) {
   const { toggleAiChat, editingScheduledId, setEditingScheduledId, setComposeContext } = useUiStore();
   const queryClient = useQueryClient();
   const [to, setTo] = useState(initialDraft?.to ?? '');
@@ -79,22 +90,50 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   const [bccRecipients, setBccRecipients] = useState<{ email: string; name?: string }[]>([]);
   const [ccInput, setCcInput] = useState('');
   const [bccInput, setBccInput] = useState('');
+  // Buffer for typing additional reply-mode recipients before they commit to
+  // the chip list. Enter / comma / Tab / blur commits; backspace on empty
+  // input removes the trailing chip — same pattern as the cc/bcc rows below.
+  const [toInput, setToInput] = useState('');
   const [attachments, setAttachments] = useState<File[]>([]);
   const [draggingOver, setDraggingOver] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: accountsData } = useAccounts();
-  const accounts = accountsData?.data ?? [];
+  // useAccounts() returns { data: <array>, isLoading, ... }, so `accountsData`
+  // IS the array — `accountsData?.data` would call .data on an array (always
+  // undefined) and silently leave us with no accounts at all.
+  const accounts = (accountsData ?? []) as Array<{
+    id: string;
+    email: string;
+    displayName: string | null;
+  }>;
   const [sendingAccountId, setSendingAccountId] = useState(accountId || '');
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
   const sendingAccount = accounts.find((a: any) => a.id === sendingAccountId) || accounts[0];
+
+  // Compose-new opens without an accountId prop, so sendingAccountId starts as ''.
+  // The UI always renders accounts[0] as the active account via the fallback above,
+  // but the *state* needs to match — otherwise handleSend computes activeAccountId
+  // as undefined and the compose mutation branch is skipped silently.
+  useEffect(() => {
+    if (!sendingAccountId && accounts.length > 0) {
+      setSendingAccountId(accounts[0].id);
+    }
+  }, [sendingAccountId, accounts]);
   const [sigMenuOpen, setSigMenuOpen] = useState(false);
   const [snippetMenuOpen, setSnippetMenuOpen] = useState(false);
   const signatureInserted = useRef(false);
   const isMobile = useIsMobile();
   const [editorFocused, setEditorFocused] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  useEffect(() => {
+    onExpandedChange?.(expanded);
+  }, [expanded, onExpandedChange]);
+
+  const [closeMenuOpen, setCloseMenuOpen] = useState(false);
+  const closeMenuRef = useRef<HTMLDivElement>(null);
 
   // Track keyboard visibility for mobile format toolbar
   useEffect(() => {
@@ -124,6 +163,20 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     };
   }, []);
 
+  // Detect whether pasted plain text actually looks like Markdown (so we
+  // don't surprise the user by transforming a casual paragraph that happens
+  // to contain a stray asterisk).
+  const looksLikeMarkdown = (txt: string): boolean => {
+    if (!txt || txt.length < 4) return false;
+    return (
+      /(^|\n)\s*(?:[-*•]|\d+\.)\s+\S/.test(txt) || // list item
+      /\*\*[^*\n]+\*\*/.test(txt) ||                // **bold**
+      /(^|\n)#{1,6}\s+\S/.test(txt) ||              // # heading
+      /\[[^\]]+\]\([^)]+\)/.test(txt) ||            // [text](url)
+      /(^|\n)>\s+\S/.test(txt)                       // > blockquote
+    );
+  };
+
   // TipTap rich text editor
   const editor = useEditor({
     extensions: [
@@ -143,6 +196,27 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       Placeholder.configure({
         placeholder: 'Write your message...',
       }),
+      // Real <table> support so AI-generated tables (e.g. commission
+      // breakdowns) survive into the compose editor instead of being silently
+      // stripped to plain paragraphs by the StarterKit schema.
+      Table.configure({
+        resizable: false,
+        HTMLAttributes: {
+          class: 'border-collapse my-2',
+          style: 'border-collapse:collapse; margin:8px 0;',
+        },
+      }),
+      TableRow,
+      TableHeader.configure({
+        HTMLAttributes: {
+          style: 'border:1px solid #d0d4dc; padding:6px 10px; background:#f4f5f7; font-weight:600; text-align:left;',
+        },
+      }),
+      TableCell.configure({
+        HTMLAttributes: {
+          style: 'border:1px solid #d0d4dc; padding:6px 10px; vertical-align:top;',
+        },
+      }),
     ],
     content: initialDraft?.bodyHtml
       ? initialDraft.bodyHtml
@@ -151,7 +225,17 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         : '',
     editorProps: {
       attributes: {
-        class: 'min-h-[80px] max-h-[calc(40dvh-var(--keyboard-height,0px))] overflow-y-auto w-full text-sm text-text-primary outline-none [&_p]:mb-3 [&_p:last-child]:mb-0',
+        // Note the [&_ul] / [&_ol] / [&_strong] selectors: Tailwind's reset
+        // zeroes these out, so we re-establish list bullets, numbering and
+        // bold weight inside the editor. Without these, pasted Markdown
+        // (and any AI draft using bullets) would render as plain text.
+        class:
+          'min-h-[80px] max-h-[calc(40dvh-var(--keyboard-height,0px))] overflow-y-auto w-full text-sm text-text-primary outline-none ' +
+          '[&_p]:mb-3 [&_p:last-child]:mb-0 ' +
+          '[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-2 ' +
+          '[&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-2 ' +
+          '[&_li]:mb-1 [&_li>p]:mb-0 ' +
+          '[&_strong]:font-semibold [&_em]:italic [&_code]:font-mono [&_code]:bg-surface [&_code]:px-1 [&_code]:rounded',
       },
       handlePaste: (view, event) => {
         // Handle image paste from clipboard (iOS Photos, screenshots)
@@ -165,26 +249,55 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           }
         }
 
-        // If text is selected and clipboard contains a URL, create a link
         const { from, to } = view.state.selection;
-        if (from === to) return false; // no selection
-
         const clipboardText = event.clipboardData?.getData('text/plain')?.trim();
-        if (!clipboardText) return false;
+        const clipboardHtml = event.clipboardData?.getData('text/html')?.trim();
 
-        try {
-          new URL(clipboardText);
-        } catch {
-          return false; // not a valid URL, let default paste handle it
+        // URL-over-selection → link the selection.
+        if (from !== to && clipboardText) {
+          try {
+            new URL(clipboardText);
+            event.preventDefault();
+            const { state, dispatch } = view;
+            const linkMark = state.schema.marks.link.create({ href: clipboardText });
+            const tr = state.tr.addMark(from, to, linkMark);
+            dispatch(tr);
+            return true;
+          } catch {
+            // not a URL — fall through to other handlers
+          }
         }
 
-        // It's a URL pasted over selected text — create a link
-        event.preventDefault();
-        const { state, dispatch } = view;
-        const linkMark = state.schema.marks.link.create({ href: clipboardText });
-        const tr = state.tr.addMark(from, to, linkMark);
-        dispatch(tr);
-        return true;
+        // Markdown-only paste (no HTML on the clipboard): when the plaintext
+        // looks like Markdown (typical of pasted LLM output), convert it to
+        // HTML so bold/lists/headings actually render. If real HTML is also
+        // on the clipboard we let Tiptap's default handler use that.
+        if (clipboardText && !clipboardHtml && looksLikeMarkdown(clipboardText)) {
+          try {
+            const html = marked.parse(clipboardText, {
+              async: false,
+              gfm: true,
+              breaks: true,
+            }) as string;
+            event.preventDefault();
+            const editorAPI = (view as unknown as { editor?: typeof editor }).editor;
+            if (editorAPI) {
+              editorAPI.commands.insertContent(html, { parseOptions: { preserveWhitespace: false } });
+            } else {
+              // Fallback path: write the HTML directly into the doc.
+              const parser = new DOMParser();
+              const doc = parser.parseFromString(html, 'text/html');
+              const fragment = doc.body.innerHTML;
+              const tr = view.state.tr.insertText(fragment);
+              view.dispatch(tr);
+            }
+            return true;
+          } catch {
+            // If marked blows up, fall through to default paste.
+          }
+        }
+
+        return false;
       },
     },
     onUpdate: ({ editor: ed }) => {
@@ -195,7 +308,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   });
 
   // Auto-save drafts
-  const { draftId, saveDraft: saveDraftFn, deleteDraft: deleteDraftFn, isSaving: isDraftSaving, lastSavedAt } = useAutoSaveDraft({
+  const { draftId, saveDraft: saveDraftFn, deleteDraft: deleteDraftFn, markSent, isSaving: isDraftSaving, lastSavedAt } = useAutoSaveDraft({
     accountId: sendingAccountId || accountId || '',
     threadId,
     mode,
@@ -204,7 +317,74 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     enabled: !editingScheduledId,
   });
   const sendDraftMutation = useSendDraft();
+  const sendEmailMutation = useMutation(convexApi.emails.send);
+  const replyEmailMutation = useMutation(convexApi.emails.reply);
+  const forwardEmailMutation = useMutation(convexApi.emails.forward);
+  const updateDraftMutation = useMutation(convexApi.drafts.update);
+  const createScheduledMutation = useMutation(convexApi.scheduledEmails.create);
+  const updateScheduledMutation = useMutation(convexApi.scheduledEmails.update);
+  const generateUploadUrl = useMutation(convexApi.emails.generateAttachmentUploadUrl);
+  const recordEditAction = useAction(convexApi.ai.learn.recordEdit);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Guard against losing unsaved work. We treat any non-empty body, subject,
+  // typed recipient, or attached file as "dirty" — clicking X on a dirty
+  // compose opens a small menu (Save / Delete) instead of closing outright.
+  // Reply-mode pre-fills `recipients` from props — that's NOT user input, so
+  // we only count `to` (compose/forward) toward dirtiness.
+  useEffect(() => {
+    if (!closeMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (closeMenuRef.current && !closeMenuRef.current.contains(e.target as Node)) {
+        setCloseMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [closeMenuOpen]);
+
+  const isDirty =
+    body.length > 0 ||
+    subject.length > 0 ||
+    (mode !== 'reply' && to.length > 0) ||
+    attachments.length > 0;
+
+  const handleCloseClick = useCallback(() => {
+    if (isDirty) {
+      setCloseMenuOpen((v) => !v);
+    } else {
+      onClose();
+    }
+  }, [isDirty, onClose]);
+
+  const handleSaveAndClose = useCallback(() => {
+    setCloseMenuOpen(false);
+    onClose();
+  }, [onClose]);
+
+  const handleDeleteDraft = useCallback(async () => {
+    setCloseMenuOpen(false);
+    try {
+      await deleteDraftFn();
+    } catch {
+      // Already-missing draft is fine; close anyway.
+    }
+    onClose();
+  }, [deleteDraftFn, onClose]);
+
+  // Upload attachments to Convex storage; returns the array shape send/reply/forward expect.
+  const uploadAttachments = async (files: File[]): Promise<Array<{ filename: string; mimeType: string; size: number; storageId: Id<'_storage'> }>> => {
+    if (files.length === 0) return [];
+    const out: Array<{ filename: string; mimeType: string; size: number; storageId: Id<'_storage'> }> = [];
+    for (const f of files) {
+      const url = await generateUploadUrl({});
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': f.type || 'application/octet-stream' }, body: f });
+      if (!res.ok) throw new Error('Attachment upload failed');
+      const { storageId } = await res.json() as { storageId: Id<'_storage'> };
+      out.push({ filename: f.name, mimeType: f.type || 'application/octet-stream', size: f.size, storageId });
+    }
+    return out;
+  };
 
   const triggerAutoSave = useCallback(() => {
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
@@ -328,7 +508,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     if (aiOriginalRef.current && aiOriginalRef.current.body !== body) {
       const contactEmail = to.trim().split(',')[0]?.trim();
       try {
-        await api.post('/ai/learn', {
+        await recordEditAction({
           originalText: aiOriginalRef.current.body,
           editedText: body,
           contactEmail: contactEmail || undefined,
@@ -391,6 +571,12 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       ? bccRecipients
       : (showBcc ? bcc.split(',').map((e) => e.trim()).filter(Boolean).map((e) => ({ email: e })) : []);
 
+    // Cancel any pending autosave before we touch the draft row.
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+    }
+
     setSending(true);
     try {
       await submitAiLearn();
@@ -406,9 +592,9 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           ? []
           : to.split(',').map((e) => ({ email: e.trim() }));
 
-        await api.post('/scheduled-emails', {
-          accountId,
-          threadId: threadId || undefined,
+        await createScheduledMutation({
+          accountId: accountId as Id<'mailAccounts'>,
+          threadId: threadId ? (threadId as Id<'threads'>) : undefined,
           parentEmailId: lastEmailId || undefined,
           mode,
           to: toAddresses,
@@ -417,76 +603,77 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           subject: subject || '(no subject)',
           bodyHtml,
           bodyText: body,
-          sendAt: scheduledAt.toISOString(),
+          sendAt: scheduledAt.getTime(),
         });
 
-        queryClient.invalidateQueries({ queryKey: ['scheduled-emails'] });
         onClose();
         return;
       }
 
       let res: { data: any };
 
-      // If we have a saved draft, send via draft endpoint
+      // If we have a saved draft, send via draft endpoint. If anything goes
+      // wrong with that path (stale row, already converted, deleted), fall
+      // through to the fresh-send path below — the email must always go out.
       if (draftId) {
-        // Save latest content to draft first
         const latestHtml = selectedSig
           ? `${messageHtml}<div class="email-signature" style="margin-top:16px">${selectedSig.bodyHtml}</div>`
           : messageHtml;
-        await api.patch(`/drafts/${draftId}`, {
-          subject: subject || '(no subject)',
-          bodyHtml: latestHtml,
-          bodyText: body,
-          toAddresses: mode === 'reply'
-            ? recipients.map((r) => ({ email: r.email, name: r.name }))
-            : to.split(',').map((e) => ({ email: e.trim() })),
-        });
-        res = await sendDraftMutation.mutateAsync({
-          draftId,
-          undoWindowSeconds: UNDO_WINDOW_SECONDS,
-        });
-        if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-        registerUndo(res);
-        queryClient.invalidateQueries({ queryKey: ['threads'] });
-        if (threadId) queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
-        onClose();
-        return;
+        try {
+          const upd = await updateDraftMutation({
+            draftId: draftId as Id<'emails'>,
+            subject: subject || '(no subject)',
+            bodyHtml: latestHtml,
+            bodyText: body,
+            toAddresses: mode === 'reply'
+              ? recipients.map((r) => ({ email: r.email, name: r.name }))
+              : to.split(',').map((e) => ({ email: e.trim() })),
+          });
+          if (!(upd as { stale?: boolean } | undefined)?.stale) {
+            res = await sendDraftMutation.mutateAsync({
+              draftId,
+              undoWindowSeconds: UNDO_WINDOW_SECONDS,
+            });
+            markSent();
+            haptic.success();
+            registerUndo(res);
+            onClose();
+            return;
+          }
+        } catch (err) {
+          // Draft path failed — fall through to fresh send below.
+          console.warn('Draft send path failed, falling back to fresh send:', err);
+        }
       }
 
-      const activeAccountId = sendingAccountId || accountId;
-      const hasAttachments = attachments.length > 0;
+      const activeAccountId = (sendingAccountId || accountId) as Id<'mailAccounts'>;
+      const attachmentUploads = await uploadAttachments(attachments);
 
       if (mode === 'reply' && lastEmailId && activeAccountId) {
-        const payload = {
+        if (recipients.length === 0) {
+          throw new Error('Please add at least one recipient');
+        }
+        res = await replyEmailMutation({
+          parentEmailId: lastEmailId as Id<'emails'>,
           accountId: activeAccountId,
+          to: recipients.map((r) => ({ email: r.email, name: r.name })),
           bodyHtml,
           bodyText: body,
           cc: ccArray.length > 0 ? ccArray : undefined,
           bcc: bccArray.length > 0 ? bccArray : undefined,
-          undoWindowSeconds: UNDO_WINDOW_SECONDS,
-        };
-        res = hasAttachments
-          ? await api.postFormData<{ data: any }>(`/emails/${lastEmailId}/reply`, buildFormData(payload, attachments))
-          : await api.post<{ data: any }>(`/emails/${lastEmailId}/reply`, payload);
-
-        if (threadId) {
-          queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
-          queryClient.invalidateQueries({ queryKey: ['threads'] });
-        }
+          attachments: attachmentUploads.length > 0 ? attachmentUploads : undefined,
+        }) as { data: any };
       } else if (mode === 'forward' && lastEmailId && activeAccountId) {
-        const payload = {
+        res = await forwardEmailMutation({
+          sourceEmailId: lastEmailId as Id<'emails'>,
           accountId: activeAccountId,
           to: to.split(',').map((e) => ({ email: e.trim() })),
-          cc: ccArray.length > 0 ? ccArray : undefined,
-          bcc: bccArray.length > 0 ? bccArray : undefined,
           bodyHtml,
           bodyText: body,
-        };
-        res = hasAttachments
-          ? await api.postFormData<{ data: any }>(`/emails/${lastEmailId}/forward`, buildFormData(payload, attachments))
-          : await api.post<{ data: any }>(`/emails/${lastEmailId}/forward`, payload);
+          attachments: attachmentUploads.length > 0 ? attachmentUploads : undefined,
+        }) as { data: any };
       } else if (mode === 'compose' && activeAccountId) {
-        const payload = {
+        res = await sendEmailMutation({
           accountId: activeAccountId,
           to: to.split(',').map((e) => ({ email: e.trim() })),
           cc: ccArray.length > 0 ? ccArray : undefined,
@@ -494,16 +681,22 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           subject,
           bodyHtml,
           bodyText: body,
-          undoWindowSeconds: UNDO_WINDOW_SECONDS,
-        };
-        res = hasAttachments
-          ? await api.postFormData<{ data: any }>('/emails/send', buildFormData(payload, attachments))
-          : await api.post<{ data: any }>('/emails/send', payload);
+          attachments: attachmentUploads.length > 0 ? attachmentUploads : undefined,
+        }) as { data: any };
       } else {
-        onClose();
-        return;
+        // We get here only if no mutation matched — typically because no
+        // account is selected (sendingAccountId still '' AND accountId prop
+        // missing). Surface this loudly instead of silently dropping the send.
+        if (!activeAccountId) {
+          throw new Error('No mail account selected — connect or pick a sending account.');
+        }
+        if ((mode === 'reply' || mode === 'forward') && !lastEmailId) {
+          throw new Error(`Cannot ${mode}: missing source email.`);
+        }
+        throw new Error(`Could not send (mode=${mode}, accountId=${activeAccountId ? 'set' : 'missing'}).`);
       }
 
+      markSent();
       haptic.success();
       registerUndo(res!);
       onClose();
@@ -521,19 +714,13 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     setSending(true);
     try {
       const bodyHtml = editor?.getHTML() || '';
-      const updates: Record<string, any> = {
+      await updateScheduledMutation({
+        id: editingScheduledId as Id<'scheduledEmails'>,
         bodyHtml,
         bodyText: body,
         subject: subject || '(no subject)',
-      };
-      if (mode !== 'reply') {
-        updates.to = to.split(',').map((e) => ({ email: e.trim() }));
-      }
-      await api.patch(`/scheduled-emails/${editingScheduledId}`, updates);
-      queryClient.invalidateQueries({ queryKey: ['scheduled-emails'] });
-      if (threadId) {
-        queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
-      }
+        ...(mode !== 'reply' ? { to: to.split(',').map((e) => ({ email: e.trim() })) } : {}),
+      });
       setEditingScheduledId(null);
       onClose();
     } catch (err) {
@@ -547,21 +734,23 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     if (!editingScheduledId) return;
     setSending(true);
     try {
-      // Save any edits first, then send with undo window
       const bodyHtml = editor?.getHTML() || '';
-      const updates: Record<string, any> = {
+      await updateScheduledMutation({
+        id: editingScheduledId as Id<'scheduledEmails'>,
         bodyHtml,
         bodyText: body,
         subject: subject || '(no subject)',
-      };
-      if (mode !== 'reply') {
-        updates.to = to.split(',').map((e) => ({ email: e.trim() }));
-      }
-      await api.patch(`/scheduled-emails/${editingScheduledId}`, updates);
-      const res = await api.post<{ data: { id: string; threadId: string; undoDeadlineAt: string | null } }>(
-        `/scheduled-emails/${editingScheduledId}/send-now`,
-        { undoWindowSeconds: UNDO_WINDOW_SECONDS },
-      );
+        ...(mode !== 'reply' ? { to: to.split(',').map((e) => ({ email: e.trim() })) } : {}),
+      });
+      // For "send now" on a scheduled email, dispatch via the regular send mutation
+      // (the scheduled-emails worker handles the rest).
+      const res = await sendEmailMutation({
+        accountId: accountId as Id<'mailAccounts'>,
+        to: to.split(',').map((e) => ({ email: e.trim() })),
+        subject: subject || '(no subject)',
+        bodyHtml,
+        bodyText: body,
+      }) as { data: any };
 
       if (res.data?.undoDeadlineAt) {
         addPendingEmail({
@@ -600,9 +789,13 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   };
 
   return (
-    <div className="border-t border-border bg-white" onKeyDown={handleKeyDown}>
-      {/* Header — mode label, recipients, from account, AI + close */}
-      <div className="border-b border-border px-5 py-2">
+    <div
+      className={`flex flex-col border-t border-border bg-white${expanded ? ' min-h-0' : ''}`}
+      style={expanded ? { flex: '999 1 0%' } : undefined}
+      onKeyDown={handleKeyDown}
+    >
+      {/* Header — mode label, recipients, from account, AI + expand + close */}
+      <div className="shrink-0 border-b border-border px-5 py-2">
         <div className="flex items-center justify-between gap-2">
           <span className="shrink-0 text-xs font-semibold uppercase tracking-wider text-text-tertiary">
             {editingScheduledId ? 'Edit Scheduled' : mode === 'reply' ? 'Reply all' : mode === 'forward' ? 'Forward' : 'New Email'}
@@ -616,14 +809,50 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
             >
               <Sparkles className="h-3.5 w-3.5" />
             </button>
-            <button onClick={onClose} className="rounded-lg p-1 text-text-tertiary transition-colors hover:bg-surface" aria-label="Close compose">
-              <X className="h-3.5 w-3.5" />
-            </button>
+            {!isMobile && (
+              <button
+                onClick={() => setExpanded((v) => !v)}
+                className="rounded-lg p-1 text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary"
+                title={expanded ? 'Collapse' : 'Expand'}
+                aria-label={expanded ? 'Collapse compose' : 'Expand compose'}
+              >
+                {expanded ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+              </button>
+            )}
+            <div ref={closeMenuRef} className="relative">
+              <button
+                onClick={handleCloseClick}
+                className="rounded-lg p-1 text-text-tertiary transition-colors hover:bg-surface"
+                aria-label="Close compose"
+                aria-haspopup={isDirty ? 'menu' : undefined}
+                aria-expanded={closeMenuOpen}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+              {closeMenuOpen && (
+                <div className="absolute right-0 top-full z-30 mt-1 w-56 overflow-hidden rounded-lg border border-border bg-white shadow-lg">
+                  <button
+                    onClick={handleSaveAndClose}
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-primary/10"
+                  >
+                    <X className="h-3.5 w-3.5 text-blue-500" />
+                    <span>Save and Close Draft</span>
+                  </button>
+                  <button
+                    onClick={handleDeleteDraft}
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[12px] text-text-primary transition-colors hover:bg-red-50"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-red-500" />
+                    <span>Delete Draft</span>
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
         {/* Reply recipients + from account */}
-        {mode === 'reply' && recipients.length > 0 && (<>
+        {mode === 'reply' && (<>
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
             <span className="text-[10px] text-text-tertiary">To:</span>
             {recipients.map((r, i) => (
@@ -641,6 +870,32 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
                 </button>
               </span>
             ))}
+            <input
+              type="text"
+              value={toInput}
+              onChange={(e) => setToInput(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.key === 'Enter' || e.key === ',' || e.key === 'Tab') && toInput.trim()) {
+                  e.preventDefault();
+                  const email = toInput.trim().replace(/,$/, '');
+                  if (EMAIL_REGEX.test(email) && !recipients.some((r) => r.email === email)) {
+                    setRecipients((prev) => [...prev, { email }]);
+                    setToInput('');
+                  }
+                } else if (e.key === 'Backspace' && !toInput && recipients.length > 0) {
+                  setRecipients((prev) => prev.slice(0, -1));
+                }
+              }}
+              onBlur={() => {
+                const email = toInput.trim().replace(/,$/, '');
+                if (email && EMAIL_REGEX.test(email) && !recipients.some((r) => r.email === email)) {
+                  setRecipients((prev) => [...prev, { email }]);
+                  setToInput('');
+                }
+              }}
+              className="min-w-[120px] flex-1 text-[11px] text-text-primary outline-none placeholder:text-text-tertiary"
+              placeholder={recipients.length === 0 ? 'Add recipient…' : ''}
+            />
             <div className="flex items-center gap-1.5 ml-auto">
               {!showCc && (
                 <button
@@ -797,7 +1052,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
 
       {/* To / Subject fields for forward/compose */}
       {(mode === 'forward' || mode === 'compose') && (
-        <div className="space-y-2 border-b border-border px-5 py-2.5">
+        <div className="shrink-0 space-y-2 border-b border-border px-5 py-2.5">
           <div className="flex items-center gap-2">
             <label className="w-12 text-xs text-text-tertiary">To:</label>
             <RecipientInput
@@ -861,7 +1116,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
 
       {/* Compose body — TipTap rich text editor */}
       <div
-        className={`px-5 py-3 transition-colors ${draggingOver ? 'bg-primary/5 ring-2 ring-inset ring-primary/20 rounded' : ''}`}
+        className={`px-5 py-3 transition-colors${draggingOver ? ' bg-primary/5 ring-2 ring-inset ring-primary/20 rounded' : ''}${expanded ? ' min-h-0 flex-1 overflow-y-auto' : ''}`}
         onDragOver={(e) => { e.preventDefault(); setDraggingOver(true); }}
         onDragLeave={() => setDraggingOver(false)}
         onDrop={(e) => {
@@ -871,7 +1126,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         }}
       >
         {editor ? (
-          <EditorContent editor={editor} />
+          <EditorContent editor={editor} className={expanded ? 'h-full' : undefined} />
         ) : (
           <div className="min-h-[80px]" />
         )}
@@ -882,7 +1137,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
 
       {/* Attachment list */}
       {attachments.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 border-t border-border/50 px-5 py-2">
+        <div className="shrink-0 flex flex-wrap gap-1.5 border-t border-border/50 px-5 py-2">
           {attachments.map((file, i) => (
             <div key={`${file.name}-${i}`} className="group flex items-center gap-1.5 rounded-lg border border-border bg-surface/50 px-2.5 py-1 text-xs">
               <Paperclip className="h-3 w-3 shrink-0 text-text-tertiary" />
@@ -913,7 +1168,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       />
 
       {/* Actions */}
-      <div className="flex items-center justify-between border-t border-border px-5 py-2.5">
+      <div className="shrink-0 flex items-center justify-between border-t border-border px-5 py-2.5">
         <div className="flex items-center gap-2">
           <span className="font-mono text-[10px] text-text-tertiary">
             {editingScheduledId ? 'Cmd+Enter to save' : 'Cmd+Enter to send'}
@@ -940,7 +1195,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
                 className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-surface hover:text-text-secondary"
                 title="Select signature"
               >
-                <FileSignature className="h-3 w-3" />
+                <SignatureIcon className="h-3 w-3" />
                 {selectedSignatureId
                   ? signatures.find((s) => s.id === selectedSignatureId)?.name ?? 'Signature'
                   : 'No signature'}

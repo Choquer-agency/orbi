@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { FileSignature, Plus, Trash2, Star, Pencil, Check } from 'lucide-react';
+import { useState, useRef, useEffect } from 'react';
+import { Plus, Trash2, Star, Pencil, Check, Code, Eye } from 'lucide-react';
+import { SignatureIcon } from '../icons/SignatureIcon';
 import {
   useSignatures,
   useCreateSignature,
@@ -31,6 +32,54 @@ function SignatureEditor({
   const [bodyHtml, setBodyHtml] = useState(initial?.bodyHtml ?? '');
   const [isDefault, setIsDefault] = useState(initial?.isDefault ?? false);
   const [accountId, setAccountId] = useState<string | null>(initial?.accountId ?? null);
+  // 'visual' = WYSIWYG contenteditable. 'html' = raw markup textarea — required
+  // when pasting prebuilt HTML signatures, since contenteditable would escape
+  // the angle brackets and store the source as literal text.
+  const [mode, setMode] = useState<'visual' | 'html'>('visual');
+  const visualRef = useRef<HTMLDivElement>(null);
+
+  // Detects the specific shape produced when raw HTML markup gets pasted into
+  // a contenteditable: each line wrapped in <div>, angle brackets escaped to
+  // &lt;/&gt;, leading spaces as &nbsp;. We only treat content as escaped if
+  // BOTH a div wrapper AND escaped-tag entities are present, so a normal rich
+  // signature isn't accidentally rewritten.
+  const looksLikeEscapedSoup = (s: string): boolean => {
+    return /<div>/.test(s) && /&lt;\w/.test(s);
+  };
+
+  const decodeEscapedSoup = (s: string): string => {
+    // Strip the <div>...</div> line wrappers (replacing each with a newline)
+    // and decode the entities the contenteditable inserted. Order matters —
+    // decode &amp; last so we don't double-decode.
+    return s
+      .replace(/<\/div>/gi, '\n')
+      .replace(/<div>/gi, '')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#039;/g, "'")
+      .replace(/&amp;/g, '&');
+  };
+
+  // When switching from html → visual, reflect the latest raw bodyHtml in the
+  // visual editor (the contenteditable doesn't auto-sync from props after mount).
+  useEffect(() => {
+    if (mode === 'visual' && visualRef.current) {
+      visualRef.current.innerHTML = bodyHtml;
+    }
+  }, [mode]);
+
+  // When the user opens HTML mode and the stored bodyHtml looks like escaped
+  // soup from a previous paste-into-WYSIWYG attempt, auto-recover to raw HTML
+  // so they can immediately edit / save the real markup.
+  useEffect(() => {
+    if (mode === 'html' && looksLikeEscapedSoup(bodyHtml)) {
+      setBodyHtml(decodeEscapedSoup(bodyHtml));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   return (
     <div className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
@@ -41,16 +90,61 @@ function SignatureEditor({
         placeholder="Signature name (e.g., Work, Personal)"
         className="w-full rounded-lg border border-border bg-white px-3 py-1.5 text-[12px] text-text-primary placeholder:text-text-tertiary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40"
       />
-      <div
-        contentEditable
-        suppressContentEditableWarning
-        dangerouslySetInnerHTML={{ __html: bodyHtml }}
-        onBlur={(e) => setBodyHtml(e.currentTarget.innerHTML)}
-        className="min-h-[80px] w-full rounded-lg border border-border bg-white px-3 py-2 text-[12px] text-text-primary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40 [&_a]:text-primary [&_a]:underline"
-        data-placeholder="Type your signature HTML here..."
-      />
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          onClick={() => setMode('visual')}
+          className={cn(
+            'flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors',
+            mode === 'visual'
+              ? 'bg-primary text-white'
+              : 'text-text-secondary hover:bg-surface',
+          )}
+        >
+          <Eye className="h-3 w-3" />
+          Visual
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode('html')}
+          className={cn(
+            'flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors',
+            mode === 'html'
+              ? 'bg-primary text-white'
+              : 'text-text-secondary hover:bg-surface',
+          )}
+        >
+          <Code className="h-3 w-3" />
+          HTML
+        </button>
+        <span className="ml-auto text-[10px] text-text-tertiary">
+          {mode === 'html'
+            ? 'Paste raw HTML markup; it will be sent as-is.'
+            : 'Type or paste rich text.'}
+        </span>
+      </div>
+      {mode === 'visual' ? (
+        <div
+          ref={visualRef}
+          contentEditable
+          suppressContentEditableWarning
+          dangerouslySetInnerHTML={{ __html: bodyHtml }}
+          onBlur={(e) => setBodyHtml(e.currentTarget.innerHTML)}
+          className="min-h-[80px] w-full rounded-lg border border-border bg-white px-3 py-2 text-[12px] text-text-primary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40 [&_a]:text-primary [&_a]:underline"
+          data-placeholder="Type your signature here..."
+        />
+      ) : (
+        <textarea
+          value={bodyHtml}
+          onChange={(e) => setBodyHtml(e.target.value)}
+          spellCheck={false}
+          placeholder="<table>...</table>"
+          className="min-h-[160px] w-full rounded-lg border border-border bg-white px-3 py-2 font-mono text-[11px] text-text-primary focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/40"
+        />
+      )}
       <p className="text-[10px] text-text-tertiary">
-        Supports HTML formatting. Use bold, links, and line breaks.
+        Use HTML mode to paste a prebuilt signature (logos, tables, links).
+        Visual mode is for plain rich-text edits.
       </p>
       <div className="flex items-center gap-4">
         <label className="flex items-center gap-2 text-[11px] text-text-secondary cursor-pointer">
@@ -121,7 +215,7 @@ export function SignatureSettings() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <FileSignature className="h-4 w-4 text-text-secondary" />
+          <SignatureIcon className="h-4 w-4 text-text-secondary" />
           <h3 className="text-[13px] font-semibold text-text-primary">Signatures</h3>
         </div>
         {!showEditor && !editingId && (

@@ -98,15 +98,16 @@ mark[data-highlight] {
   animation: highlightPulse 5s ease-out forwards;
 }
 
-/* Bulk action toolbar slide-up */
+/* Bulk action toolbar slide-up — Y-only now that the wrapper centers itself
+   via `inset-x-2 flex justify-center`. The previous version baked in a
+   translate(-50%, …) for the old `left-1/2` positioning, which dragged the
+   wrapper half its width to the left and clipped the bar. */
 @keyframes bulkBarIn {
-  from { opacity: 0; transform: translate(-50%, 8px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .animate-bounce-in {
   animation: bulkBarIn 200ms ease-out;
-  /* Override Tailwind's translate since animation controls it */
-  transform: translate(-50%, 0);
 }
 
 /* Restore native HTML email alignment inside inline renderer.

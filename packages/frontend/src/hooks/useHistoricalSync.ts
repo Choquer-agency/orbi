@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQuery, useMutation } from 'convex/react';
+import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 
@@ -82,6 +82,41 @@ export function useHistoricalSyncStatus(accountId: string | null) {
     data: shaped,
     isLoading: accountId ? data === undefined : false,
   };
+}
+
+/**
+ * Aggregate historical-sync state across all the user's accounts. Powers the
+ * global "Importing N / ~M…" pill in the thread list and the
+ * "still indexing contacts" footer in compose autocomplete.
+ */
+export function useAnyHistoricalSyncInProgress() {
+  const { isAuthenticated } = useConvexAuth();
+  const data = useQuery(
+    api.mailAccounts.anyHistoricalSync,
+    isAuthenticated ? {} : 'skip',
+  );
+  return {
+    inProgress: data?.inProgress ?? false,
+    syncedThreads: data?.syncedThreads ?? 0,
+    totalThreads: data?.totalThreads ?? 0,
+    accountEmail: data?.accountEmail ?? null,
+    contactBackfillInProgress: data?.contactBackfillInProgress ?? false,
+    isLoading: data === undefined && isAuthenticated,
+  };
+}
+
+export function useStartContactBackfill() {
+  const fn = useMutation(api.contacts.startContactBackfill);
+  const [isPending, setIsPending] = useState(false);
+  const mutate = async (accountId: string) => {
+    setIsPending(true);
+    try {
+      return await fn({ accountId: accountId as Id<'mailAccounts'> });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return { mutate, mutateAsync: mutate, isPending };
 }
 
 export function useStartHistoricalSync() {

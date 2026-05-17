@@ -4,7 +4,7 @@ import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import type { Doc, Id } from "./_generated/dataModel";
 
-const UNDO_WINDOW_MS = 10_000;
+const UNDO_WINDOW_MS = 60_000;
 
 const recipient = v.object({
   email: v.string(),
@@ -123,12 +123,15 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
     const email = await ctx.db.get(args.draftId);
-    if (!email) throw new Error("Draft not found");
+    // Autosave is best-effort: if the draft was deleted, sent, or doesn't
+    // belong to this user, return silently rather than failing the caller.
+    // A stale autosave firing after Send must never block the send flow.
+    if (!email) return { data: null, stale: true as const };
     const account = await ctx.db.get(email.accountId);
     if (!account || account.userId !== userId) {
-      throw new Error("Draft not found");
+      return { data: null, stale: true as const };
     }
-    if (!email.isDraft) throw new Error("Email is not a draft");
+    if (!email.isDraft) return { data: null, stale: true as const };
 
     const patch: Record<string, unknown> = {};
     if (args.subject !== undefined) patch.subject = args.subject;
@@ -163,12 +166,15 @@ export const discard = mutation({
   handler: async (ctx, { draftId }) => {
     const userId = await requireUser(ctx);
     const email = await ctx.db.get(draftId);
-    if (!email) throw new Error("Draft not found");
+    // Idempotent: missing / non-draft / not-owned is treated as already-discarded.
+    // The unmount cleanup in useAutoSaveDraft fires this fire-and-forget after
+    // sendDraft has already converted the row, so a throw here is a false alarm.
+    if (!email) return { data: { success: true } };
     const account = await ctx.db.get(email.accountId);
     if (!account || account.userId !== userId) {
-      throw new Error("Draft not found");
+      return { data: { success: true } };
     }
-    if (!email.isDraft) throw new Error("Email is not a draft");
+    if (!email.isDraft) return { data: { success: true } };
 
     const thread = await ctx.db.get(email.threadId);
     await ctx.db.delete(draftId);
@@ -241,11 +247,53 @@ export const sendDraft = mutation({
       await ctx.db.patch(email.threadId, threadPatch);
     }
 
+    // Index every recipient as a contact so they show up in compose
+    // autocomplete next time. Mirrors the to/cc/bcc loop in emails.send;
+    // sync's _onNewEmailInserted won't fire for these because the row is
+    // patched (not inserted) on the next pull.
+    {
+      const userAccounts = await ctx.db
+        .query("mailAccounts")
+        .withIndex("by_user", (q) => q.eq("userId", account.userId))
+        .collect();
+      const selfEmails = new Set(
+        userAccounts.map((a) => a.email.toLowerCase().trim()),
+      );
+      const allRecipients = [
+        ...((email.toAddresses as Array<{ email?: string; name?: string }> | undefined) ?? []),
+        ...((email.ccAddresses as Array<{ email?: string; name?: string }> | undefined) ?? []),
+        ...((email.bccAddresses as Array<{ email?: string; name?: string }> | undefined) ?? []),
+      ];
+      const seen = new Set<string>();
+      for (const r of allRecipients) {
+        const addr = (r?.email ?? "").toLowerCase().trim();
+        if (!addr || !addr.includes("@")) continue;
+        if (selfEmails.has(addr)) continue;
+        if (seen.has(addr)) continue;
+        seen.add(addr);
+        await ctx.scheduler.runAfter(0, internal.contacts.upsertFromEmail, {
+          userId: account.userId,
+          email: addr,
+          name: r?.name ?? null,
+          isSender: false,
+          isOutbound: true,
+          bodyText: null,
+          receivedAt: now,
+        });
+      }
+    }
+
+    await ctx.scheduler.runAfter(
+      0,
+      internal.ai.needsResponseData._dismissOpenSignalsForThread,
+      { threadId: email.threadId, kind: "replied" },
+    );
+
     await ctx.scheduler.runAfter(UNDO_WINDOW_MS, internal.emails.actuallySend, {
       emailId: draftId,
     });
 
-    return { data: { id: draftId, threadId: email.threadId } };
+    return { data: { id: draftId, threadId: email.threadId, undoDeadlineAt } };
   },
 });
 
@@ -271,18 +319,21 @@ export const list = query({
 
     const limitNum = Math.min(args.limit ?? 100, 500);
 
+    // Take only from the draft-only slice of each account so we don't pull
+    // hundreds of non-draft emails just to filter them out.
     const emailsArrays = await Promise.all(
       accountIds.map((aid) =>
         ctx.db
           .query("emails")
-          .withIndex("by_account_receivedAt", (q) => q.eq("accountId", aid))
+          .withIndex("by_account_isDraft_receivedAt", (q) =>
+            q.eq("accountId", aid).eq("isDraft", true),
+          )
           .order("desc")
           .take(limitNum),
       ),
     );
     const drafts = emailsArrays
       .flat()
-      .filter((e) => e.isDraft)
       .sort((a, b) => b.receivedAt - a.receivedAt)
       .slice(0, limitNum);
 
@@ -298,15 +349,19 @@ export const count = query({
       .query("mailAccounts")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
+    // Iterate the draft-only index slice per account so we don't read every
+    // email row in the mailbox just to compute a badge count.
     const arrays = await Promise.all(
       accounts.map((a) =>
         ctx.db
           .query("emails")
-          .withIndex("by_account_receivedAt", (q) => q.eq("accountId", a._id))
+          .withIndex("by_account_isDraft_receivedAt", (q) =>
+            q.eq("accountId", a._id).eq("isDraft", true),
+          )
           .collect(),
       ),
     );
-    const total = arrays.flat().filter((e) => e.isDraft).length;
+    const total = arrays.flat().length;
     return { data: { count: total } };
   },
 });

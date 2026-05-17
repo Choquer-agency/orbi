@@ -43,8 +43,12 @@ export function KeyboardShortcutsWidget() {
 
   return (
     <>
-      {/* Trigger button */}
-      <div className="fixed bottom-4 right-4 z-40">
+      {/* Trigger button + build version label */}
+      <div className="fixed bottom-4 right-4 z-40 flex items-center gap-2">
+        {/* Build version tag — edit the literal below to bump (e.g. "V.2"). */}
+        <span className="select-none rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-medium text-text-tertiary ring-1 ring-border/60 shadow-sm backdrop-blur">
+          V.1
+        </span>
         <button
           onClick={() => setShortcutsModalOpen(true)}
           className={cn(

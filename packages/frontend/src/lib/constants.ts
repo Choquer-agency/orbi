@@ -11,7 +11,6 @@ import {
   LayoutDashboard,
   CalendarClock,
   BellRing,
-  UserCheck,
   ContactIcon,
   Megaphone,
   Bell,
@@ -35,7 +34,6 @@ export const SMART_FOLDERS = [
   { id: 'shared', label: 'Shared With Me', icon: Users },
   { id: 'snoozed', label: 'Snoozed', icon: AlarmClock },
   { id: 'scheduled', label: 'Scheduled', icon: CalendarClock },
-  { id: 'delegated_to_me', label: 'Delegated to Me', icon: UserCheck },
   { id: 'contacts', label: 'Contacts', icon: ContactIcon },
 ] as const;
 

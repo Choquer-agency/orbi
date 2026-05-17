@@ -79,6 +79,7 @@ export const getSuggestion = action({
     const prep: {
       latestEmailId: string | null;
       existingTriageLabel: string | null;
+      overrideCategory: string | null;
       threshold: number;
     } = await ctx.runQuery(internal.triage._prepSuggestion, {
       userId,
@@ -98,10 +99,20 @@ export const getSuggestion = action({
       };
     }
 
+    // User-set sender / domain override beats the AI classifier.
+    if (prep.overrideCategory) {
+      return {
+        category: prep.overrideCategory,
+        confidence: 1.0,
+        isTriageCategory: isTriageCategory(prep.overrideCategory),
+        alreadyFiled: true,
+      };
+    }
+
     const result: {
       classification: {
         category: string;
-        confidence: number;
+        confidence?: number;
         summary?: string;
       } | null;
       isTriageCategory: boolean;
@@ -114,13 +125,15 @@ export const getSuggestion = action({
       throw new Error("Classification failed");
     }
 
+    // Confidence is no longer stored on new rows; default to 1.0 so existing
+    // callers that compare against the user's threshold keep working.
+    const confidence = result.classification.confidence ?? 1.0;
     return {
       category: result.classification.category,
-      confidence: result.classification.confidence,
+      confidence,
       summary: result.classification.summary,
       isTriageCategory: result.isTriageCategory,
-      meetsThreshold:
-        result.classification.confidence >= prep.threshold,
+      meetsThreshold: confidence >= prep.threshold,
       alreadyFiled: false,
     };
   },
@@ -148,9 +161,34 @@ export const _prepSuggestion = internalQuery({
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .unique();
 
+    // Per-user sender / domain overrides win over the AI classifier. If the
+    // latest email's from-address matches either an exact-email or domain
+    // pattern, return the forced category and we skip Claude entirely below.
+    let overrideCategory: string | null = null;
+    if (latest?.fromAddress) {
+      const addr = latest.fromAddress.toLowerCase().trim();
+      const domain = addr.includes("@") ? `@${addr.split("@")[1]}` : "";
+      const overrides = await ctx.db
+        .query("senderTriageOverrides")
+        .withIndex("by_user", (q) => q.eq("userId", userId))
+        .collect();
+      for (const o of overrides) {
+        if (o.kind === "email" && o.pattern === addr) {
+          overrideCategory = o.forceCategory;
+          break;
+        }
+        if (o.kind === "domain" && domain && o.pattern === domain) {
+          overrideCategory = o.forceCategory;
+          // Don't break — an exact-email override should still take precedence,
+          // so keep looping in case we hit one.
+        }
+      }
+    }
+
     return {
       latestEmailId: latest?._id ?? null,
       existingTriageLabel: existingTriage,
+      overrideCategory,
       threshold: settings?.confidenceThreshold ?? 0.85,
     };
   },
@@ -166,6 +204,11 @@ export const submitFeedback = mutation({
     finalCategory: v.string(),
     wasConfirmed: v.boolean(),
     senderAddress: v.optional(v.string()),
+    // Optional: persist a permanent sender override so this category sticks
+    // for future emails matching `allowPattern`. Set by the "always allow"
+    // dialog when the user pulls an email out of Spam.
+    allowPattern: v.optional(v.string()),
+    allowKind: v.optional(v.union(v.literal("email"), v.literal("domain"))),
   },
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
@@ -213,6 +256,52 @@ export const submitFeedback = mutation({
         const filtered = thread.labels.filter((l) => !l.startsWith("triage:"));
         filtered.push(`triage:${args.finalCategory}`);
         await ctx.db.patch(args.threadId, { labels: filtered });
+      }
+    }
+
+    // Keep the SPAM label on the thread in lockstep with the user's
+    // verdict so Orbi's Spam folder (which mirrors that label) reflects
+    // what the user just decided. Adding "spam" → ensure SPAM label
+    // present; moving out of spam → remove it.
+    if (args.threadId) {
+      const thread = await ctx.db.get(args.threadId);
+      if (thread) {
+        const hasSpamLabel = thread.labels.includes("SPAM");
+        if (args.finalCategory === "spam" && !hasSpamLabel) {
+          await ctx.db.patch(args.threadId, {
+            labels: [...thread.labels, "SPAM"],
+          });
+        } else if (args.finalCategory !== "spam" && hasSpamLabel) {
+          await ctx.db.patch(args.threadId, {
+            labels: thread.labels.filter((l) => l !== "SPAM"),
+          });
+        }
+      }
+    }
+
+    // Optional permanent override (for the "always allow this sender / domain"
+    // prompt that fires when pulling an email out of Spam). Upsert so the
+    // user can flip the same pattern between categories without piling rows.
+    if (args.allowPattern && args.allowKind) {
+      const normalized = args.allowPattern.toLowerCase().trim();
+      const existing = await ctx.db
+        .query("senderTriageOverrides")
+        .withIndex("by_user_pattern", (q) =>
+          q.eq("userId", userId).eq("pattern", normalized),
+        )
+        .unique();
+      if (existing) {
+        await ctx.db.patch(existing._id, {
+          kind: args.allowKind,
+          forceCategory: args.finalCategory,
+        });
+      } else {
+        await ctx.db.insert("senderTriageOverrides", {
+          userId,
+          kind: args.allowKind,
+          pattern: normalized,
+          forceCategory: args.finalCategory,
+        });
       }
     }
 

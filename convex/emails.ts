@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import {
   mutation,
   query,
+  action,
   internalAction,
   internalMutation,
   internalQuery,
@@ -14,7 +15,7 @@ import type { Doc, Id } from "./_generated/dataModel";
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-const UNDO_WINDOW_MS = 10_000; // 10s undo window per task spec
+const UNDO_WINDOW_MS = 60_000; // 60s undo window — matches the toast counter, drives send-now / undoSend / updatePending eligibility.
 
 async function ensureEmailOwnedByUser(
   ctx: { db: any },
@@ -34,6 +35,48 @@ function newLocalProviderMessageId(): string {
 
 function newLocalProviderThreadId(): string {
   return `local-thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+// Dispatch contact extraction for an outbound email's recipients, so that
+// people the user emails through the app immediately appear in the compose
+// autocomplete. Mirrors the to/cc/bcc loop in sync/gmailData._onNewEmailInserted
+// — that path only fires when sync inserts a *new* row, but our outbound
+// path patches an existing local row, so sync reports isNew=false and never
+// triggers contact extraction. Calling this directly from the send mutations
+// fills the gap.
+async function dispatchOutboundContactExtraction(
+  ctx: {
+    db: any;
+    scheduler: { runAfter: (delay: number, ref: any, args: any) => Promise<unknown> };
+  },
+  account: Doc<"mailAccounts">,
+  recipients: Array<{ email: string; name?: string }>,
+  receivedAt: number,
+): Promise<void> {
+  const userAccounts = await ctx.db
+    .query("mailAccounts")
+    .withIndex("by_user", (q: any) => q.eq("userId", account.userId))
+    .collect();
+  const selfEmails = new Set(
+    userAccounts.map((a: Doc<"mailAccounts">) => a.email.toLowerCase().trim()),
+  );
+  const seen = new Set<string>();
+  for (const r of recipients) {
+    const addr = (r?.email ?? "").toLowerCase().trim();
+    if (!addr || !addr.includes("@")) continue;
+    if (selfEmails.has(addr)) continue;
+    if (seen.has(addr)) continue;
+    seen.add(addr);
+    await ctx.scheduler.runAfter(0, internal.contacts.upsertFromEmail, {
+      userId: account.userId,
+      email: addr,
+      name: r?.name ?? null,
+      isSender: false,
+      isOutbound: true,
+      bodyText: null,
+      receivedAt,
+    });
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,12 +227,148 @@ export const getAttachmentUrl = query({
     const owned = await ensureEmailOwnedByUser(ctx, attachment.emailId, userId);
     if (!owned) throw new Error("Email not found");
     if (!attachment.storageId) {
-      // Provider-fetched attachments aren't in Convex storage; the frontend should
-      // call a separate `internal.oauth.gmail.downloadAttachment` action.
       return { url: null, providerAttachmentId: attachment.providerAttachmentId };
     }
     const url = await ctx.storage.getUrl(attachment.storageId);
     return { url, providerAttachmentId: null };
+  },
+});
+
+// Internal helpers used by the download action below.
+export const _getAttachmentForDownload = internalQuery({
+  args: { attachmentId: v.id("attachments") },
+  handler: async (ctx, { attachmentId }) => {
+    const attachment = await ctx.db.get(attachmentId);
+    if (!attachment) return null;
+    const email = await ctx.db.get(attachment.emailId);
+    if (!email) return null;
+    const account = await ctx.db.get(email.accountId);
+    if (!account) return null;
+    return {
+      attachment: {
+        _id: attachment._id,
+        emailId: attachment.emailId,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        providerAttachmentId: attachment.providerAttachmentId,
+        storageId: attachment.storageId,
+      },
+      email: { _id: email._id, providerMessageId: email.providerMessageId, accountId: email.accountId },
+      account: { _id: account._id, userId: account.userId, provider: account.provider },
+    };
+  },
+});
+
+// Used by oauth.gmail.send / oauth.microsoft.send to attach files. Returns
+// only the metadata needed to build a MIME message — the bytes are pulled
+// separately via ctx.storage.get(storageId) inside the send action.
+export const _getAttachmentsForSend = internalQuery({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }) => {
+    const rows = await ctx.db
+      .query("attachments")
+      .withIndex("by_email", (q) => q.eq("emailId", emailId))
+      .collect();
+    return rows
+      .filter((r) => r.storageId !== undefined)
+      .map((r) => ({
+        filename: r.filename,
+        mimeType: r.mimeType,
+        storageId: r.storageId as Id<"_storage">,
+      }));
+  },
+});
+
+export const _setAttachmentStorageId = internalMutation({
+  args: { attachmentId: v.id("attachments"), storageId: v.id("_storage") },
+  handler: async (ctx, { attachmentId, storageId }) => {
+    await ctx.db.patch(attachmentId, { storageId });
+  },
+});
+
+/**
+ * Public download endpoint. Returns a URL the frontend can fetch.
+ * - If the attachment is already in Convex storage → return its URL
+ * - Else fetch from Gmail/Microsoft, store in Convex storage, return URL
+ *
+ * Auth: requires the calling user to own the email.
+ */
+export const downloadAttachment = action({
+  args: { attachmentId: v.id("attachments") },
+  handler: async (ctx, { attachmentId }): Promise<{ url: string; filename: string; mimeType: string }> => {
+    const userId = await requireUser(ctx);
+
+    const ctxData = (await ctx.runQuery(internal.emails._getAttachmentForDownload, {
+      attachmentId,
+    })) as {
+      attachment: {
+        _id: Id<"attachments">;
+        emailId: Id<"emails">;
+        filename: string;
+        mimeType: string;
+        providerAttachmentId?: string;
+        storageId?: Id<"_storage">;
+      };
+      email: { _id: Id<"emails">; providerMessageId: string; accountId: Id<"mailAccounts"> };
+      account: { _id: Id<"mailAccounts">; userId: Id<"users">; provider: string };
+    } | null;
+
+    if (!ctxData) throw new Error("Attachment not found");
+    if (ctxData.account.userId !== userId) throw new Error("Not authorized");
+
+    // Already in Convex storage — just return the URL
+    if (ctxData.attachment.storageId) {
+      const url = await ctx.storage.getUrl(ctxData.attachment.storageId);
+      if (!url) throw new Error("Storage URL unavailable");
+      return { url, filename: ctxData.attachment.filename, mimeType: ctxData.attachment.mimeType };
+    }
+
+    // Need to fetch from provider
+    if (!ctxData.attachment.providerAttachmentId) {
+      throw new Error("Attachment has no storage and no providerAttachmentId");
+    }
+
+    let dataBytes: Uint8Array;
+    if (ctxData.account.provider === "GMAIL") {
+      const accessToken = await ctx.runAction(internal.oauth.tokenManager.getAccessToken, {
+        accountId: ctxData.account._id,
+      });
+      const res = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${ctxData.email.providerMessageId}/attachments/${ctxData.attachment.providerAttachmentId}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      if (!res.ok) throw new Error(`Gmail attachment fetch failed: ${res.status}`);
+      const json = (await res.json()) as { data: string };
+      // Gmail uses URL-safe base64
+      const b64 = json.data.replace(/-/g, "+").replace(/_/g, "/");
+      const bin = atob(b64);
+      dataBytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) dataBytes[i] = bin.charCodeAt(i);
+    } else if (ctxData.account.provider === "MICROSOFT") {
+      const accessToken = await ctx.runAction(internal.oauth.tokenManager.getAccessToken, {
+        accountId: ctxData.account._id,
+      });
+      const res = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages/${ctxData.email.providerMessageId}/attachments/${ctxData.attachment.providerAttachmentId}/$value`,
+        { headers: { Authorization: `Bearer ${accessToken}` } },
+      );
+      if (!res.ok) throw new Error(`Microsoft attachment fetch failed: ${res.status}`);
+      dataBytes = new Uint8Array(await res.arrayBuffer());
+    } else {
+      throw new Error(`Provider ${ctxData.account.provider} not supported for attachment download`);
+    }
+
+    // Store in Convex storage and cache the storageId on the attachment row
+    const storageId = await ctx.storage.store(
+      new Blob([dataBytes as BlobPart], { type: ctxData.attachment.mimeType }),
+    );
+    await ctx.runMutation(internal.emails._setAttachmentStorageId, {
+      attachmentId: ctxData.attachment._id,
+      storageId,
+    });
+    const url = await ctx.storage.getUrl(storageId);
+    if (!url) throw new Error("Storage URL unavailable after upload");
+    return { url, filename: ctxData.attachment.filename, mimeType: ctxData.attachment.mimeType };
   },
 });
 
@@ -283,11 +462,18 @@ export const send = mutation({
       });
     }
 
+    await dispatchOutboundContactExtraction(
+      ctx,
+      account,
+      [...args.to, ...(args.cc ?? []), ...(args.bcc ?? [])],
+      now,
+    );
+
     await ctx.scheduler.runAfter(UNDO_WINDOW_MS, internal.emails.actuallySend, {
       emailId,
     });
 
-    return { data: { id: emailId, threadId } };
+    return { data: { id: emailId, threadId, undoDeadlineAt } };
   },
 });
 
@@ -299,6 +485,10 @@ export const reply = mutation({
   args: {
     parentEmailId: v.id("emails"),
     accountId: v.id("mailAccounts"),
+    // Caller may pass an explicit `to` (the chip list the user edited in the
+    // compose UI). If omitted, default to the parent's sender — single-recipient
+    // reply behavior.
+    to: v.optional(v.array(recipient)),
     bodyHtml: v.optional(v.string()),
     bodyText: v.string(),
     cc: v.optional(v.array(recipient)),
@@ -325,6 +515,14 @@ export const reply = mutation({
     const replyHtml =
       args.bodyHtml ?? `<p>${args.bodyText.replace(/\n/g, "<br/>")}</p>`;
 
+    const toAddresses =
+      args.to && args.to.length > 0
+        ? args.to
+        : [{ email: parent.fromAddress, name: parent.fromName }];
+    if (toAddresses.length === 0) {
+      throw new Error("Reply has no recipients");
+    }
+
     const emailId = await ctx.db.insert("emails", {
       accountId: account._id,
       threadId: parent.threadId,
@@ -333,7 +531,7 @@ export const reply = mutation({
       references: [],
       fromAddress: account.email,
       fromName: account.displayName || account.email.split("@")[0],
-      toAddresses: [{ email: parent.fromAddress, name: parent.fromName }],
+      toAddresses,
       ccAddresses: args.cc ?? [],
       bccAddresses: args.bcc ?? [],
       subject,
@@ -367,11 +565,26 @@ export const reply = mutation({
       lastMessageAt: now,
     });
 
+    await dispatchOutboundContactExtraction(
+      ctx,
+      account,
+      [...toAddresses, ...(args.cc ?? []), ...(args.bcc ?? [])],
+      now,
+    );
+
+    // Replying resolves any open "Needs Response" signal on this thread.
+    // Scheduled (not awaited) so the response stays snappy.
+    await ctx.scheduler.runAfter(
+      0,
+      internal.ai.needsResponseData._dismissOpenSignalsForThread,
+      { threadId: parent.threadId, kind: "replied" },
+    );
+
     await ctx.scheduler.runAfter(UNDO_WINDOW_MS, internal.emails.actuallySend, {
       emailId,
     });
 
-    return { data: { id: emailId, threadId: parent.threadId } };
+    return { data: { id: emailId, threadId: parent.threadId, undoDeadlineAt } };
   },
 });
 
@@ -442,11 +655,19 @@ export const forward = mutation({
       });
     }
 
+    await dispatchOutboundContactExtraction(ctx, account, args.to, now);
+
+    await ctx.scheduler.runAfter(
+      0,
+      internal.ai.needsResponseData._dismissOpenSignalsForThread,
+      { threadId: source.threadId, kind: "replied" },
+    );
+
     await ctx.scheduler.runAfter(UNDO_WINDOW_MS, internal.emails.actuallySend, {
       emailId,
     });
 
-    return { data: { id: emailId, threadId: source.threadId } };
+    return { data: { id: emailId, threadId: source.threadId, undoDeadlineAt } };
   },
 });
 
@@ -578,9 +799,9 @@ export const actuallySend = internalAction({
 
     try {
       let providerMessageId: string | undefined;
+      let internetMessageId: string | undefined;
       if (account.provider === "GMAIL") {
         const result = await ctx.runAction(
-          // Owned by Agent A — assume signature exists.
           (internal as any).oauth.gmail.send,
           {
             accountId: account._id,
@@ -597,6 +818,7 @@ export const actuallySend = internalAction({
           },
         );
         providerMessageId = result?.providerMessageId;
+        internetMessageId = result?.internetMessageId;
       } else if (account.provider === "MICROSOFT") {
         const result = await ctx.runAction(
           (internal as any).oauth.microsoft.send,
@@ -615,6 +837,7 @@ export const actuallySend = internalAction({
           },
         );
         providerMessageId = result?.providerMessageId;
+        internetMessageId = result?.internetMessageId;
       } else {
         throw new Error(`Unsupported provider: ${account.provider}`);
       }
@@ -622,6 +845,7 @@ export const actuallySend = internalAction({
       await ctx.runMutation(internal.emails._markSent, {
         emailId,
         providerMessageId,
+        internetMessageId,
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -642,7 +866,8 @@ export const _loadForSend = internalQuery({
     if (!email) return null;
     const account = await ctx.db.get(email.accountId);
     if (!account) return null;
-    return { email, account };
+    const thread = await ctx.db.get(email.threadId);
+    return { email, account, thread };
   },
 });
 
@@ -650,8 +875,12 @@ export const _markSent = internalMutation({
   args: {
     emailId: v.id("emails"),
     providerMessageId: v.optional(v.string()),
+    internetMessageId: v.optional(v.string()),
   },
-  handler: async (ctx, { emailId, providerMessageId }) => {
+  handler: async (
+    ctx,
+    { emailId, providerMessageId, internetMessageId },
+  ) => {
     const email = await ctx.db.get(emailId);
     if (!email) return;
     if (email.sendStatus === "UNDONE") return;
@@ -662,6 +891,9 @@ export const _markSent = internalMutation({
     };
     if (providerMessageId) {
       patch.providerMessageId = providerMessageId;
+    }
+    if (internetMessageId) {
+      patch.internetMessageId = internetMessageId;
     }
     await ctx.db.patch(emailId, patch);
   },

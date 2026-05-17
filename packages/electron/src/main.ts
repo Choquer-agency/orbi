@@ -78,6 +78,27 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  // Belt-and-suspenders for OAuth: if any code navigates the main window away
+  // from our dev server / packaged file, bounce it to the system browser
+  // instead so the user can never get stranded on a third-party login page.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    try {
+      const target = new URL(url);
+      const current = mainWindow?.webContents.getURL();
+      const allowed =
+        target.hostname === 'localhost' ||
+        target.hostname === '127.0.0.1' ||
+        target.protocol === 'file:' ||
+        (current ? new URL(current).origin === target.origin : false);
+      if (!allowed) {
+        event.preventDefault();
+        shell.openExternal(url);
+      }
+    } catch {
+      // ignore
+    }
+  });
 }
 
 function createTray() {
@@ -157,6 +178,19 @@ ipcMain.handle('set-auto-launch', (_event, enabled: boolean) => {
 });
 
 ipcMain.handle('get-auto-launch', () => store.get('autoLaunch'));
+
+ipcMain.handle('open-external', (_event, url: string) => {
+  // Renderer can ask us to bounce a URL out to the system browser. Used for
+  // OAuth flows so the provider login page doesn't hijack the main window.
+  try {
+    const u = new URL(url);
+    if (u.protocol === 'https:' || u.protocol === 'http:') {
+      shell.openExternal(url);
+    }
+  } catch {
+    // ignore non-URL strings
+  }
+});
 
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {

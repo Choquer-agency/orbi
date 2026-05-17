@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
@@ -19,17 +19,36 @@ function shapeContact(c: any) {
  */
 export function useContactNameResolver() {
   const { isAuthenticated } = useConvexAuth();
-  const nameMap = useQuery(api.contacts.nameMap, isAuthenticated ? {} : 'skip');
+  // The backend returns an array of { email, name } pairs (objects can't have
+  // more than 1024 fields in a Convex response, and most accounts blow past
+  // that as soon as a real mailbox is synced). Build a lookup Map locally.
+  const entries = useQuery(api.contacts.nameMap, isAuthenticated ? {} : 'skip');
+  const lookup = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const e of entries ?? []) {
+      m.set(e.email, e.name);
+    }
+    return m;
+  }, [entries]);
 
   const resolveName = useCallback(
     (fromAddress: string | undefined | null, fromName: string | undefined | null): string => {
-      if (!fromAddress) return fromName || 'Unknown';
-      const map = nameMap ?? {};
-      const resolved = map[fromAddress.toLowerCase()];
-      if (resolved) return resolved;
-      return fromName || fromAddress;
+      if (fromName && fromName.trim()) return fromName.trim();
+      if (fromAddress && fromAddress.trim()) {
+        const resolved = lookup.get(fromAddress.toLowerCase());
+        if (resolved) return resolved;
+        // Derive a friendly name from the email domain for bare addresses
+        // (e.g., "noreply@advicahealth.com" → "Advica Health")
+        const at = fromAddress.indexOf('@');
+        if (at > 0) {
+          const domain = fromAddress.slice(at + 1).split('.')[0];
+          if (domain) return domain.charAt(0).toUpperCase() + domain.slice(1);
+        }
+        return fromAddress;
+      }
+      return '—';
     },
-    [nameMap],
+    [lookup],
   );
 
   return resolveName;

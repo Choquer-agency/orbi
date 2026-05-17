@@ -16,6 +16,13 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* Path aliases (kept in sync with vite.config.ts) */
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"],
+      "@convex/*": ["../../convex/*"]
+    },
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,

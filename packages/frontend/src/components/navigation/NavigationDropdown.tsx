@@ -8,14 +8,12 @@ import {
   Settings,
   Menu,
   RefreshCw,
-  Trash2,
   Download,
-  Check,
   Loader2,
   X,
 } from 'lucide-react';
 import { useUiStore } from '../../stores/uiStore';
-import { useAccounts, useStartOAuth, useDeleteAccount, useSyncAccount } from '../../hooks/useAccounts';
+import { useAccounts, useStartOAuth, useSyncAccount } from '../../hooks/useAccounts';
 import { useHistoricalSyncStatus, useStartHistoricalSync } from '../../hooks/useHistoricalSync';
 import { useDraftCount } from '../../hooks/useDrafts';
 import { DASHBOARD_ITEM, FOLDERS, SMART_FOLDERS, TRIAGE_FOLDERS, getAccountColor } from '../../lib/constants';
@@ -34,7 +32,6 @@ function AccountItem({
   onSelect: () => void;
 }) {
   const syncAccount = useSyncAccount();
-  const deleteAccount = useDeleteAccount();
   const startHistoricalSync = useStartHistoricalSync();
   const { data: syncStatusData } = useHistoricalSyncStatus(account.id);
   const syncStatus = syncStatusData?.data;
@@ -54,10 +51,20 @@ function AccountItem({
     >
       <span
         className="h-2.5 w-2.5 shrink-0 rounded-full"
-        style={{ backgroundColor: getAccountColor(index) }}
+        style={{ backgroundColor: account.color ?? getAccountColor(index) }}
       />
       <div className="flex-1 min-w-0">
-        <span className="block truncate">{account.email}</span>
+        {/* Prefer the user-given label; fall back to the address. The address
+            still shows as a smaller secondary line so the user can tell which
+            inbox a renamed account refers to. */}
+        <span className="block truncate font-medium">
+          {account.displayName?.trim() || account.email}
+        </span>
+        {account.displayName?.trim() && (
+          <span className="block truncate text-[11px] text-text-tertiary">
+            {account.email}
+          </span>
+        )}
         {isImporting && progress && (
           <span className="flex items-center gap-1 text-[11px] text-text-tertiary">
             <Loader2 className="h-3 w-3 animate-spin" />
@@ -82,11 +89,6 @@ function AccountItem({
             <Download className="h-3 w-3 text-text-tertiary" />
           </button>
         )}
-        {isCompleted && (
-          <span title="All email synced">
-            <Check className="h-3 w-3 text-green-500" />
-          </span>
-        )}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -95,24 +97,11 @@ function AccountItem({
               onError: () => toast.error('Sync failed'),
             });
           }}
-          className="rounded p-0.5 hover:bg-surface"
+          className="group/sync rounded p-0.5 transition-colors hover:bg-surface"
           title="Sync now"
           aria-label="Sync now"
         >
-          <RefreshCw className="h-3 w-3 text-text-tertiary" />
-        </button>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            if (confirm('Remove this account?')) {
-              deleteAccount.mutate(account.id);
-            }
-          }}
-          className="rounded p-0.5 hover:bg-surface"
-          title="Remove account"
-          aria-label="Remove account"
-        >
-          <Trash2 className="h-3 w-3 text-text-tertiary" />
+          <RefreshCw className="h-3 w-3 text-text-tertiary transition-colors group-hover/sync:text-primary" />
         </button>
       </span>
     </DropdownMenu.Item>
@@ -129,7 +118,10 @@ export function NavigationDropdown() {
     setNavDropdownOpen,
   } = useUiStore();
   const { data: accountsData } = useAccounts();
-  const accounts = accountsData?.data ?? [];
+  // useAccounts() returns { data: <array> } — `accountsData` IS the array.
+  // The previous `accountsData?.data` lookup was undefined, which left this
+  // dropdown silently empty under the Accounts section.
+  const accounts = (accountsData ?? []) as any[];
   const startOAuth = useStartOAuth();
   const { data: draftCountData } = useDraftCount();
   const draftCount = draftCountData?.data?.count ?? 0;

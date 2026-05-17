@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { ChevronLeft, ChevronRight, LogOut, UserCircle, FolderInput, Pen, FileSignature, Bell, Filter, Columns3, ShieldBan, Plane, TextQuote, Shield } from 'lucide-react';
+import { useState, type ComponentType, type SVGProps } from 'react';
+import { ChevronLeft, ChevronRight, LogOut, UserCircle, FolderInput, Pen, Bell, Filter, Columns3, ShieldBan, Plane, TextQuote, Shield } from 'lucide-react';
+import { SignatureIcon } from '../icons/SignatureIcon';
 import { useAuthStore } from '../../stores/authStore';
 import { getInitials } from '../../lib/utils';
 import { ProfileSettings } from './ProfileSettings';
@@ -18,7 +19,7 @@ import { GeneralSettings } from './GeneralSettings';
 interface SectionItem {
   id: string;
   label: string;
-  icon: typeof UserCircle;
+  icon: ComponentType<SVGProps<SVGSVGElement> & { className?: string }>;
 }
 
 interface SectionGroup {
@@ -39,7 +40,7 @@ const SECTION_GROUPS: SectionGroup[] = [
     title: 'Compose',
     items: [
       { id: 'writing', label: 'Writing Style', icon: Pen },
-      { id: 'signatures', label: 'Signatures', icon: FileSignature },
+      { id: 'signatures', label: 'Signatures', icon: SignatureIcon },
       { id: 'snippets', label: 'Snippets', icon: TextQuote },
     ],
   },

@@ -30,11 +30,15 @@ import {
   ShieldBan,
   MailOpen,
   Eye,
+  ChevronDown,
+  Ban,
 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
+import * as Dialog from '@radix-ui/react-dialog';
 import * as ScrollArea from '@radix-ui/react-scroll-area';
 import { useThread, useUpdateThread } from '../../hooks/useThreads';
-import { TriageBanner } from './TriageBanner';
+import { TriageBanner, SenderRuleDialog } from './TriageBanner';
+import { useTriageFeedback } from '../../hooks/useTriage';
 import { DeliveryStatus } from './DeliveryStatus';
 import { TriageCategoryPill } from './TriageCategoryPill';
 import { useAddComment } from '../../hooks/useComments';
@@ -49,27 +53,32 @@ import { ContactCard } from '../contacts/ContactCard';
 import { useContactAutocomplete, useContactNameResolver } from '../../hooks/useContacts';
 import { useThreadScheduledEmails, useSendScheduledNow, useCancelScheduledEmail } from '../../hooks/useScheduledEmails';
 import { useUndoSendStore } from '../../stores/undoSendStore';
-import { useBlockSender } from '../../hooks/useBlockedSenders';
+import { useBlockSender, useBlockedSenders, useUnblockSender } from '../../hooks/useBlockedSenders';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { haptic } from '../../lib/haptics';
 import { ImageLightbox } from './ImageLightbox';
 import DOMPurify from 'dompurify';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation as useConvexMutation, useQuery as useConvexQuery } from 'convex/react';
 import { api } from '../../lib/api';
+import { convex } from '../../lib/convex';
+import { api as convexApi } from '../../../../../convex/_generated/api';
+import type { Id } from '../../../../../convex/_generated/dataModel';
 import toast from 'react-hot-toast';
 
 // Team domain — emails from this domain get the pastel triangle
 const TEAM_DOMAIN = 'orbi.agency';
 
 function SendFailedBanner({ emailId, error, attempts }: { emailId: string; error?: string | null; attempts?: number }) {
-  const queryClient = useQueryClient();
+  const retrySendMutation = useConvexMutation(convexApi.emails.retrySend);
   const retry = useMutation({
-    mutationFn: () => api.post(`/emails/${emailId}/retry`),
+    mutationFn: () => retrySendMutation({ emailId: emailId as Id<'emails'> }),
     onSuccess: () => {
       toast.success('Retry queued — sending again');
-      queryClient.invalidateQueries({ queryKey: ['thread'] });
+      // Convex queries are reactive; no manual cache invalidation needed.
     },
-    onError: () => toast.error('Failed to queue retry'),
+    onError: (err: unknown) =>
+      toast.error(err instanceof Error ? err.message : 'Failed to queue retry'),
   });
 
   return (
@@ -101,6 +110,9 @@ function SendFailedBanner({ emailId, error, attempts }: { emailId: string; error
 }
 
 // Strip all on* event handler attributes from sanitized HTML
+// and force every <a> to open externally (in Electron, this routes to
+// shell.openExternal via setWindowOpenHandler instead of trying to
+// navigate the renderer away from the app).
 DOMPurify.addHook('afterSanitizeAttributes', (node) => {
   if (node.attributes) {
     for (const attr of Array.from(node.attributes)) {
@@ -109,7 +121,42 @@ DOMPurify.addHook('afterSanitizeAttributes', (node) => {
       }
     }
   }
+  if (node.nodeName === 'A') {
+    (node as Element).setAttribute('target', '_blank');
+    (node as Element).setAttribute('rel', 'noopener noreferrer');
+  }
 });
+
+// Wrap bare URLs in text nodes with <a> tags so they're clickable.
+const URL_RE = /\b(https?:\/\/[^\s<>"']+)/g;
+function autoLinkify(html: string): string {
+  if (!html) return html;
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+  const textNodes: Text[] = [];
+  let n: Node | null;
+  while ((n = walker.nextNode())) textNodes.push(n as Text);
+  for (const tn of textNodes) {
+    if (tn.parentElement?.closest('a, script, style')) continue;
+    const text = tn.nodeValue || '';
+    if (!URL_RE.test(text)) continue;
+    URL_RE.lastIndex = 0;
+    const frag = doc.createDocumentFragment();
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = URL_RE.exec(text))) {
+      if (m.index > last) frag.appendChild(doc.createTextNode(text.slice(last, m.index)));
+      const a = doc.createElement('a');
+      a.href = m[1];
+      a.textContent = m[1];
+      frag.appendChild(a);
+      last = m.index + m[1].length;
+    }
+    if (last < text.length) frag.appendChild(doc.createTextNode(text.slice(last)));
+    tn.parentNode?.replaceChild(frag, tn);
+  }
+  return doc.body.innerHTML;
+}
 
 /**
  * Strip quoted/forwarded content from email HTML.
@@ -226,6 +273,247 @@ function stripQuotedContent(html: string): { body: string; hasQuoted: boolean } 
 }
 
 /**
+ * Split an email body into separate "cards" at each quoted-reply boundary.
+ * For a fresh email with no quoted content, returns [html] (one card).
+ * For a reply that contains the previous email inline, returns [reply, previous].
+ * Handles nested quotes recursively (chains of replies → 3+ cards).
+ */
+function splitIntoCards(html: string): string[] {
+  if (!html) return [];
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  // Patterns identical to stripQuotedContent — keep the two in sync.
+  const quoteStartPatterns = [
+    /On\s+.{5,120}\s+wrote:\s*$/,
+    /wrote:\s*$/,
+    /^-{3,}\s*(Forwarded|Original)\s*(message|Message)/i,
+    /^_{5,}/,
+    /^Begin forwarded message/i,
+  ];
+  const headerPattern = /^From:\s+.+/im;
+  const sentPattern = /^Sent:\s+.+/im;
+
+  // Try to find a "cut element" — first element that begins a quoted block.
+  // Returns null if no quote found.
+  function findCutEl(body: HTMLElement): Element | null {
+    // Phase 1: well-known wrapper elements (these mark the START of quoted content).
+    const wrappers = body.querySelectorAll([
+      '.gmail_quote', '.gmail_extra',
+      '#appendonsend', '#divRplyFwdMsg', '[name="divRplyFwdMsg"]',
+      '.yahoo_quoted',
+      'blockquote[type="cite"]', 'blockquote.cite',
+    ].join(','));
+    if (wrappers.length > 0) return wrappers[0];
+
+    // Phase 2: text-marker scan
+    const allEls = Array.from(body.querySelectorAll('*'));
+    for (const el of allEls) {
+      const fullText = (el.textContent ?? '').trim();
+      if (fullText.length < 3) continue;
+      if (fullText.length < 500 && headerPattern.test(fullText) && sentPattern.test(fullText)) {
+        return el;
+      }
+      const directText = Array.from(el.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent?.trim() ?? '')
+        .join(' ')
+        .trim();
+      if (directText.length < 3) continue;
+      if (quoteStartPatterns.some((p) => p.test(directText))) return el;
+    }
+    return null;
+  }
+
+  const fragments: string[] = [];
+  let currentBody: HTMLElement = doc.body;
+  let safety = 8; // never produce more than 8 cards (chains of forwards rarely exceed this)
+
+  while (safety-- > 0) {
+    const cutEl = findCutEl(currentBody);
+    if (!cutEl) {
+      const remaining = currentBody.innerHTML.trim();
+      if (remaining.length > 0) fragments.push(remaining);
+      break;
+    }
+
+    // Walk up from cutEl to find a target ancestor that isn't the body and
+    // doesn't engulf 90%+ of the document (heuristic from stripQuotedContent).
+    let target: Element = cutEl;
+    const bodyLen = currentBody.innerHTML.length;
+    while (target.parentElement && target.parentElement !== currentBody) {
+      if (target.parentElement.innerHTML.length > bodyLen * 0.85) break;
+      target = target.parentElement;
+    }
+
+    // Clone the body to a working DOM, remove [target..end] for the "before" fragment.
+    const beforeDoc = parser.parseFromString(currentBody.innerHTML, 'text/html');
+    // Locate the corresponding target in the cloned doc by index path.
+    const findCutInClone = findCutEl(beforeDoc.body);
+    if (!findCutInClone) {
+      // Shouldn't happen; bail to avoid infinite loop.
+      fragments.push(currentBody.innerHTML);
+      break;
+    }
+    let cloneTarget: Element = findCutInClone;
+    while (cloneTarget.parentElement && cloneTarget.parentElement !== beforeDoc.body) {
+      if (cloneTarget.parentElement.innerHTML.length > beforeDoc.body.innerHTML.length * 0.85) break;
+      cloneTarget = cloneTarget.parentElement;
+    }
+    let next: Element | null = cloneTarget;
+    while (next) {
+      const toRemove = next;
+      next = next.nextElementSibling;
+      toRemove.remove();
+    }
+    const beforeHtml = beforeDoc.body.innerHTML.trim();
+    if (beforeHtml.length > 0) fragments.push(beforeHtml);
+
+    // For the "after" fragment, capture target + following siblings.
+    // Strip the leading "On ... wrote:" attribution line if it sits as a sibling
+    // before the actual quoted body.
+    const afterDoc = parser.parseFromString(currentBody.innerHTML, 'text/html');
+    const afterCut = findCutEl(afterDoc.body);
+    if (!afterCut) break;
+    let afterTarget: Element = afterCut;
+    while (afterTarget.parentElement && afterTarget.parentElement !== afterDoc.body) {
+      if (afterTarget.parentElement.innerHTML.length > afterDoc.body.innerHTML.length * 0.85) break;
+      afterTarget = afterTarget.parentElement;
+    }
+    // Remove everything BEFORE afterTarget from the body so what remains is the quoted block + tail.
+    let prev: Element | null = afterTarget.previousElementSibling;
+    while (prev) {
+      const toRemove = prev;
+      prev = prev.previousElementSibling;
+      toRemove.remove();
+    }
+    // If the target is a Gmail .gmail_quote wrapper, unwrap one level so the
+    // inner content can be re-split for nested quotes.
+    if (afterTarget.classList?.contains('gmail_quote') || afterTarget.tagName.toLowerCase() === 'blockquote') {
+      // Use the inner HTML so nested quotes can be detected.
+      currentBody = afterDoc.createElement('div');
+      currentBody.innerHTML = afterTarget.innerHTML;
+    } else {
+      currentBody = afterDoc.body;
+    }
+  }
+
+  return fragments.length > 0 ? fragments : [html];
+}
+
+/**
+ * Parse the attribution line ("On <date> <person> <email> wrote:" or
+ * Outlook-style "From: ... Sent: ...") at the top of a quoted email fragment.
+ * Returns attribution metadata + the body with the attribution line stripped.
+ */
+function extractAttributionAndBody(html: string): {
+  senderName?: string;
+  senderEmail?: string;
+  date?: string;
+  body: string;
+} {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const text = doc.body.textContent ?? '';
+
+  // Patterns
+  const gmailMatch = text.match(
+    /On\s+([^<\n]{5,150}?)\s+([^<\n]{1,80}?)\s*<([^>\s]+@[^>\s]+)>\s*wrote:/i,
+  );
+  const fromMatch = text.match(/From:\s*([^<\n]+?)\s*<([^>\s]+@[^>\s]+)>/);
+  const sentMatch = text.match(/Sent:\s*([^\n]+)/);
+
+  let senderName: string | undefined;
+  let senderEmail: string | undefined;
+  let date: string | undefined;
+
+  if (gmailMatch) {
+    date = gmailMatch[1].trim().replace(/\s+/g, ' ').replace(/[,\s]+$/, '');
+    senderName = gmailMatch[2].trim();
+    senderEmail = gmailMatch[3].trim();
+  } else if (fromMatch) {
+    senderName = fromMatch[1].trim();
+    senderEmail = fromMatch[2].trim();
+    date = sentMatch?.[1].trim();
+  }
+
+  // Strip the attribution element so the body doesn't duplicate it.
+  const attrPattern = /(On\s+[^<\n]{5,150}\s+[^<\n]{1,80}\s*<[^>]+>\s*wrote:|From:\s+[^<\n]+\s*<[^>]+>)/i;
+  const allEls = Array.from(doc.body.querySelectorAll('*'));
+  for (const el of allEls) {
+    const t = (el.textContent ?? '').trim();
+    if (t.length > 0 && t.length < 500 && attrPattern.test(t)) {
+      // Only remove if this element is "small" — don't accidentally remove the whole body
+      if ((el.innerHTML ?? '').length < 1500) {
+        el.remove();
+        break;
+      }
+    }
+  }
+
+  return { senderName, senderEmail, date, body: doc.body.innerHTML.trim() };
+}
+
+/**
+ * Try to parse a date string into a millis timestamp. Falls back to null on
+ * unparseable input.
+ */
+function parseDateGuess(s?: string): number | null {
+  if (!s) return null;
+  const t = Date.parse(s);
+  if (!Number.isNaN(t)) return t;
+  // Try replacing "at" → " "
+  const t2 = Date.parse(s.replace(/\s+at\s+/i, ' '));
+  if (!Number.isNaN(t2)) return t2;
+  return null;
+}
+
+/**
+ * Expand an email containing quoted history into one synthetic email per
+ * historical message, so they render as peer cards in the timeline.
+ *
+ * Returns [original (with quoted stripped), ...syntheticOlderEmails].
+ * Synthetic emails have id like "<originalId>__q1", a `synthetic: true`
+ * flag, parsed sender from the attribution line, and the corresponding
+ * body fragment.
+ */
+function expandEmailWithQuotedHistory(email: any): any[] {
+  const html = email.bodyHtml as string | null | undefined;
+  if (!html) return [email];
+  const fragments = splitIntoCards(html);
+  if (fragments.length <= 1) return [email];
+
+  // First fragment = the main email's user-visible content.
+  const main = { ...email, bodyHtml: fragments[0] };
+
+  const synthetics: any[] = [];
+  let parentReceivedAt = email.receivedAt
+    ? new Date(email.receivedAt).getTime()
+    : Date.now();
+
+  for (let i = 1; i < fragments.length; i++) {
+    const { senderName, senderEmail, date, body } = extractAttributionAndBody(
+      fragments[i],
+    );
+    const ts = parseDateGuess(date) ?? parentReceivedAt - 60_000 * i;
+    parentReceivedAt = ts;
+    synthetics.push({
+      ...email,
+      id: `${email.id}__q${i}`,
+      synthetic: true,
+      fromAddress: senderEmail ?? email.fromAddress,
+      fromName: senderName ?? email.fromName,
+      receivedAt: new Date(ts).toISOString(),
+      bodyHtml: body,
+      bodyText: null,
+      attachments: [],
+    });
+  }
+
+  return [main, ...synthetics];
+}
+
+/**
  * Strip quoted content from plain text emails.
  */
 function stripQuotedText(text: string): { body: string; hasQuoted: boolean } {
@@ -318,28 +606,28 @@ function formatFileSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Download an attachment via authenticated fetch */
-function downloadAttachment(emailId: string, attachmentId: string, filename: string) {
-  const stored = localStorage.getItem('orbi-auth');
-  const token = stored ? JSON.parse(stored)?.state?.token : null;
-  fetch(`/api/emails/${emailId}/attachments/${attachmentId}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  })
-    .then((res) => {
-      if (!res.ok) throw new Error('Download failed');
-      return res.blob();
-    })
-    .then((blob) => {
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      a.click();
-      URL.revokeObjectURL(url);
-    })
-    .catch(() => {
-      // silent fail — could add toast here later
+/** Download an attachment via Convex (fetches from Gmail/Microsoft on first download). */
+async function downloadAttachment(_emailId: string, attachmentId: string, filename: string) {
+  try {
+    const { url } = await convex.action(convexApi.emails.downloadAttachment, {
+      attachmentId: attachmentId as Id<'attachments'>,
     });
+    if (!url) throw new Error('No URL');
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Fetch failed');
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  } catch (err) {
+    toast.error('Download failed');
+    console.error('downloadAttachment error:', err);
+  }
 }
 
 /** Check if a file type supports inline preview */
@@ -352,12 +640,12 @@ function isPreviewable(mimeType: string, filename: string): boolean {
 }
 
 /** Fetch attachment as blob URL for preview */
-async function fetchAttachmentBlob(emailId: string, attachmentId: string): Promise<string> {
-  const stored = localStorage.getItem('orbi-auth');
-  const token = stored ? JSON.parse(stored)?.state?.token : null;
-  const res = await fetch(`/api/emails/${emailId}/attachments/${attachmentId}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
+async function fetchAttachmentBlob(_emailId: string, attachmentId: string): Promise<string> {
+  const { url } = await convex.action(convexApi.emails.downloadAttachment, {
+    attachmentId: attachmentId as Id<'attachments'>,
   });
+  if (!url) throw new Error('Preview failed');
+  const res = await fetch(url);
   if (!res.ok) throw new Error('Preview failed');
   const blob = await res.blob();
   return URL.createObjectURL(blob);
@@ -375,12 +663,15 @@ function AttachmentPreview({ emailId, attachment, onClose }: {
 
   useEffect(() => {
     let cancelled = false;
-    const stored = localStorage.getItem('orbi-auth');
-    const token = stored ? JSON.parse(stored)?.state?.token : null;
 
-    fetch(`/api/emails/${emailId}/attachments/${attachment.id}`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
+    convex
+      .action(convexApi.emails.downloadAttachment, {
+        attachmentId: attachment.id as Id<'attachments'>,
+      })
+      .then(({ url }) => {
+        if (!url) throw new Error('Preview failed');
+        return fetch(url);
+      })
       .then((res) => {
         if (!res.ok) throw new Error('Preview failed');
         // For text files, read as text
@@ -474,32 +765,29 @@ function CollapsedEmailBody({ bodyHtml, bodyText, highlightText, emailId, attach
   const [showQuoted, setShowQuoted] = useState(false);
   const scopeId = useMemo(() => `email-${emailId.slice(0, 8)}`, [emailId]);
 
-  // Resolve cid: images by fetching attachments with auth and creating blob URLs
+  // Resolve cid: images by asking Convex for a signed URL and assigning it
+  // to the <img>. The Convex `downloadAttachment` action also handles the
+  // "not yet in Convex storage" case — it pulls the bytes from Gmail/Microsoft
+  // on first request and caches them — so we don't need to fetch + blob URL
+  // ourselves.
   useEffect(() => {
     const container = bodyRef.current;
     if (!container) return;
     const cidImgs = container.querySelectorAll('img[data-cid-attachment]');
-    const blobUrls: string[] = [];
     const cidSet = new WeakSet<Element>();
+    let cancelled = false;
 
     cidImgs.forEach((img) => {
       cidSet.add(img);
-      const attEmailId = img.getAttribute('data-cid-email');
       const attId = img.getAttribute('data-cid-attachment');
-      if (!attEmailId || !attId) return;
+      if (!attId) return;
 
-      const stored = localStorage.getItem('orbi-auth');
-      const token = stored ? JSON.parse(stored)?.state?.token : null;
-      fetch(`/api/emails/${attEmailId}/attachments/${attId}`, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-      })
-        .then((res) => {
-          if (!res.ok) throw new Error('Failed to load');
-          return res.blob();
+      convex
+        .action(convexApi.emails.downloadAttachment, {
+          attachmentId: attId as Id<'attachments'>,
         })
-        .then((blob) => {
-          const url = URL.createObjectURL(blob);
-          blobUrls.push(url);
+        .then(({ url }) => {
+          if (cancelled || !url) return;
           (img as HTMLImageElement).src = url;
         })
         .catch(() => {
@@ -518,7 +806,7 @@ function CollapsedEmailBody({ bodyHtml, bodyText, highlightText, emailId, attach
     });
 
     return () => {
-      blobUrls.forEach((url) => URL.revokeObjectURL(url));
+      cancelled = true;
       errorHandlers.forEach(([img, handler]) => img.removeEventListener('error', handler));
     };
   });
@@ -599,20 +887,15 @@ function CollapsedEmailBody({ bodyHtml, bodyText, highlightText, emailId, attach
 
   const sanitizedHtml = useMemo(() => {
     if (!displayHtml) return null;
-
-    // Mark cid: images for later resolution via authenticated fetch
     let resolved = markCidImages(displayHtml, emailId, attachments);
-
-    // Scope <style> blocks to this email's container before sanitizing
     resolved = scopeStyles(resolved, scopeId);
-
+    resolved = autoLinkify(resolved);
     let cleaned = DOMPurify.sanitize(resolved, {
       FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'textarea', 'select', 'button'],
       ADD_TAGS: ['style', 'img'],
-      ADD_ATTR: ['src', 'alt', 'width', 'height', 'border', 'align', 'valign', 'bgcolor', 'background', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'data-cid-email', 'data-cid-attachment', 'referrerpolicy'],
+      ADD_ATTR: ['src', 'alt', 'width', 'height', 'border', 'align', 'valign', 'bgcolor', 'background', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'data-cid-email', 'data-cid-attachment', 'referrerpolicy', 'target', 'rel'],
       ADD_DATA_URI_TAGS: ['img'],
     });
-    // Prevent external image servers from rejecting based on Referer header
     cleaned = cleaned.replace(/<img /gi, '<img referrerpolicy="no-referrer" ');
     if (highlightText) {
       cleaned = injectHighlight(cleaned, highlightText);
@@ -626,7 +909,7 @@ function CollapsedEmailBody({ bodyHtml, bodyText, highlightText, emailId, attach
         <div
           id={scopeId}
           ref={bodyRef}
-          className="email-body-inline text-[14px] leading-relaxed text-text-primary [&_img]:max-w-full [&_img]:h-auto [&_a]:text-[#1a73e8] [&_table]:max-w-full [&_pre]:overflow-x-auto [&_pre]:max-w-full"
+          className="email-body-inline text-[14px] leading-relaxed text-text-primary break-words [overflow-wrap:anywhere] [&_img]:max-w-full [&_img]:h-auto [&_a]:text-[#1a73e8] [&_a]:underline [&_a]:cursor-pointer [&_table]:max-w-full [&_pre]:overflow-x-auto [&_pre]:max-w-full [&_pre]:whitespace-pre-wrap"
           dangerouslySetInnerHTML={{ __html: sanitizedHtml }}
         />
       ) : displayText ? (
@@ -641,7 +924,28 @@ function CollapsedEmailBody({ bodyHtml, bodyText, highlightText, emailId, attach
               : displayText.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
           }}
         />
-      ) : null}
+      ) : (
+        <div className="rounded-md bg-surface px-3 py-2 text-[12px] italic text-text-tertiary">
+          (No body content yet.)
+          <button
+            onClick={async () => {
+              try {
+                const result = await convex.action(convexApi.sync.gmail.refreshEmail, {
+                  emailId: emailId as Id<'emails'>,
+                });
+                if (!result.ok) toast.error(result.reason || 'Refresh failed');
+                else toast.success('Refreshed');
+              } catch (err) {
+                toast.error('Refresh failed');
+                console.error(err);
+              }
+            }}
+            className="ml-2 rounded-md border border-border bg-white px-2 py-0.5 text-[11px] font-medium not-italic text-text-secondary transition-colors hover:bg-surface"
+          >
+            Re-fetch from Gmail
+          </button>
+        </div>
+      )}
       {hasQuoted && (
         <button
           onClick={() => setShowQuoted(!showQuoted)}
@@ -655,6 +959,66 @@ function CollapsedEmailBody({ bodyHtml, bodyText, highlightText, emailId, attach
 }
 
 
+/**
+ * Self-healing component for threads that loaded with no email rows.
+ * Automatically calls refreshThread once on mount, shows a loading state.
+ * Convex queries are reactive — when refreshThread inserts emails, the
+ * parent's `useThread` query re-runs and timeline.length becomes > 0,
+ * which unmounts this component.
+ */
+function BlankThreadAutoFix({ threadId }: { threadId: Id<'threads'> }) {
+  const [status, setStatus] = useState<'fetching' | 'failed' | 'noEmails'>('fetching');
+  const triggered = useRef(false);
+
+  useEffect(() => {
+    if (triggered.current) return;
+    triggered.current = true;
+    let cancelled = false;
+    (async () => {
+      try {
+        const result = await convex.action(
+          convexApi.sync.gmail.refreshThread,
+          { threadId },
+        );
+        if (cancelled) return;
+        if (!result.ok) setStatus('failed');
+        else setStatus('noEmails'); // success but might still be empty (e.g., truly no body)
+      } catch (err) {
+        if (!cancelled) setStatus('failed');
+        console.error('Auto-refetch failed:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [threadId]);
+
+  if (status === 'fetching') {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="text-[12px] text-text-tertiary">Loading messages…</div>
+      </div>
+    );
+  }
+  if (status === 'failed') {
+    return (
+      <div className="rounded-lg border border-dashed border-border bg-white px-5 py-8 text-center">
+        <p className="mb-2 text-sm text-text-secondary">Couldn't load messages.</p>
+        <button
+          onClick={() => { triggered.current = false; setStatus('fetching'); }}
+          className="rounded-md border border-border bg-white px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-surface"
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+  // noEmails — refetch ran successfully but the thread is genuinely empty
+  return (
+    <div className="rounded-lg border border-dashed border-border bg-white px-5 py-8 text-center">
+      <p className="text-sm text-text-secondary">This thread has no messages.</p>
+    </div>
+  );
+}
+
 type TimelineItem =
   | { type: 'email'; timestamp: string; data: any }
   | { type: 'comment'; timestamp: string; data: any }
@@ -662,6 +1026,31 @@ type TimelineItem =
 
 interface EmailViewerProps {
   onBack?: () => void;
+}
+
+/** Pill rendering a name + email, copies the email to clipboard on click. */
+function AddressChip({
+  name,
+  email,
+  onCopy,
+}: {
+  name?: string | null;
+  email: string;
+  onCopy: (email: string, e: React.MouseEvent) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => onCopy(email, e)}
+      title={`Copy ${email}`}
+      className="group/chip inline-flex items-center gap-1.5 rounded-md border border-transparent bg-white px-2 py-0.5 text-[11px] text-text-secondary transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+    >
+      {name && name !== email && (
+        <span className="font-medium text-text-primary group-hover/chip:text-primary">{name}</span>
+      )}
+      <span className="text-text-tertiary group-hover/chip:text-primary/80">{email}</span>
+    </button>
+  );
 }
 
 // Determine left border accent color: you → brand orange, team → pastel, external → none
@@ -798,7 +1187,25 @@ function injectHighlight(html: string, text: string): string {
 }
 
 export function EmailViewer({ onBack }: EmailViewerProps) {
-  const { selectedThreadId, pendingDraft, setPendingDraft, highlightText, setHighlightText, scrollToScheduled, setScrollToScheduled, editingScheduledId, setEditingScheduledId, composingNew, setComposingNew, pendingReplyMode, setPendingReplyMode } = useUiStore();
+  const { selectedThreadId, setSelectedThread, pendingDraft, setPendingDraft, highlightText, setHighlightText, scrollToScheduled, setScrollToScheduled, editingScheduledId, setEditingScheduledId, composingNew, setComposingNew, pendingReplyMode, setPendingReplyMode } = useUiStore();
+  const [blockOpen, setBlockOpen] = useState(false);
+  // Per-sender / per-domain "send to spam forever" prompt — fires from the
+  // Mark-as-spam button on the email viewer toolbar. Distinct from Block
+  // (which trashes future mail) because spam mail is still retrievable.
+  const [spamRuleOpen, setSpamRuleOpen] = useState(false);
+  const triageFeedback = useTriageFeedback();
+  // Needs Response: per-thread open-signal flag drives the Done button in
+  // the toolbar; the mutation clears it. Query is skipped until we have a
+  // selected thread to avoid an extra request on the dashboard.
+  const needsResponseOpen = useConvexQuery(
+    convexApi.needsResponse.hasOpenForThread,
+    selectedThreadId
+      ? { threadId: selectedThreadId as Id<'threads'> }
+      : 'skip',
+  );
+  const dismissNeedsResponse = useConvexMutation(
+    convexApi.needsResponse.dismissThread,
+  );
   const { user } = useAuthStore();
   const { data: accountsData } = useAccounts();
   const resolveName = useContactNameResolver();
@@ -809,6 +1216,8 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const updateThread = useUpdateThread();
   const addComment = useAddComment();
   const blockSender = useBlockSender();
+  const unblockSender = useUnblockSender();
+  const { data: blockedSenders } = useBlockedSenders();
   const scheduledEmails = useThreadScheduledEmails(selectedThreadId);
   const { addPendingEmail } = useUndoSendStore();
   const UNDO_WINDOW_SECONDS = 10;
@@ -828,7 +1237,35 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const contactCardData = contactLookup.data?.data?.find((c: any) => c.email === contactCardEmail);
   const [previewAttachment, setPreviewAttachment] = useState<{ emailId: string; attachment: any } | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; alt?: string } | null>(null);
+  const [expandedHeaderIds, setExpandedHeaderIds] = useState<Set<string>>(new Set());
+  const [composeExpanded, setComposeExpanded] = useState(false);
+  // Snapshot of emails that were unread when this thread was opened. Stays
+  // stable while the user is viewing the thread so the "latest" red dot
+  // doesn't disappear the moment Convex marks the row read.
+  const newOnOpenSnapshot = useRef<{ threadId: string | null; ids: Set<string> }>({
+    threadId: null,
+    ids: new Set(),
+  });
   const isMobile = useIsMobile();
+
+  const toggleExpandedHeader = useCallback((emailId: string) => {
+    setExpandedHeaderIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(emailId)) next.delete(emailId);
+      else next.add(emailId);
+      return next;
+    });
+  }, []);
+
+  const copyAddress = useCallback(async (email: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(email);
+      toast.success(`Copied ${email}`);
+    } catch {
+      toast.error('Failed to copy');
+    }
+  }, []);
 
   // Swipe-back gesture from left edge (iOS convention)
   const swipeBackRef = useRef<{ startX: number; startY: number; active: boolean; hapticFired: boolean } | null>(null);
@@ -1029,7 +1466,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     return () => window.removeEventListener('orbi:reply', handler);
   }, [selectedThreadId]);
 
-  // Merge emails + comments + scheduled emails into a single sorted timeline
+  // Merge emails + comments + scheduled emails into a single sorted timeline.
   const timeline = useMemo(() => {
     if (!data?.data) return [];
     const items: TimelineItem[] = [];
@@ -1091,11 +1528,15 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   if (!selectedThreadId) {
     if (composingNew) {
       // Use the user's default account, fall back to first synced account
-      const accounts = accountsData?.data ?? [];
+      const accounts = accountsData ?? [];
       const defaultAccId = useUiStore.getState().defaultAccountId;
       const defaultAccount = defaultAccId ? accounts.find((a: any) => a.id === defaultAccId) : null;
       const synced = accounts.find((a: any) => a.lastSyncAt);
       const firstAccountId = defaultAccount?.id ?? synced?.id ?? accounts[0]?.id;
+      // If the AI just dropped a fresh-email draft (no threadId), pre-fill the
+      // compose window with its to / subject / body. Without this the AI's
+      // payload would be ignored on a brand-new compose.
+      const aiDraft = pendingDraft && !pendingDraft.threadId ? pendingDraft : null;
       return (
         <div className="flex h-full flex-col bg-surface">
           <div className="flex items-center border-b border-border px-5 pt-[30px] pb-2">
@@ -1105,7 +1546,23 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           <ComposeInline
             mode="compose"
             accountId={firstAccountId}
-            onClose={() => setComposingNew(false)}
+            initialDraft={
+              aiDraft
+                ? {
+                    body: aiDraft.body,
+                    bodyHtml: aiDraft.bodyHtml,
+                    to: aiDraft.to,
+                    subject: aiDraft.subject,
+                  }
+                : undefined
+            }
+            aiOriginal={aiDraft?.aiOriginal}
+            onClose={() => {
+              setComposingNew(false);
+              if (pendingDraft) setPendingDraft(null);
+              setComposeExpanded(false);
+            }}
+            onExpandedChange={setComposeExpanded}
           />
         </div>
       );
@@ -1176,6 +1633,19 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   }
 
   const thread = data?.data;
+  // Capture the set of unread emails the first time we render this thread,
+  // and keep it stable while the user is still on it. Once they navigate to
+  // a different thread, the snapshot resets.
+  if (thread && newOnOpenSnapshot.current.threadId !== thread.id) {
+    newOnOpenSnapshot.current = {
+      threadId: thread.id,
+      ids: new Set(
+        (thread.emails ?? [])
+          .filter((e: any) => !e.isRead)
+          .map((e: any) => e.id),
+      ),
+    };
+  }
   if (isError || !thread) {
     return (
       <div className="flex h-full flex-col items-center justify-center bg-surface">
@@ -1262,7 +1732,10 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           </Tooltip>
           <Tooltip content="Archive">
             <button
-              onClick={() => updateThread.mutate({ id: thread.id, isArchived: true })}
+              onClick={() => {
+                updateThread.mutate({ id: thread.id, isArchived: true });
+                setSelectedThread(null);
+              }}
               className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary"
               aria-label="Archive"
             >
@@ -1271,7 +1744,10 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           </Tooltip>
           <Tooltip content="Delete">
             <button
-              onClick={() => updateThread.mutate({ id: thread.id, isTrashed: true })}
+              onClick={() => {
+                updateThread.mutate({ id: thread.id, isTrashed: true });
+                setSelectedThread(null);
+              }}
               className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-surface hover:text-unread"
               aria-label="Delete"
             >
@@ -1297,35 +1773,229 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               </button>
             </Tooltip>
           )}
+          {/* Mark this thread "done" for the Needs Response folder. Visible
+              only when an open signal exists, so it disappears the moment
+              the user dismisses (or replies / archives, which also dismiss). */}
+          {needsResponseOpen?.open && (
+            <Tooltip
+              content={needsResponseOpen.reason ?? "Mark as done"}
+            >
+              <button
+                onClick={async () => {
+                  try {
+                    await dismissNeedsResponse({ threadId: thread.id as Id<'threads'> });
+                    toast.success('Marked as done');
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : 'Failed to dismiss');
+                  }
+                }}
+                className="rounded-lg p-1.5 text-emerald-500 transition-colors hover:bg-emerald-50"
+                aria-label="Mark as done"
+              >
+                <CheckCircle2 className="h-3.5 w-3.5" />
+              </button>
+            </Tooltip>
+          )}
           {/* Block sender */}
           {thread.emails?.length > 0 && (() => {
             const senderEmail = thread.emails[thread.emails.length - 1]?.fromAddress;
             if (!senderEmail) return null;
             const senderDomain = senderEmail.split('@')[1];
+            const senderEmailLc = senderEmail.toLowerCase();
+            const senderDomainLc = senderDomain?.toLowerCase();
+            const addressBlock = blockedSenders?.find(
+              (b) => b.emailAddress && b.emailAddress.toLowerCase() === senderEmailLc,
+            );
+            const domainBlock = blockedSenders?.find(
+              (b) => b.domain && b.domain.toLowerCase() === senderDomainLc,
+            );
+            const isBlocked = !!(addressBlock || domainBlock);
+            const runBlock = (mode: 'address' | 'domain') => {
+              const payload = mode === 'domain'
+                ? { domain: senderDomain, reason: `Blocked from thread: ${thread.subject}` }
+                : { emailAddress: senderEmail, reason: `Blocked from thread: ${thread.subject}` };
+              blockSender.mutate(payload, {
+                onSuccess: () => {
+                  toast.success(
+                    mode === 'domain'
+                      ? `Blocked all senders @${senderDomain}`
+                      : `Blocked ${senderEmail}`,
+                  );
+                  updateThread.mutate({ id: thread.id, isTrashed: true });
+                  setBlockOpen(false);
+                  setSelectedThread(null);
+                },
+                onError: (err: any) => {
+                  toast.error(err?.message ?? 'Failed to block sender');
+                },
+              });
+            };
+            const runUnblock = (id: string, label: string) => {
+              unblockSender.mutate(id, {
+                onSuccess: () => {
+                  toast.success(`Unblocked ${label}`);
+                  setBlockOpen(false);
+                },
+                onError: (err: any) => {
+                  toast.error(err?.message ?? 'Failed to unblock');
+                },
+              });
+            };
             return (
-              <div className="relative group">
-                <Tooltip content="Block sender">
+              <>
+                <Tooltip content={isBlocked ? 'Sender is blocked' : 'Block sender'}>
                   <button
-                    onClick={() => {
-                      if (window.confirm(`Block all emails from ${senderEmail}?`)) {
-                        blockSender.mutate(
-                          { emailAddress: senderEmail, reason: `Blocked from thread: ${thread.subject}` },
-                          {
-                            onSuccess: () => {
-                              toast.success(`Blocked ${senderEmail}`);
-                              updateThread.mutate({ id: thread.id, isTrashed: true });
-                            },
-                          },
-                        );
-                      }
-                    }}
-                    className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-red-50 hover:text-red-500"
-                    aria-label="Block sender"
+                    onClick={() => setBlockOpen(true)}
+                    className={cn(
+                      'rounded-lg p-1.5 transition-colors',
+                      isBlocked
+                        ? 'bg-red-50 text-red-500 hover:bg-red-100'
+                        : 'text-text-tertiary hover:bg-red-50 hover:text-red-500',
+                    )}
+                    aria-label={isBlocked ? 'Sender is blocked' : 'Block sender'}
+                    aria-pressed={isBlocked}
                   >
                     <ShieldBan className="h-3.5 w-3.5" />
                   </button>
                 </Tooltip>
-              </div>
+                <Dialog.Root open={blockOpen} onOpenChange={setBlockOpen}>
+                  <Dialog.Portal>
+                    <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 animate-in fade-in" />
+                    <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg bg-white p-6 shadow-xl animate-in fade-in slide-in-from-bottom-4">
+                      <div className="flex items-center gap-2">
+                        <ShieldBan className="h-5 w-5 text-red-500" />
+                        <Dialog.Title className="text-base font-semibold text-text-primary">
+                          {isBlocked ? 'Sender is blocked' : 'Block sender'}
+                        </Dialog.Title>
+                      </div>
+                      <Dialog.Description className="mt-2 text-sm text-text-secondary">
+                        {isBlocked
+                          ? 'This sender is currently blocked. Future emails are auto-trashed on sync.'
+                          : 'Future emails from this sender will be auto-trashed on sync.'}
+                      </Dialog.Description>
+
+                      <div className="mt-4 space-y-2">
+                        {addressBlock ? (
+                          <button
+                            onClick={() => runUnblock(addressBlock.id, senderEmail)}
+                            disabled={unblockSender.isPending}
+                            className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-red-200 bg-red-50/60 px-3 py-2.5 text-left transition-colors hover:border-red-300 disabled:opacity-50"
+                          >
+                            <span className="text-[12px] font-medium text-red-600">
+                              Unblock this address
+                            </span>
+                            <span className="text-[11px] text-text-tertiary">
+                              {senderEmail}
+                            </span>
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => runBlock('address')}
+                            disabled={blockSender.isPending}
+                            className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:border-red-300 hover:bg-red-50/40 disabled:opacity-50"
+                          >
+                            <span className="text-[12px] font-medium text-text-primary">
+                              Block this address only
+                            </span>
+                            <span className="text-[11px] text-text-tertiary">
+                              {senderEmail}
+                            </span>
+                          </button>
+                        )}
+                        {senderDomain && (
+                          domainBlock ? (
+                            <button
+                              onClick={() => runUnblock(domainBlock.id, `@${senderDomain}`)}
+                              disabled={unblockSender.isPending}
+                              className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-red-200 bg-red-50/60 px-3 py-2.5 text-left transition-colors hover:border-red-300 disabled:opacity-50"
+                            >
+                              <span className="text-[12px] font-medium text-red-600">
+                                Unblock this domain
+                              </span>
+                              <span className="text-[11px] text-text-tertiary">
+                                @{senderDomain}
+                              </span>
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => runBlock('domain')}
+                              disabled={blockSender.isPending}
+                              className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:border-red-300 hover:bg-red-50/40 disabled:opacity-50"
+                            >
+                              <span className="text-[12px] font-medium text-text-primary">
+                                Block everyone at this domain
+                              </span>
+                              <span className="text-[11px] text-text-tertiary">
+                                @{senderDomain}
+                              </span>
+                            </button>
+                          )
+                        )}
+                      </div>
+
+                      <div className="mt-5 flex justify-end gap-2">
+                        <Dialog.Close asChild>
+                          <button className="rounded-lg px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-surface">
+                            Close
+                          </button>
+                        </Dialog.Close>
+                      </div>
+                    </Dialog.Content>
+                  </Dialog.Portal>
+                </Dialog.Root>
+
+                {/* Mark as spam — opens the sender-rule dialog in spam mode.
+                    Distinct from Block (which auto-trashes future mail);
+                    this routes future mail to the Spam folder so it's
+                    still recoverable. */}
+                <Tooltip content="Send to spam">
+                  <button
+                    onClick={() => setSpamRuleOpen(true)}
+                    className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-amber-50 hover:text-amber-600"
+                    aria-label="Send to spam"
+                  >
+                    <Ban className="h-3.5 w-3.5" />
+                  </button>
+                </Tooltip>
+                {spamRuleOpen && senderEmail && (
+                  <SenderRuleDialog
+                    mode="spam"
+                    targetCategoryLabel="Spam"
+                    senderAddress={senderEmail}
+                    onChoose={(kind) => {
+                      const lastEmail = thread.emails?.[thread.emails.length - 1];
+                      if (!lastEmail) return;
+                      const domain = senderEmail.split('@')[1] ?? '';
+                      const pattern = kind === 'email' ? senderEmail : `@${domain}`;
+                      triageFeedback.mutate({
+                        emailId: lastEmail.id,
+                        threadId: thread.id,
+                        suggestedCategory: 'primary',
+                        finalCategory: 'spam',
+                        wasConfirmed: false,
+                        allowPattern: pattern,
+                        allowKind: kind,
+                      });
+                      setSpamRuleOpen(false);
+                      setSelectedThread(null);
+                    }}
+                    onSkip={() => {
+                      const lastEmail = thread.emails?.[thread.emails.length - 1];
+                      if (!lastEmail) return;
+                      triageFeedback.mutate({
+                        emailId: lastEmail.id,
+                        threadId: thread.id,
+                        suggestedCategory: 'primary',
+                        finalCategory: 'spam',
+                        wasConfirmed: false,
+                      });
+                      setSpamRuleOpen(false);
+                      setSelectedThread(null);
+                    }}
+                    onCancel={() => setSpamRuleOpen(false)}
+                  />
+                )}
+              </>
             );
           })()}
         </div>
@@ -1402,12 +2072,16 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       <TriageBanner
         threadId={thread.id}
         latestEmailId={thread.emails?.[thread.emails.length - 1]?.id}
+        senderAddress={thread.emails?.[thread.emails.length - 1]?.fromAddress}
       />
 
       {/* Timeline: emails + comments merged */}
       <ScrollArea.Root className="min-h-0 flex-1">
         <ScrollArea.Viewport ref={scrollViewportRef} className="h-full w-full">
           <div className="bg-surface p-3">
+            {timeline.length === 0 && data?.data && (
+              <BlankThreadAutoFix threadId={selectedThreadId as Id<'threads'>} />
+            )}
             {timeline.map((item) => {
               if (item.type === 'email') {
                 const email = item.data;
@@ -1423,41 +2097,119 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                   >
 
                     {/* Email header */}
-                    <div className="mb-3 flex items-start justify-between">
-                      <div className="flex items-center gap-2.5">
-                        <Avatar.Root className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full">
-                          <Avatar.Fallback
-                            className={cn(
-                              'flex h-full w-full items-center justify-center rounded-full text-[10px] font-bold',
-                              color.bg,
-                              color.text,
-                            )}
-                          >
-                            {getInitials(senderName)}
-                          </Avatar.Fallback>
-                        </Avatar.Root>
-                        <div>
-                          <button
-                            className="text-[13px] font-semibold text-text-primary hover:text-primary transition-colors cursor-pointer"
-                            onClick={(e) => {
-                              setContactCardEmail(email.fromAddress);
-                              setContactCardAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
+                    {(() => {
+                      const isExpanded = expandedHeaderIds.has(email.id);
+                      const toList = (email.toAddresses as any[]) ?? [];
+                      const ccList = (email.ccAddresses as any[]) ?? [];
+                      return (
+                        <div className="mb-3">
+                          <div
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => toggleExpandedHeader(email.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                toggleExpandedHeader(email.id);
+                              }
                             }}
+                            className="-mx-2 flex cursor-pointer items-start justify-between rounded-lg px-2 py-1 transition-colors hover:bg-surface/60"
                           >
-                            {senderName}
-                          </button>
-                          <span className="ml-2 text-[11px] text-text-tertiary">
-                            to{' '}
-                            {(email.toAddresses as any[])
-                              ?.map((a: any) => a.name || a.email)
-                              .join(', ')}
-                          </span>
+                            <div className="flex min-w-0 items-center gap-2.5">
+                              <Avatar.Root className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full">
+                                <Avatar.Fallback
+                                  className={cn(
+                                    'flex h-full w-full items-center justify-center rounded-full text-[10px] font-bold',
+                                    color.bg,
+                                    color.text,
+                                  )}
+                                >
+                                  {getInitials(senderName)}
+                                </Avatar.Fallback>
+                              </Avatar.Root>
+                              <div className="min-w-0">
+                                <button
+                                  className="text-[13px] font-semibold text-text-primary transition-colors hover:text-primary"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setContactCardEmail(email.fromAddress);
+                                    setContactCardAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
+                                  }}
+                                >
+                                  {senderName}
+                                </button>
+                                <span className="ml-2 text-[11px] text-text-tertiary">
+                                  to{' '}
+                                  {toList.map((a: any) => a.name || a.email).join(', ') || '—'}
+                                </span>
+                                <ChevronDown
+                                  className={cn(
+                                    'ml-1 inline-block h-3 w-3 align-middle text-text-tertiary transition-transform',
+                                    isExpanded && 'rotate-180',
+                                  )}
+                                />
+                              </div>
+                            </div>
+                            <div className="ml-3 flex shrink-0 items-center gap-1.5">
+                              <span className="text-[11px] text-text-tertiary">
+                                {formatExactTime(email.receivedAt)}
+                              </span>
+                              {newOnOpenSnapshot.current.ids.has(email.id) && (
+                                <span
+                                  className="h-1.5 w-1.5 rounded-full bg-red-500"
+                                  title="New in this thread"
+                                />
+                              )}
+                            </div>
+                          </div>
+
+                          {isExpanded && (
+                            <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 text-[11px]">
+                              <span className="font-medium text-text-tertiary">From</span>
+                              <div className="flex flex-wrap gap-1.5">
+                                <AddressChip
+                                  name={email.fromName || senderName}
+                                  email={email.fromAddress}
+                                  onCopy={copyAddress}
+                                />
+                              </div>
+
+                              <span className="font-medium text-text-tertiary">To</span>
+                              <div className="flex flex-wrap gap-1.5">
+                                {toList.length > 0 ? (
+                                  toList.map((a: any, i: number) => (
+                                    <AddressChip
+                                      key={`${a.email}-${i}`}
+                                      name={a.name}
+                                      email={a.email}
+                                      onCopy={copyAddress}
+                                    />
+                                  ))
+                                ) : (
+                                  <span className="text-text-tertiary">—</span>
+                                )}
+                              </div>
+
+                              {ccList.length > 0 && (
+                                <>
+                                  <span className="font-medium text-text-tertiary">Cc</span>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {ccList.map((a: any, i: number) => (
+                                      <AddressChip
+                                        key={`${a.email}-${i}`}
+                                        name={a.name}
+                                        email={a.email}
+                                        onCopy={copyAddress}
+                                      />
+                                    ))}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                          )}
                         </div>
-                      </div>
-                      <span className="shrink-0 text-[11px] text-text-tertiary">
-                        {formatExactTime(email.receivedAt)}
-                      </span>
-                    </div>
+                      );
+                    })()}
 
                     {/* Email body — with quoted content collapsed */}
                     <CollapsedEmailBody
@@ -1730,7 +2482,13 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       </ScrollArea.Root>
 
       {/* Reply bar + inline comment input */}
-      <div className="border-t border-border bg-white">
+      <div
+        className={cn(
+          'flex flex-col border-t border-border bg-white',
+          replyMode && composeExpanded && 'min-h-0',
+        )}
+        style={replyMode && composeExpanded ? { flex: '999 1 0%' } : undefined}
+      >
         {replyMode ? (
           <ComposeInline
             threadId={thread.id}
@@ -1739,7 +2497,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               // Smart reply-from: find which of the user's accounts was in the To/CC of the last email
               const lastEmail = thread.emails?.[thread.emails.length - 1];
               if (!lastEmail) return thread.accountId;
-              const allAccounts = accountsData?.data ?? [];
+              const allAccounts = accountsData ?? [];
               const recipientEmails = [
                 ...(lastEmail.toAddresses as any[] ?? []),
                 ...(lastEmail.ccAddresses as any[] ?? []),
@@ -1754,7 +2512,9 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               setReplyMode(null);
               if (pendingDraft) setPendingDraft(null);
               if (editingScheduledId) setEditingScheduledId(null);
+              setComposeExpanded(false);
             }}
+            onExpandedChange={setComposeExpanded}
             existingDraftId={
               savedDraftEmail && !pendingDraft
                 ? savedDraftEmail.id
@@ -1782,15 +2542,31 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
             replyRecipients={(() => {
               const lastEmail = thread.emails?.[thread.emails.length - 1];
               if (!lastEmail) return [];
-              const myEmails = (accountsData?.data ?? []).map((a: any) => a.email?.toLowerCase());
+              // Only exclude the address this email was delivered to — i.e. the
+              // mailAccount tied to the thread. Other connected accounts
+              // (shared team inboxes, alt personal accounts) stay in the
+              // reply-all list since the user is replying *as* this specific
+              // account and the others may genuinely belong on the thread.
+              const excluded = new Set<string>();
+              const receivingAccount = (accountsData ?? []).find(
+                (a: any) => a.id === thread.accountId,
+              );
+              if (receivingAccount?.email) {
+                excluded.add(receivingAccount.email.toLowerCase());
+              }
+              // Also exclude every send-as alias on the receiving account —
+              // these are inbox forwards the user owns (e.g.
+              // bryce@choquercreative.com forwarded to bryce@choquer.agency).
+              // Without this they'd end up in their own reply-all To row.
+              for (const alias of (receivingAccount?.aliases ?? []) as string[]) {
+                if (alias) excluded.add(alias.toLowerCase());
+              }
               const all: { email: string; name?: string }[] = [];
-              // Add sender
-              if (lastEmail.fromAddress && !myEmails.includes(lastEmail.fromAddress.toLowerCase())) {
+              if (lastEmail.fromAddress && !excluded.has(lastEmail.fromAddress.toLowerCase())) {
                 all.push({ email: lastEmail.fromAddress, name: lastEmail.fromName || undefined });
               }
-              // Add to/cc (excluding self)
               for (const addr of [...(lastEmail.toAddresses as any[] ?? []), ...(lastEmail.ccAddresses as any[] ?? [])]) {
-                if (addr?.email && !myEmails.includes(addr.email.toLowerCase()) && !all.some((a) => a.email === addr.email)) {
+                if (addr?.email && !excluded.has(addr.email.toLowerCase()) && !all.some((a) => a.email === addr.email)) {
                   all.push({ email: addr.email, name: addr.name || undefined });
                 }
               }
@@ -1799,7 +2575,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
             fromEmail={(() => {
               // Match fromEmail to the smart reply-from account
               const lastEmail = thread.emails?.[thread.emails.length - 1];
-              const allAccounts = accountsData?.data ?? [];
+              const allAccounts = accountsData ?? [];
               if (lastEmail) {
                 const recipientEmails = [
                   ...(lastEmail.toAddresses as any[] ?? []),

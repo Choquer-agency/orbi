@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
@@ -14,7 +14,6 @@ import type { Id } from '../../../../convex/_generated/dataModel';
 //   useUpdateThread()               — { mutate, mutateAsync, isPending }
 //   useSnoozeThread()               — { mutate, mutateAsync, isPending }
 //   useUnsnoozeThread()             — { mutate, mutateAsync, isPending }
-//   useSharedThreads()              — { data, isLoading }
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface ThreadListParams {
@@ -42,6 +41,25 @@ export function useThreads(params: ThreadListParams = {}) {
   const [pageCount, setPageCount] = useState(1);
   const limit = params.search || params.from ? 20 : 50;
 
+  // Reset pageCount when the underlying query identity changes (folder, search,
+  // account, etc.) so a fresh filter doesn't carry over a huge limit from the
+  // previous one.
+  const filterKey = JSON.stringify({
+    accountId: params.accountId,
+    folder: params.folder,
+    isArchived: params.isArchived,
+    search: params.search,
+    from: params.from,
+    category: params.category,
+  });
+  const prevFilterKey = useRef(filterKey);
+  useEffect(() => {
+    if (prevFilterKey.current !== filterKey) {
+      prevFilterKey.current = filterKey;
+      setPageCount(1);
+    }
+  }, [filterKey]);
+
   // Single combined query — request `pageCount * limit` rows up-front. The
   // server returns a single page with `hasMore`, and we expose it as a
   // synthetic `pages` array so consumers that map over `data.pages` work.
@@ -60,21 +78,46 @@ export function useThreads(params: ThreadListParams = {}) {
     | ThreadListResponse
     | undefined;
 
-  const isLoading = result === undefined;
-  const pages: ThreadListResponse[] = result ? [result] : [];
-  const hasNextPage = result?.hasMore ?? false;
+  // Keep the last result around so the list doesn't blank out while a larger
+  // page is being fetched. We only reset this when the filter identity
+  // changes — paginating to a bigger limit on the same query should never
+  // hide the rows we already have.
+  const lastResultRef = useRef<ThreadListResponse | undefined>(undefined);
+  const lastFilterKeyRef = useRef(filterKey);
+  if (lastFilterKeyRef.current !== filterKey) {
+    lastFilterKeyRef.current = filterKey;
+    lastResultRef.current = undefined;
+  }
+  if (result !== undefined) {
+    lastResultRef.current = result;
+  }
+  const displayResult = result ?? lastResultRef.current;
+
+  const isLoading = displayResult === undefined;
+  // We're fetching the next page when pagination has been requested
+  // (pageCount > 1) but the new (larger) subscription hasn't returned yet.
+  const isFetchingNextPage =
+    pageCount > 1 && result === undefined && lastResultRef.current !== undefined;
+  const pages: ThreadListResponse[] = displayResult ? [displayResult] : [];
+  // Trust the server's hasMore, BUT — if the server returned fewer rows than
+  // we asked for, the request hit a server-side cap (or there genuinely aren't
+  // more rows). Either way, growing pageCount further won't help, so we must
+  // report hasNextPage=false to stop the IntersectionObserver from looping.
+  const requestedRows = limit * pageCount;
+  const returnedRows = displayResult?.data.length ?? 0;
+  const hasNextPage = (displayResult?.hasMore ?? false) && returnedRows >= requestedRows;
 
   return {
-    data: result ? { pages, pageParams: [1] } : undefined,
+    data: displayResult ? { pages, pageParams: [1] } : undefined,
     isLoading,
-    isFetching: isLoading,
+    isFetching: result === undefined,
     isError: false,
     error: undefined,
     fetchNextPage: async () => {
       if (hasNextPage) setPageCount((c) => c + 1);
     },
     hasNextPage,
-    isFetchingNextPage: false,
+    isFetchingNextPage,
     refetch: async () => {
       // Convex auto-refreshes; expose for callers that still call it.
     },
@@ -178,15 +221,5 @@ export function useUnsnoozeThread() {
     mutateAsync,
     isPending,
     isLoading: isPending,
-  };
-}
-
-export function useSharedThreads() {
-  const result = useQuery(api.threads.listShared, {});
-  return {
-    data: result,
-    isLoading: result === undefined,
-    isError: false,
-    error: undefined,
   };
 }

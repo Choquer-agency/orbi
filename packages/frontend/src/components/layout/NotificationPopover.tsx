@@ -78,7 +78,7 @@ export function NotificationPopover() {
         <button className="relative rounded-lg p-1.5 text-text-secondary transition-colors hover:bg-white/60 hover:text-text-primary">
           <Bell className="h-4 w-4" />
           {(unreadCount > 0 || totalItems > 0) && (
-            <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-unread px-1 text-[10px] font-medium text-white">
+            <span className="absolute -right-1 top-0.5 flex h-[13px] min-w-[13px] items-center justify-center rounded-full bg-unread px-1 text-[8px] font-medium text-white">
               {unreadCount > 0
                 ? unreadCount > 99
                   ? '99+'

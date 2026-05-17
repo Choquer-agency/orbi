@@ -46,29 +46,41 @@ function ciIncludes(haystack: string | undefined | null, needle: string): boolea
 export const list = query({
   args: {
     q: v.optional(v.string()),
+    // `page` and `limit` retained for backwards compatibility but the query
+    // now returns every person in one response — pagination is unused.
     page: v.optional(v.number()),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
-    const limitNum = Math.min(args.limit ?? 50, 200);
-    const pageNum = Math.max(args.page ?? 1, 1);
-    const skip = (pageNum - 1) * limitNum;
     const term = (args.q ?? "").trim();
 
-    // updatedAt desc — required ordering.
+    // Load ALL persons and ALL contacts in two queries, then group + enrich
+    // in JS. Previously the enrichment did one ctx.db query per person, so
+    // showing 3k contacts meant 3k extra reads. Two-query + Map grouping is
+    // the same time complexity but a constant number of round-trips.
     const all = await ctx.db
       .query("persons")
       .withIndex("by_user_updatedAt", (q) => q.eq("userId", userId))
       .order("desc")
       .collect();
 
+    const userContacts = await ctx.db
+      .query("contacts")
+      .withIndex("by_user_email", (q) => q.eq("userId", userId))
+      .collect();
+
+    const contactsByPerson = new Map<string, typeof userContacts>();
+    for (const c of userContacts) {
+      if (!c.personId) continue;
+      const key = c.personId as unknown as string;
+      const arr = contactsByPerson.get(key) ?? [];
+      arr.push(c);
+      contactsByPerson.set(key, arr);
+    }
+
     let candidates = all;
     if (term) {
-      const userContacts = await ctx.db
-        .query("contacts")
-        .withIndex("by_user_email", (q) => q.eq("userId", userId))
-        .collect();
       const matchingPersonIds = new Set<Id<"persons">>();
       for (const c of userContacts) {
         if (c.personId && ciIncludes(c.email, term)) {
@@ -83,47 +95,43 @@ export const list = query({
       );
     }
 
-    const total = candidates.length;
-    const slice = candidates.slice(skip, skip + limitNum);
-
-    const data = await Promise.all(
-      slice.map(async (p) => {
-        const contacts = await getContactsForPerson(ctx, p._id);
-        const totalEmailCount = contacts.reduce(
-          (sum, c) => sum + c.emailCount,
-          0,
-        );
-        const lastEmailed = contacts.reduce<number | null>((latest, c) => {
-          if (!c.lastEmailed) return latest;
-          if (!latest) return c.lastEmailed;
-          return c.lastEmailed > latest ? c.lastEmailed : latest;
-        }, null);
-        return {
-          ...p,
-          contacts: contacts.map((c) => ({
-            id: c._id,
-            email: c.email,
-            name: c.name ?? null,
-            company: c.company ?? null,
-            title: c.title ?? null,
-            phone: c.phone ?? null,
-            emailCount: c.emailCount,
-            lastEmailed: c.lastEmailed ?? null,
-          })),
-          totalEmailCount,
-          lastEmailed,
-          primaryEmail: contacts[0]?.email ?? null,
-        };
-      }),
-    );
+    const data = candidates.map((p) => {
+      const contacts = (contactsByPerson.get(p._id as unknown as string) ?? [])
+        .sort((a, b) => b.emailCount - a.emailCount);
+      const totalEmailCount = contacts.reduce(
+        (sum, c) => sum + c.emailCount,
+        0,
+      );
+      const lastEmailed = contacts.reduce<number | null>((latest, c) => {
+        if (!c.lastEmailed) return latest;
+        if (!latest) return c.lastEmailed;
+        return c.lastEmailed > latest ? c.lastEmailed : latest;
+      }, null);
+      return {
+        ...p,
+        contacts: contacts.map((c) => ({
+          id: c._id,
+          email: c.email,
+          name: c.name ?? null,
+          company: c.company ?? null,
+          title: c.title ?? null,
+          phone: c.phone ?? null,
+          emailCount: c.emailCount,
+          lastEmailed: c.lastEmailed ?? null,
+        })),
+        totalEmailCount,
+        lastEmailed,
+        primaryEmail: contacts[0]?.email ?? null,
+      };
+    });
 
     return {
       data,
       meta: {
-        total,
-        page: pageNum,
-        limit: limitNum,
-        totalPages: Math.ceil(total / limitNum),
+        total: data.length,
+        page: 1,
+        limit: data.length,
+        totalPages: 1,
       },
     };
   },

@@ -419,16 +419,100 @@ export const _lookupContact = internalQuery({
     filtered.sort((a, b) => (b.emailCount || 0) - (a.emailCount || 0));
     const top = filtered.slice(0, limit);
 
+    if (top.length > 0) {
+      return {
+        contacts: top.map((c) => ({
+          email: c.email,
+          name: c.name,
+          company: c.company,
+          title: c.title,
+          emailCount: c.emailCount,
+          lastEmailed: c.lastEmailed
+            ? new Date(c.lastEmailed).toISOString()
+            : undefined,
+        })),
+      };
+    }
+
+    // Last-resort fallback: scan the user's outbound emails directly. This
+    // covers the case where contact backfill hasn't yet reached this person
+    // (the cron processes ~200 emails per 5-min tick, so on a large mailbox
+    // it can take a while to walk every recipient). Search lights up
+    // immediately — recipients are inferred from `emails.toAddresses` instead
+    // of waiting for them to be materialized into the contacts table.
+    const accounts = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+    const selfEmails = new Set(
+      accounts.map((a) => a.email.toLowerCase().trim()),
+    );
+
+    type FoundEmail = {
+      email: string;
+      name?: string;
+      emailCount: number;
+      lastEmailed: number;
+    };
+    const found = new Map<string, FoundEmail>();
+
+    // Cap how many emails we scan so this stays fast even on big mailboxes —
+    // we walk the most recent 2,000 outbound messages per account.
+    const SCAN_LIMIT = 2000;
+    for (const account of accounts) {
+      const recent = await ctx.db
+        .query("emails")
+        .withIndex("by_account_receivedAt", (q) =>
+          q.eq("accountId", account._id),
+        )
+        .order("desc")
+        .take(SCAN_LIMIT);
+      for (const email of recent) {
+        const from = email.fromAddress.toLowerCase().trim();
+        if (!selfEmails.has(from)) continue; // only outbound
+        const recipients = [
+          ...((email.toAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+          ...((email.ccAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+        ];
+        for (const r of recipients) {
+          const addr = (r?.email ?? "").toLowerCase().trim();
+          if (!addr || !addr.includes("@")) continue;
+          if (selfEmails.has(addr)) continue;
+          const name = r?.name ?? "";
+          const matches =
+            addr.includes(lc) || name.toLowerCase().includes(lc);
+          if (!matches) continue;
+          const existing = found.get(addr);
+          if (existing) {
+            existing.emailCount += 1;
+            if (email.receivedAt > existing.lastEmailed) {
+              existing.lastEmailed = email.receivedAt;
+              if (name) existing.name = name;
+            }
+          } else {
+            found.set(addr, {
+              email: addr,
+              name: name || undefined,
+              emailCount: 1,
+              lastEmailed: email.receivedAt,
+            });
+          }
+        }
+      }
+    }
+
+    const ranked = Array.from(found.values())
+      .sort((a, b) => b.emailCount - a.emailCount)
+      .slice(0, limit);
+
     return {
-      contacts: top.map((c) => ({
+      contacts: ranked.map((c) => ({
         email: c.email,
         name: c.name,
-        company: c.company,
-        title: c.title,
+        company: undefined,
+        title: undefined,
         emailCount: c.emailCount,
-        lastEmailed: c.lastEmailed
-          ? new Date(c.lastEmailed).toISOString()
-          : undefined,
+        lastEmailed: new Date(c.lastEmailed).toISOString(),
       })),
     };
   },

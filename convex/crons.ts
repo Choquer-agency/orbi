@@ -40,4 +40,48 @@ crons.interval(
   {},
 );
 
+// ── Orphan thread repair ────────────────────────────────────────────────────
+// Self-heal: every 10 min, finds threads that ended up with 0 email rows
+// (sync chunk hiccups, parser failures, etc.) and refetches them from Gmail.
+// Bounded to ORPHAN_REPAIR_BATCH per run so it never starves other crons.
+crons.interval(
+  "orphan-thread-repair",
+  { minutes: 10 },
+  internal.sync.gmail.repairOrphanThreads,
+  {},
+);
+
+// ── Historical sync resume ─────────────────────────────────────────────────
+// Self-heal: every 5 min, finds accounts whose historical backfill is stuck
+// (IN_PROGRESS but lastBatchAt > 5 min old) and re-schedules the next chunk
+// from the saved pageToken. Also kicks off the one-shot recipient-contact
+// backfill for accounts whose historical sync has COMPLETED but contacts
+// haven't been backfilled yet.
+crons.interval(
+  "historical-sync-resume",
+  { minutes: 5 },
+  internal.mailAccounts._resumeStalledHistorical,
+  {},
+);
+
+// ── Retention purger ───────────────────────────────────────────────────────
+// Daily sweep that hard-deletes threads past their per-user retention TTL
+// in the Spam and Trash folders. Defaults are 30 days each; 0 = never.
+crons.interval(
+  "retention-purge",
+  { hours: 24 },
+  internal.retention._purgeAllExpired,
+  {},
+);
+
+// ── Needs Response re-score ────────────────────────────────────────────────
+// Daily sweep that re-scores open needsResponse signals older than 24h so
+// stale items reflect any drift in urgency / deadlines. Bounded batch.
+crons.interval(
+  "needs-response-rescore",
+  { hours: 24 },
+  internal.needsResponse._rescoreStale,
+  {},
+);
+
 export default crons;

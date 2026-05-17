@@ -188,7 +188,23 @@ export const _upsertThread = internalMutation({
     };
 
     if (existing) {
-      await ctx.db.patch(existing._id, data);
+      const patch: typeof data & { isRead?: boolean } = { ...data };
+      // Suppress read→unread regressions when the user just marked this thread
+      // read in the app and Gmail hasn't picked up the label change yet.
+      // Window is 5 minutes; new inbound messages still flip lastMessageAt
+      // forward, in which case we accept the unread state as legitimate.
+      const READ_LOCK_MS = 5 * 60 * 1000;
+      const localReadRecent =
+        existing.isRead === true &&
+        existing.readStateLocalAt !== undefined &&
+        Date.now() - existing.readStateLocalAt < READ_LOCK_MS;
+      const noNewMessage =
+        existing.lastMessageAt !== undefined &&
+        args.lastMessageAt <= existing.lastMessageAt;
+      if (localReadRecent && noNewMessage && args.isRead === false) {
+        patch.isRead = true;
+      }
+      await ctx.db.patch(existing._id, patch);
       return existing._id;
     }
     return await ctx.db.insert("threads", data);
@@ -414,7 +430,24 @@ export const _onNewEmailInserted = internalMutation({
           .first()) ?? null;
     }
     if (blocked) {
-      await ctx.db.patch(email.threadId, { isTrashed: true });
+      // Retention setting decides whether blocked mail goes to trash (and
+      // gets purged by the daily sweeper after trashRetentionDays) or is
+      // deleted right now on arrival. Default is "immediate delete" so the
+      // mailbox stays minimal for explicitly-blocked senders.
+      const ret = await ctx.db
+        .query("retentionSettings")
+        .withIndex("by_user", (q) => q.eq("userId", account.userId))
+        .unique();
+      const immediate = ret?.blockedSenderImmediate ?? true;
+      if (immediate) {
+        await ctx.scheduler.runAfter(
+          0,
+          internal.retention._deleteThreadCascade,
+          { threadId: email.threadId },
+        );
+      } else {
+        await ctx.db.patch(email.threadId, { isTrashed: true });
+      }
       return;
     }
 
@@ -429,6 +462,38 @@ export const _onNewEmailInserted = internalMutation({
       receivedAt: email.receivedAt,
     });
 
+    // 2b. Outbound emails: extract every recipient (TO/CC/BCC) so people the
+    // user emails frequently surface in compose autocomplete. Skip the user's
+    // own addresses so we don't add ourselves as a contact.
+    if (isOutbound) {
+      const userAccounts = await ctx.db
+        .query("mailAccounts")
+        .withIndex("by_user", (q) => q.eq("userId", account.userId))
+        .collect();
+      const selfEmails = new Set(
+        userAccounts.map((a) => a.email.toLowerCase().trim()),
+      );
+      const rawRecipients = [
+        ...((email.toAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+        ...((email.ccAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+        ...((email.bccAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+      ];
+      for (const r of rawRecipients) {
+        const addr = (r?.email ?? "").toLowerCase().trim();
+        if (!addr || !addr.includes("@")) continue;
+        if (selfEmails.has(addr)) continue;
+        await ctx.scheduler.runAfter(0, internal.contacts.upsertFromEmail, {
+          userId: account.userId,
+          email: addr,
+          name: r?.name ?? null,
+          isSender: false,
+          isOutbound: true,
+          bodyText: null,
+          receivedAt: email.receivedAt,
+        });
+      }
+    }
+
     // 3. Schedule AI classification (Anthropic call inside an action).
     await ctx.scheduler.runAfter(
       0,
@@ -436,20 +501,32 @@ export const _onNewEmailInserted = internalMutation({
       { emailId, userId: account.userId },
     );
 
-    // 4. Notify the user (per-type prefs are enforced inside the helper).
+    // 3b. Schedule "Needs Response" scoring for inbound mail. Skips
+    // categories like marketing/spam/notification and outbound mail
+    // internally. Wait 2 seconds so the classification lands first and
+    // the scorer can read its category for the skip-list check.
     if (!isOutbound) {
       await ctx.scheduler.runAfter(
+        2_000,
+        internal.ai.needsResponse.scoreEmail,
+        { emailId, userId: account.userId },
+      );
+    } else {
+      // Outbound: user just replied to a thread, so any open
+      // needs-response signal on that thread is resolved. If the in-app
+      // send-flow already dismissed it (kind="replied"), this is a no-op;
+      // otherwise the user replied from another mailbox/client and we tag
+      // it as auto-other-acc.
+      await ctx.scheduler.runAfter(
         0,
-        internal.notifications.createIfAllowed,
-        {
-          userId: account.userId,
-          type: "NEW_EMAIL" as const,
-          title: email.fromName ?? email.fromAddress,
-          body: email.subject,
-          data: { threadId: email.threadId, emailId, accountId },
-        },
+        internal.ai.needsResponseData._dismissOpenSignalsForThread,
+        { threadId: email.threadId, kind: "auto-other-acc" },
       );
     }
+
+    // (Per-email NEW_EMAIL notifications removed: the bell now just shows
+    // an unread-inbox count from threads.unreadCount. Storing 30k+ per-email
+    // notification rows per user wasn't paying for itself.)
 
     // 5. OOO auto-reply (only for inbound messages).
     if (!isOutbound) {
@@ -475,6 +552,108 @@ export const _onNewEmailInserted = internalMutation({
           },
         );
       }
+    }
+  },
+});
+
+// Used by sync/gmail.ts:repairOrphanThreads — finds threads with 0 email rows.
+export const _listOrphanThreads = internalQuery({
+  args: { accountId: v.id("mailAccounts"), limit: v.number() },
+  handler: async (ctx, { accountId, limit }) => {
+    const account = await ctx.db.get(accountId);
+    if (!account) return [];
+    const peers = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", account.userId))
+      .collect();
+    const userEmails = peers.map((p) => p.email.toLowerCase());
+
+    // Scan recent threads for this account; skip ones that already have emails.
+    const threads = await ctx.db
+      .query("threads")
+      .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", accountId))
+      .order("desc")
+      .take(500); // bounded scan; orphans should sit at the top of recently-failed syncs
+
+    const out: Array<{
+      threadId: Id<"threads">;
+      providerThreadId: string;
+      userEmails: string[];
+    }> = [];
+    for (const t of threads) {
+      if (out.length >= limit) break;
+      const hasEmails = await ctx.db
+        .query("emails")
+        .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
+        .first();
+      if (!hasEmails) {
+        out.push({
+          threadId: t._id,
+          providerThreadId: t.providerThreadId,
+          userEmails,
+        });
+      }
+    }
+    return out;
+  },
+});
+
+// Used by sync/gmail.ts:refreshThread
+export const _getThreadForRefresh = internalQuery({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, { threadId }) => {
+    const thread = await ctx.db.get(threadId);
+    if (!thread) return null;
+    const account = await ctx.db.get(thread.accountId);
+    if (!account) return null;
+    // userEmails = all the user's mailbox addresses (for own-message detection)
+    const peers = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", account.userId))
+      .collect();
+    return {
+      providerThreadId: thread.providerThreadId,
+      accountId: thread.accountId,
+      ownerUserId: account.userId,
+      provider: account.provider,
+      userEmails: peers.map((p) => p.email.toLowerCase()),
+    };
+  },
+});
+
+// Used by sync/gmail.ts:refreshEmail
+export const _getEmailForRefresh = internalQuery({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }) => {
+    const email = await ctx.db.get(emailId);
+    if (!email) return null;
+    const account = await ctx.db.get(email.accountId);
+    if (!account) return null;
+    return {
+      providerMessageId: email.providerMessageId,
+      accountId: email.accountId,
+      ownerUserId: account.userId,
+      provider: account.provider,
+    };
+  },
+});
+
+export const _patchEmailBodyAndFrom = internalMutation({
+  args: {
+    emailId: v.id("emails"),
+    fromAddress: v.string(),
+    fromName: v.optional(v.string()),
+    bodyHtml: v.optional(v.string()),
+    bodyText: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const patch: Record<string, unknown> = {};
+    if (args.fromAddress) patch.fromAddress = args.fromAddress;
+    if (args.fromName !== undefined) patch.fromName = args.fromName;
+    if (args.bodyHtml !== undefined) patch.bodyHtml = args.bodyHtml;
+    if (args.bodyText !== undefined) patch.bodyText = args.bodyText;
+    if (Object.keys(patch).length > 0) {
+      await ctx.db.patch(args.emailId, patch);
     }
   },
 });

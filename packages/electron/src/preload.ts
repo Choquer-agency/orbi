@@ -18,5 +18,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('deep-link', (_event, url: string) => callback(url));
   },
 
+  // Opens a URL in the user's system browser. Used for OAuth flows so the
+  // provider's login page never hijacks the Electron main window.
+  openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
+
   isElectron: true,
 });
