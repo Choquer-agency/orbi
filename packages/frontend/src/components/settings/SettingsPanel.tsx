@@ -1,4 +1,5 @@
-import { X, FolderInput, Pen, FileSignature, Bell, Filter, Columns3, ShieldBan, Plane, TextQuote, UserCircle, Shield, Mail } from 'lucide-react';
+import { X, FolderInput, Pen, Bell, Filter, Columns3, ShieldBan, Plane, TextQuote, UserCircle, Shield, Mail, Trash2, Inbox } from 'lucide-react';
+import { SignatureIcon } from '../icons/SignatureIcon';
 import { useUiStore } from '../../stores/uiStore';
 import { WritingPreferences } from './WritingPreferences';
 import { GeneralSettings } from './GeneralSettings';
@@ -12,6 +13,8 @@ import { VacationResponderSettings } from './VacationResponderSettings';
 import { SnippetSettings } from './SnippetSettings';
 import { AccountsSettings } from './AccountsSettings';
 import { ProfileSettings } from './ProfileSettings';
+import { RetentionSettings } from './RetentionSettings';
+import { NeedsResponseSettings } from './NeedsResponseSettings';
 import { cn } from '../../lib/utils';
 
 interface SettingsPanelProps {
@@ -23,12 +26,14 @@ const SECTIONS = [
   { id: 'accounts', label: 'Accounts', icon: Mail },
   { id: 'general', label: 'General', icon: FolderInput },
   { id: 'writing', label: 'Writing Style', icon: Pen },
-  { id: 'signatures', label: 'Signatures', icon: FileSignature },
+  { id: 'signatures', label: 'Signatures', icon: SignatureIcon },
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'security', label: 'Security', icon: Shield },
   { id: 'filters', label: 'AI Filters', icon: Filter },
   { id: 'splits', label: 'Inbox Splits', icon: Columns3 },
+  { id: 'needs-response', label: 'Needs Response', icon: Inbox },
   { id: 'blocked', label: 'Blocked Senders', icon: ShieldBan },
+  { id: 'retention', label: 'Auto-Delete', icon: Trash2 },
   { id: 'vacation', label: 'Vacation Responder', icon: Plane },
   { id: 'snippets', label: 'Snippets', icon: TextQuote },
 ] as const;
@@ -57,8 +62,12 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         return <AiFilterSettings />;
       case 'splits':
         return <InboxSplitSettings />;
+      case 'needs-response':
+        return <NeedsResponseSettings />;
       case 'blocked':
         return <BlockedSendersSettings />;
+      case 'retention':
+        return <RetentionSettings />;
       case 'vacation':
         return <VacationResponderSettings />;
       case 'snippets':

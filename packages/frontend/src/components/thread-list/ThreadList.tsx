@@ -5,6 +5,7 @@ import { useThreads, useUpdateThread, usePrefetchAdjacentThreads, useIdleThreadP
 import { useAccounts } from '../../hooks/useAccounts';
 import { useContactAutocomplete } from '../../hooks/useContacts';
 import { useInboxSplits } from '../../hooks/useInboxSplits';
+import { useAnyHistoricalSyncInProgress } from '../../hooks/useHistoricalSync';
 import { useUiStore } from '../../stores/uiStore';
 import { cn, groupByDate } from '../../lib/utils';
 import { getAccountColor } from '../../lib/constants';
@@ -15,6 +16,7 @@ import { ThreadItem } from './ThreadItem';
 import { ScheduledEmailList } from '../scheduled/ScheduledEmailList';
 import { setVisibleThreadNavigationRows } from '../../lib/threadNavigationState';
 import { useMarkThreadNotificationsRead } from '../../hooks/useNotifications';
+import { NeedsResponseList } from './NeedsResponseList';
 
 const FILTER_TABS = [
   { id: 'all', label: 'All' },
@@ -190,6 +192,7 @@ export function ThreadList() {
   const updateThread = useUpdateThread();
   const prefetchThread = useThreadHoverPrefetch();
   const markThreadNotificationsRead = useMarkThreadNotificationsRead();
+  const importStatus = useAnyHistoricalSyncInProgress();
 
   // Infinite scroll: observe last element
   const observer = useRef<IntersectionObserver | null>(null);
@@ -212,12 +215,17 @@ export function ThreadList() {
     [isFetchingNextPage, hasNextPage, fetchNextPage],
   );
 
-  // Build accountId → color map
+  // Build accountId → color map. Prefer the user-chosen `color` saved on the
+  // account; fall back to a deterministic palette index so brand-new accounts
+  // still get a distinct ring before the user picks one.
+  // useAccounts() returns { data: <array> }, so `accountsData` IS the array —
+  // `accountsData?.data` would access .data on an array (always undefined)
+  // and quietly leave the map empty (which is why the rings weren't showing).
   const accountColorMap = useMemo(() => {
     const map = new Map<string, string>();
-    const accounts = accountsData?.data ?? [];
-    accounts.forEach((acc: any, i: number) => {
-      map.set(acc.id, getAccountColor(i));
+    const accounts = (accountsData ?? []) as Array<{ id: string; color?: string | null }>;
+    accounts.forEach((acc, i) => {
+      map.set(acc.id, acc.color ?? getAccountColor(i));
     });
     return map;
   }, [accountsData]);
@@ -393,6 +401,19 @@ export function ThreadList() {
 
   const selectionCount = selectedThreadIds.size;
 
+  // Toggle target for the read/unread bulk action: if every selected thread is
+  // already read, the next action is "Mark as unread"; otherwise we mark them
+  // all read (covers all-unread + mixed selections in one click).
+  const selectedThreadsRead = useMemo(() => {
+    if (selectionCount === 0) return true;
+    for (const group of dateGroups) {
+      for (const t of group.items as any[]) {
+        if (selectedThreadIds.has(t.id) && !t.isRead) return false;
+      }
+    }
+    return true;
+  }, [dateGroups, selectedThreadIds, selectionCount]);
+
   // Pull-to-refresh on mobile
   const { scrollRef: pullToRefreshRef, pullDistance, isRefreshing } = usePullToRefresh({
     onRefresh: () => refetch(),
@@ -471,6 +492,28 @@ export function ThreadList() {
 
   return (
     <div className="relative flex h-full flex-col bg-surface">
+      {/* Global import progress strip — visible across mobile + desktop while
+          historical sync (or contact backfill) is running. Disappears on its
+          own once the user's accounts are fully caught up. */}
+      {(importStatus.inProgress || importStatus.contactBackfillInProgress) && (
+        <div className="flex shrink-0 items-center gap-2 border-b border-border bg-primary/5 px-3 py-1.5 text-[11px] text-text-secondary">
+          <Loader2 className="h-3 w-3 animate-spin text-primary" />
+          {importStatus.inProgress ? (
+            <span className="truncate">
+              Importing email
+              {importStatus.totalThreads > 0
+                ? ` — ${importStatus.syncedThreads.toLocaleString()} of ~${importStatus.totalThreads.toLocaleString()}`
+                : importStatus.syncedThreads > 0
+                  ? ` — ${importStatus.syncedThreads.toLocaleString()} so far`
+                  : '…'}
+              {importStatus.accountEmail ? ` · ${importStatus.accountEmail}` : ''}
+            </span>
+          ) : (
+            <span className="truncate">Indexing contacts so they show up in compose…</span>
+          )}
+        </div>
+      )}
+
       {/* Header */}
       {isMobile ? (
         /* Mobile: "Primary" dropdown left, filter menu icon right */
@@ -911,6 +954,8 @@ export function ThreadList() {
       {/* Scheduled emails folder */}
       {selectedFolder === 'scheduled' ? (
         <ScheduledEmailList />
+      ) : selectedFolder === 'needs_response' ? (
+        <NeedsResponseList />
       ) : /* Thread list */
       isLoading ? (
         <div className="flex flex-1 items-center justify-center">
@@ -1009,18 +1054,19 @@ export function ThreadList() {
                   ))}
                 </div>
               ))}
-              <div ref={lastThreadRef} className="h-1" />
-              {isFetchingNextPage && (
-                <div className="flex items-center justify-center py-3">
+              {hasNextPage ? (
+                <div
+                  ref={lastThreadRef}
+                  className="flex items-center justify-center gap-2 py-4"
+                >
                   <Loader2 className="h-4 w-4 animate-spin text-text-tertiary" />
-                  <span className="ml-2 text-xs text-text-tertiary">Loading more...</span>
+                  <span className="text-xs text-text-tertiary">Loading more…</span>
                 </div>
-              )}
-              {!hasNextPage && threads.length > 50 && (
+              ) : threads.length > 50 ? (
                 <div className="py-3 text-center text-xs text-text-tertiary">
                   {totalCount} threads
                 </div>
-              )}
+              ) : null}
             </div>
           </div>
         ) : (
@@ -1066,12 +1112,20 @@ export function ThreadList() {
               ))}
               {isFetchingNextPage && (
                 <div
-                  className="absolute left-0 right-0 flex items-center justify-center py-3"
+                  ref={lastThreadRef}
+                  className="absolute left-0 right-0 flex items-center justify-center gap-2 py-3"
                   style={{ transform: `translateY(${desktopTotalHeight}px)` }}
                 >
                   <Loader2 className="h-4 w-4 animate-spin text-text-tertiary" />
-                  <span className="ml-2 text-xs text-text-tertiary">Loading more...</span>
+                  <span className="text-xs text-text-tertiary">Loading more…</span>
                 </div>
+              )}
+              {!isFetchingNextPage && hasNextPage && (
+                <div
+                  ref={lastThreadRef}
+                  className="absolute left-0 right-0 h-1"
+                  style={{ transform: `translateY(${desktopTotalHeight}px)` }}
+                />
               )}
               {!hasNextPage && threads.length > 50 && (
                 <div
@@ -1085,59 +1139,66 @@ export function ThreadList() {
           </div>
         )}
 
-      {/* Bulk action toolbar */}
+      {/* Bulk action toolbar — anchored by both edges of the thread-list
+          column so the pill always fits, no matter how narrow the column is
+          resized. `inset-x-2` gives 8px margins each side; flex justify-center
+          centres the pill, max-width caps its intrinsic size. */}
       {selectionCount > 0 && (
-        <div className={cn('absolute left-1/2 z-30 animate-bounce-in', isMobile ? 'bottom-20' : 'bottom-4')}>
-          <div className="flex items-center gap-1 rounded-full bg-primary px-3 py-1.5 shadow-lg shadow-primary/25">
+        <div className={cn('pointer-events-none absolute inset-x-2 z-30 flex justify-center animate-bounce-in', isMobile ? 'bottom-20' : 'bottom-4')}>
+          <div className="pointer-events-auto flex max-w-full items-center gap-0.5 rounded-full bg-primary px-1.5 py-1 shadow-lg shadow-primary/25">
             <button
               onClick={clearSelection}
               className="rounded-full p-1 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
-              title="Clear selection"
+              title={`Clear selection (${selectionCount})`}
+              aria-label={`Clear selection (${selectionCount})`}
             >
               <X className="h-3.5 w-3.5" />
             </button>
-            <span className="min-w-[3ch] px-1.5 text-center text-xs font-semibold text-white">
-              {selectionCount} {selectionCount === 1 ? 'thread' : 'threads'}
+            {/* Selection count chip — tabular nums keeps widths stable. */}
+            <span
+              className="rounded-full bg-white/20 px-1.5 py-0.5 text-[11px] font-semibold tabular-nums text-white"
+              aria-label={`${selectionCount} selected`}
+            >
+              {selectionCount}
             </span>
-            <div className="mx-1 h-4 w-px bg-white/20" />
             <button
               onClick={handleBulkArchive}
-              className="rounded-full p-1.5 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
+              className="rounded-full p-1 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
               title="Archive"
             >
               <Archive className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={handleBulkStar}
-              className="rounded-full p-1.5 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
+              className="rounded-full p-1 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
               title="Star"
             >
               <Star className="h-3.5 w-3.5" />
             </button>
+            {/* Single read/unread toggle — infers from selection so the user
+                only ever sees the action that matters next. */}
             <button
-              onClick={handleBulkMarkRead}
-              className="rounded-full p-1.5 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
-              title="Mark as read"
+              onClick={selectedThreadsRead ? handleBulkMarkUnread : handleBulkMarkRead}
+              className="rounded-full p-1 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
+              title={selectedThreadsRead ? 'Mark as unread' : 'Mark as read'}
+              aria-label={selectedThreadsRead ? 'Mark as unread' : 'Mark as read'}
             >
-              <Mail className="h-3.5 w-3.5" />
-            </button>
-            <button
-              onClick={handleBulkMarkUnread}
-              className="rounded-full p-1.5 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
-              title="Mark as unread"
-            >
-              <MailOpen className="h-3.5 w-3.5" />
+              {selectedThreadsRead ? (
+                <MailOpen className="h-3.5 w-3.5" />
+              ) : (
+                <Mail className="h-3.5 w-3.5" />
+              )}
             </button>
             <button
               onClick={handleBulkMoveToInbox}
-              className="rounded-full p-1.5 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
+              className="rounded-full p-1 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
               title="Move to inbox"
             >
               <Inbox className="h-3.5 w-3.5" />
             </button>
             <button
               onClick={handleBulkDelete}
-              className="rounded-full p-1.5 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
+              className="rounded-full p-1 text-white/80 transition-colors hover:bg-white/20 hover:text-white"
               title="Delete"
             >
               <Trash2 className="h-3.5 w-3.5" />

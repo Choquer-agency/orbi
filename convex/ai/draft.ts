@@ -29,7 +29,9 @@ Rules:
 - If replying, address the specific points from the previous email.
 - Keep it concise unless the user asks for detail.
 - Use proper email formatting (greeting, body, sign-off).
-- Return HTML formatted for email. Use separate <p> tags for each paragraph — every paragraph must be its own <p>...</p> block. Do NOT use <br> between paragraphs. This ensures proper spacing.
+- Output ONLY plain HTML using tags that work reliably in Gmail / Outlook / Apple Mail AND survive the user's compose editor: <p>, <strong>, <em>, <a href="...">, <ul>, <ol>, <li>, and <table>/<thead>/<tbody>/<tr>/<th>/<td>. NEVER use Markdown (no pipes, no asterisks, no backticks). Each paragraph is its own <p>...</p>; do NOT use <br> between paragraphs.
+- For tabular data, use a real <table style="border-collapse:collapse;margin:8px 0"> with inline styles on every <th> and <td> ('border:1px solid #d0d4dc;padding:6px 10px'). Inline styles only — email clients strip <style> blocks.
+- What you output is what the recipient sees. The compose preview and the sent email both render this HTML verbatim, so don't include anything that won't render correctly.
 - If you don't have enough context, write the best draft you can and note what might need adjustment.
 - Follow the user's writing style preferences provided below.`;
 

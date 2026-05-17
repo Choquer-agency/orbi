@@ -37,8 +37,16 @@ async function getUserAccountEmails(
     .collect();
   return {
     ids: accounts.map((a: Doc<"mailAccounts">) => a._id),
-    emails: accounts.map((a: Doc<"mailAccounts">) => a.email).filter(Boolean),
+    emails: accounts
+      .map((a: Doc<"mailAccounts">) => a.email)
+      .filter(Boolean)
+      .map((e: string) => e.toLowerCase()),
   };
+}
+
+function isSelfAddress(allAccountEmails: string[], fromAddress: string | undefined | null): boolean {
+  if (!fromAddress) return false;
+  return allAccountEmails.includes(fromAddress.toLowerCase());
 }
 
 async function userOwnsThread(
@@ -149,7 +157,10 @@ export const list = query({
     const userId = await requireUser(ctx);
 
     const pageNum = args.page ?? 1;
-    const limitNum = Math.min(args.limit ?? 80, 100);
+    // Cap is generous so the per-page request can grow without silently
+    // truncating (a tight cap would leave hasMore=true and loop the
+    // IntersectionObserver). Frontend usually sends limit=80.
+    const limitNum = Math.min(args.limit ?? 80, 2000);
     const skip = (pageNum - 1) * limitNum;
 
     const { ids: ownedAccountIds, emails: allAccountEmails } =
@@ -166,11 +177,27 @@ export const list = query({
     const fromEmail = args.from?.trim();
     const folder = args.folder;
 
-    // Drafts can be selected directly from email metadata. Do this before the
-    // generic thread fanout path; otherwise large accounts load every email in
-    // hundreds of threads just to discover which threads contain drafts.
-    if (folder === "drafts" && !searchTerm && !fromEmail && !args.category) {
-      const draftArrays = await Promise.all(
+    let isFromFastPath = false;
+    let parsed: ParsedSearch | null = null;
+    if (searchTerm && searchTerm.length > 0) {
+      parsed = parseSearchOperators(searchTerm);
+    }
+    // Free-text portion of the search term (after stripping operators like
+    // from:, label:, etc). When this is non-empty we use the Convex search
+    // indexes to look across the ENTIRE mailbox instead of the most recent
+    // 2,500 threads — that was the gap users hit on big imports.
+    const freeText = parsed?.text?.trim() ?? "";
+    const useSearchIndex = freeText.length > 0;
+
+    // Drafts fast path: when the user just wants the Drafts folder, the
+    // generic candidate sweep (fetch top-N threads per account, then fan out
+    // every thread's emails to find which have isDraft) would read every
+    // body in the mailbox just to filter for a handful of draft rows. Use
+    // the dedicated `by_account_isDraft_receivedAt` index instead — that
+    // returns draft rows directly, so we only ever touch threads that
+    // actually have a draft.
+    if (folder === "drafts" && !searchTerm && !fromEmail) {
+      const draftsArrays = await Promise.all(
         accountIds.map((aid) =>
           ctx.db
             .query("emails")
@@ -178,84 +205,483 @@ export const list = query({
               q.eq("accountId", aid).eq("isDraft", true),
             )
             .order("desc")
-            .take(skip + limitNum),
+            .take(skip + limitNum + 1),
         ),
       );
-      const drafts = draftArrays
-        .flat()
-        .sort((a, b) => b.receivedAt - a.receivedAt);
-
-      const seenThreadIds = new Set<string>();
-      const uniqueDrafts = drafts.filter((e) => {
-        const key = String(e.threadId);
-        if (seenThreadIds.has(key)) return false;
-        seenThreadIds.add(key);
-        return true;
-      });
-      const pagedDrafts = uniqueDrafts.slice(skip, skip + limitNum);
+      // Pick the most-recent draft per thread and stash a tiny projection
+      // (no bodyHtml) so the hydration loop below doesn't re-query the
+      // emails table — that re-query reads every draft row's HTML for the
+      // account and trips the 16MB limit on accounts with many drafts.
+      const draftByThread = new Map<
+        Id<"threads">,
+        {
+          fromAddress: string;
+          fromName: string | undefined;
+          snippet: string | undefined;
+          receivedAt: number;
+        }
+      >();
+      for (const d of draftsArrays.flat()) {
+        const cur = draftByThread.get(d.threadId);
+        if (!cur || d.receivedAt > cur.receivedAt) {
+          draftByThread.set(d.threadId, {
+            fromAddress: d.fromAddress,
+            fromName: d.fromName,
+            snippet: d.snippet,
+            receivedAt: d.receivedAt,
+          });
+        }
+      }
+      const sortedThreadIds = Array.from(draftByThread.entries())
+        .sort((a, b) => b[1].receivedAt - a[1].receivedAt)
+        .map(([id]) => id);
+      const total = sortedThreadIds.length;
+      const pagedIds = sortedThreadIds.slice(skip, skip + limitNum);
+      const draftThreads = (
+        await Promise.all(pagedIds.map((id) => ctx.db.get(id)))
+      ).filter((t): t is Doc<"threads"> => !!t && !t.isTrashed);
       const data = await Promise.all(
-        pagedDrafts.map(async (draft) => {
-          const thread = await ctx.db.get(draft.threadId);
-          if (!thread) return null;
+        draftThreads.map(async (t) => {
+          const draftPreview = draftByThread.get(t._id);
           const comments = await ctx.db
             .query("threadComments")
-            .withIndex("by_thread", (q) => q.eq("threadId", draft.threadId))
-            .take(50);
+            .withIndex("by_thread", (q) => q.eq("threadId", t._id))
+            .collect();
           return {
-            ...thread,
-            id: thread._id,
-            emails: [
-              {
-                fromAddress: draft.fromAddress,
-                fromName: draft.fromName,
-                snippet: draft.snippet,
-                receivedAt: draft.receivedAt,
-                classification: null,
-              },
-            ],
+            ...t,
+            id: t._id,
+            emails: draftPreview
+              ? [
+                  {
+                    fromAddress: draftPreview.fromAddress,
+                    fromName: draftPreview.fromName,
+                    snippet: draftPreview.snippet,
+                    receivedAt: draftPreview.receivedAt,
+                    classification: null,
+                  },
+                ]
+              : [],
             _count: { comments: comments.length },
             hasDraft: true,
           };
         }),
       );
-      const rows = data.filter((row): row is NonNullable<typeof row> => row !== null);
       return {
-        data: rows,
-        total: uniqueDrafts.length,
+        data,
+        total,
         page: pageNum,
         limit: limitNum,
-        hasMore: skip + limitNum < uniqueDrafts.length,
+        hasMore: skip + limitNum < total,
       };
     }
 
-    // Pull threads from each account index (fan-out then merge — Convex doesn't support `IN`).
-    // Keep thread list queries bounded. Thread-list screens should never fan out
-    // through hundreds of full email bodies; detail view loads full threads.
-    // Grow the per-account window with the requested page so deep scrolling still
-    // surfaces older threads.
-    const perAccountLimit = Math.min(
-      Math.max(200, skip + limitNum * 2),
-      500,
-    );
-    const threadsArrays = await Promise.all(
-      accountIds.map((aid) =>
-        ctx.db
-          .query("threads")
-          .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", aid))
-          .order("desc")
-          .take(perAccountLimit),
-      ),
-    );
-    let candidates = threadsArrays.flat();
+    // Spam folder mirrors the upstream provider's SPAM label directly
+    // (Gmail / Outlook). We trust the provider's anti-spam filter rather
+    // than running our own — see classifier.ts. Scan recent threads per
+    // account and keep the ones whose labels include "SPAM".
+    if (folder === "spam" && !searchTerm && !fromEmail) {
+      const perAccountLimit = 2000;
+      const threadsArrays = await Promise.all(
+        accountIds.map((aid) =>
+          ctx.db
+            .query("threads")
+            .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", aid))
+            .order("desc")
+            .take(perAccountLimit),
+        ),
+      );
+      const spamThreads = threadsArrays
+        .flat()
+        .filter((t) => !t.isTrashed && t.labels.includes("SPAM"))
+        .sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+      const total = spamThreads.length;
+      const pagedThreads = spamThreads.slice(skip, skip + limitNum);
+      const data = await Promise.all(
+        pagedThreads.map(async (t) => {
+          const lastEmail = await ctx.db
+            .query("emails")
+            .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
+            .order("desc")
+            .first();
+          const comments = await ctx.db
+            .query("threadComments")
+            .withIndex("by_thread", (q) => q.eq("threadId", t._id))
+            .collect();
+          return {
+            ...t,
+            id: t._id,
+            emails: lastEmail
+              ? [
+                  {
+                    fromAddress: lastEmail.fromAddress,
+                    fromName: lastEmail.fromName,
+                    snippet: lastEmail.snippet,
+                    receivedAt: lastEmail.receivedAt,
+                    classification: null,
+                  },
+                ]
+              : [],
+            _count: { comments: comments.length },
+            hasDraft: false,
+          };
+        }),
+      );
+      return {
+        data,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        hasMore: skip + limitNum < total,
+      };
+    }
 
-    let isFromFastPath = false;
-    let parsed: ParsedSearch | null = null;
+    // Shared With Me = threads where a teammate @-mentioned me in an internal
+    // comment. Source of truth is `threadMentions`, not `threadAccess` (which
+    // also catches handoffs / ad-hoc grants the user doesn't want surfaced
+    // here). Self-mentions are excluded so authoring your own comment can't
+    // drag the thread into this view.
+    if (folder === "shared" && !searchTerm && !fromEmail) {
+      const mentionRows = await ctx.db
+        .query("threadMentions")
+        .withIndex("by_user", (q) => q.eq("mentionedUserId", userId))
+        .collect();
+
+      const threadIds = new Set<Id<"threads">>();
+      for (const m of mentionRows) {
+        const comment = await ctx.db.get(m.commentId);
+        if (comment && comment.authorId !== userId) {
+          threadIds.add(m.threadId);
+        }
+      }
+
+      const sharedThreads = (
+        await Promise.all(Array.from(threadIds).map((id) => ctx.db.get(id)))
+      )
+        .filter((t): t is Doc<"threads"> => !!t && !t.isTrashed)
+        .sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+      const total = sharedThreads.length;
+      const pagedThreads = sharedThreads.slice(skip, skip + limitNum);
+      const data = await Promise.all(
+        pagedThreads.map(async (t) => {
+          const lastEmail = await ctx.db
+            .query("emails")
+            .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
+            .order("desc")
+            .first();
+          const comments = await ctx.db
+            .query("threadComments")
+            .withIndex("by_thread", (q) => q.eq("threadId", t._id))
+            .collect();
+          return {
+            ...t,
+            id: t._id,
+            emails: lastEmail
+              ? [
+                  {
+                    fromAddress: lastEmail.fromAddress,
+                    fromName: lastEmail.fromName,
+                    snippet: lastEmail.snippet,
+                    receivedAt: lastEmail.receivedAt,
+                    classification: null,
+                  },
+                ]
+              : [],
+            _count: { comments: comments.length },
+            hasDraft: false,
+          };
+        }),
+      );
+      return {
+        data,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        hasMore: skip + limitNum < total,
+      };
+    }
+
+    // Marketing fast path uses the AI emailClassifications table because the
+    // pink "Marketing" pill in the inbox is driven by that signal, not a Gmail
+    // label. Pull recent classifications matching this category and assemble
+    // the thread list from them directly.
+    if (folder === "marketing" && !searchTerm && !fromEmail) {
+      const CLASSIFICATION_HITS = 300;
+      const classifications = await ctx.db
+        .query("emailClassifications")
+        .withIndex("by_category", (q) => q.eq("category", folder))
+        .order("desc")
+        .take(CLASSIFICATION_HITS);
+      const userAccountSet = new Set(accountIds.map((a) => String(a)));
+      const threadLatest = new Map<
+        Id<"threads">,
+        {
+          email: Doc<"emails">;
+          classification: {
+            category: string;
+            confidence?: number;
+            urgency?: string;
+            summary?: string;
+          };
+        }
+      >();
+      for (const c of classifications) {
+        const email = await ctx.db.get(c.emailId);
+        if (!email) continue;
+        if (!userAccountSet.has(String(email.accountId))) continue;
+        const cur = threadLatest.get(email.threadId);
+        if (!cur || email.receivedAt > cur.email.receivedAt) {
+          threadLatest.set(email.threadId, {
+            email,
+            classification: {
+              category: c.category,
+              confidence: c.confidence,
+              urgency: c.urgency,
+              summary: c.summary,
+            },
+          });
+        }
+      }
+      const sortedThreadIds = Array.from(threadLatest.entries())
+        .sort((a, b) => b[1].email.receivedAt - a[1].email.receivedAt)
+        .map(([id]) => id);
+      const visibleIds = sortedThreadIds.filter((_id) => true);
+      const total = visibleIds.length;
+      const pagedIds = visibleIds.slice(skip, skip + limitNum);
+      const pagedThreads = (
+        await Promise.all(pagedIds.map((id) => ctx.db.get(id)))
+      ).filter(
+        (t): t is Doc<"threads"> => !!t && !t.isTrashed && !t.isArchived,
+      );
+      const data = await Promise.all(
+        pagedThreads.map(async (t) => {
+          const hit = threadLatest.get(t._id)!;
+          const comments = await ctx.db
+            .query("threadComments")
+            .withIndex("by_thread", (q) => q.eq("threadId", t._id))
+            .collect();
+          return {
+            ...t,
+            id: t._id,
+            emails: [
+              {
+                fromAddress: hit.email.fromAddress,
+                fromName: hit.email.fromName,
+                snippet: hit.email.snippet,
+                receivedAt: hit.email.receivedAt,
+                classification: hit.classification,
+              },
+            ],
+            _count: { comments: comments.length },
+            hasDraft: false,
+          };
+        }),
+      );
+      return {
+        data,
+        total,
+        page: pageNum,
+        limit: limitNum,
+        hasMore: skip + limitNum < total,
+      };
+    }
+
+    // Inbox-split / category fast path. The inbox tab bar passes args.category
+    // ("client_work", "internal", "billing", etc — comma-separated when the
+    // user combines several into one split). The generic candidate-fan-out
+    // path would read every email body in every recent thread to filter by
+    // classification, which trivially blows the 16MB read limit on a real
+    // mailbox. Here we go directly to the classifications index instead.
+    if (args.category && !searchTerm && !fromEmail) {
+      const cats = args.category
+        .split(",")
+        .map((c) => c.trim())
+        .filter(Boolean);
+      if (cats.length > 0) {
+        const PER_CATEGORY_HITS = 200;
+        const allClassifications: Doc<"emailClassifications">[] = [];
+        for (const cat of cats) {
+          const hits = await ctx.db
+            .query("emailClassifications")
+            .withIndex("by_category", (q) => q.eq("category", cat))
+            .order("desc")
+            .take(PER_CATEGORY_HITS);
+          allClassifications.push(...hits);
+        }
+        const userAccountSet = new Set(accountIds.map((a) => String(a)));
+        const threadLatest = new Map<
+          Id<"threads">,
+          {
+            email: Doc<"emails">;
+            classification: {
+              category: string;
+              confidence?: number;
+              urgency?: string;
+              summary?: string;
+            };
+          }
+        >();
+        for (const c of allClassifications) {
+          const email = await ctx.db.get(c.emailId);
+          if (!email) continue;
+          if (!userAccountSet.has(String(email.accountId))) continue;
+          const cur = threadLatest.get(email.threadId);
+          if (!cur || email.receivedAt > cur.email.receivedAt) {
+            threadLatest.set(email.threadId, {
+              email,
+              classification: {
+                category: c.category,
+                confidence: c.confidence,
+                urgency: c.urgency,
+                summary: c.summary,
+              },
+            });
+          }
+        }
+        const sortedThreadIds = Array.from(threadLatest.entries())
+          .sort((a, b) => b[1].email.receivedAt - a[1].email.receivedAt)
+          .map(([id]) => id);
+        const total = sortedThreadIds.length;
+        const pagedIds = sortedThreadIds.slice(skip, skip + limitNum);
+        const pagedThreads = (
+          await Promise.all(pagedIds.map((id) => ctx.db.get(id)))
+        ).filter(
+          (t): t is Doc<"threads"> =>
+            !!t && !t.isTrashed && !t.isArchived && !t.snoozedUntil,
+        );
+        const data = await Promise.all(
+          pagedThreads.map(async (t) => {
+            const hit = threadLatest.get(t._id)!;
+            const comments = await ctx.db
+              .query("threadComments")
+              .withIndex("by_thread", (q) => q.eq("threadId", t._id))
+              .collect();
+            return {
+              ...t,
+              id: t._id,
+              emails: [
+                {
+                  fromAddress: hit.email.fromAddress,
+                  fromName: hit.email.fromName,
+                  snippet: hit.email.snippet,
+                  receivedAt: hit.email.receivedAt,
+                  classification: hit.classification,
+                },
+              ],
+              _count: { comments: comments.length },
+              hasDraft: false,
+            };
+          }),
+        );
+        return {
+          data,
+          total,
+          page: pageNum,
+          limit: limitNum,
+          hasMore: skip + limitNum < total,
+        };
+      }
+    }
+
+    // Pull threads. Default path: most recent N per account by lastMessageAt.
+    // Search path: query the search indexes on threads.subject AND
+    // emails.bodyText, then load the matching thread rows.
+    let candidates: Doc<"threads">[];
+    if (useSearchIndex) {
+      // Email search hits load *whole* email docs (full HTML body) just so we
+      // can read .threadId off them. With long histories that's tens of MB
+      // and trips the 16MB read limit. Subject hits are thread docs, cheap.
+      // We use a tighter cap on body hits since ranked-top-50 from BM25 is
+      // already deep enough for a real result set; the user can scroll.
+      const SUBJECT_HITS_PER_ACCOUNT = 200;
+      const BODY_HITS_PER_ACCOUNT = 50;
+      const subjectHitsArrays = await Promise.all(
+        accountIds.map((aid) =>
+          ctx.db
+            .query("threads")
+            .withSearchIndex("search_subject", (q) =>
+              q.search("subject", freeText).eq("accountId", aid),
+            )
+            .take(SUBJECT_HITS_PER_ACCOUNT),
+        ),
+      );
+      const bodyHitsArrays = await Promise.all(
+        accountIds.map((aid) =>
+          ctx.db
+            .query("emails")
+            .withSearchIndex("search_body", (q) =>
+              q.search("bodyText", freeText).eq("accountId", aid),
+            )
+            .take(BODY_HITS_PER_ACCOUNT),
+        ),
+      );
+
+      // Convex's search index uses BM25 ranking, which happily returns hits
+      // that match only some of the query tokens (the user reported searching
+      // "country lumber" and getting Google Merchant Center emails that only
+      // had "country" in them). Tighten the contract to AND-of-all-tokens
+      // here: require every non-trivial token from the query to literally
+      // appear in the subject or in the body we already read from the index.
+      // Phrase mode: if the user wrapped the query in double quotes we keep
+      // the entire phrase as a single token so "country lumber" only matches
+      // adjacent occurrences.
+      const tokens = (() => {
+        const t = freeText.trim();
+        if (t.startsWith('"') && t.endsWith('"') && t.length >= 3) {
+          return [t.slice(1, -1).toLowerCase()];
+        }
+        return t
+          .toLowerCase()
+          .split(/\s+/)
+          .filter((s) => s.length >= 2);
+      })();
+      const allTokensIn = (haystack: string | undefined | null): boolean => {
+        if (!haystack) return false;
+        const lower = haystack.toLowerCase();
+        return tokens.every((tok) => lower.includes(tok));
+      };
+
+      const threadIdSet = new Set<Id<"threads">>();
+      const subjectMatches = subjectHitsArrays.flat();
+      for (const t of subjectMatches) {
+        if (allTokensIn(t.subject) || allTokensIn(t.snippet)) {
+          threadIdSet.add(t._id);
+        }
+      }
+      for (const e of bodyHitsArrays.flat()) {
+        if (
+          allTokensIn(e.subject) ||
+          allTokensIn(e.bodyText) ||
+          allTokensIn(e.fromAddress) ||
+          allTokensIn(e.fromName)
+        ) {
+          threadIdSet.add(e.threadId);
+        }
+      }
+      const merged = await Promise.all(
+        Array.from(threadIdSet).map((id) => ctx.db.get(id)),
+      );
+      candidates = merged.filter((t): t is Doc<"threads"> => !!t);
+    } else {
+      // Pull threads from each account index (fan-out then merge — Convex doesn't support `IN`).
+      // Non-search browse keeps a smaller window because the list has infinite scroll.
+      const isFilterSearchMode = !!(fromEmail || args.category);
+      const perAccountLimit = isFilterSearchMode ? 2500 : 500;
+      const threadsArrays = await Promise.all(
+        accountIds.map((aid) =>
+          ctx.db
+            .query("threads")
+            .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", aid))
+            .order("desc")
+            .take(perAccountLimit),
+        ),
+      );
+      candidates = threadsArrays.flat();
+    }
 
     if (fromEmail && fromEmail.length > 0) {
       isFromFastPath = true;
       candidates = candidates.filter((t) => !t.isTrashed);
-    } else if (searchTerm && searchTerm.length > 0) {
-      parsed = parseSearchOperators(searchTerm);
+    } else if (parsed) {
       candidates = candidates.filter((t) => !t.isTrashed);
       if (parsed.isUnread) candidates = candidates.filter((t) => !t.isRead);
       if (parsed.isRead) candidates = candidates.filter((t) => t.isRead);
@@ -328,19 +754,32 @@ export const list = query({
         candidates = candidates.filter((t) => t.isArchived === args.isArchived);
     }
 
-    // Folder/search lookups that need email metadata. Keep this set narrow and
-    // bounded; category/tag filtering runs in a separate capped pass below.
+    // The inbox "needs at least one received email" check used to fan out
+    // every candidate's emails just to inspect from-addresses; with a fully
+    // historically-synced mailbox that's tens of MB of body HTML on every
+    // inbox open and trips the 16MB read limit. Sync workers denormalize
+    // `lastReceivedAt` onto the thread — use that instead.
+    const isInboxDefault =
+      !searchTerm && !fromEmail && (!folder || folder === "inbox");
+    if (isInboxDefault) {
+      candidates = candidates.filter((t) => t.lastReceivedAt !== undefined);
+    }
+
+    // Folder-needs-emails lookups (sent, drafts, fast from filter,
+    // operator filters, has:attachment): fan out emails per thread.
+    // Note: a free-text-only search (parsed.text without operators) is fully
+    // satisfied by the search index above — we deliberately skip the email
+    // load there to avoid re-reading the bodies we just searched.
+    const hasOperatorFilters = !!(
+      parsed && (parsed.from || parsed.to ||
+        parsed.before !== undefined || parsed.after !== undefined ||
+        parsed.hasAttachment)
+    );
     const needsEmails =
       isFromFastPath ||
-      (parsed &&
-        (parsed.text.length > 0 ||
-          parsed.from ||
-          parsed.to ||
-          parsed.cc ||
-          parsed.before !== undefined ||
-          parsed.after !== undefined ||
-          parsed.hasAttachment)) ||
-      folder === "sent";
+      hasOperatorFilters ||
+      folder === "sent" ||
+      folder === "drafts";
 
     let filtered = candidates;
     if (needsEmails) {
@@ -395,7 +834,11 @@ export const list = query({
               !!parsed.hasAttachment;
             if (hasOperatorFilters && !matchesEmailFilters) return false;
 
-            if (parsed.text.length > 0) {
+            // Text-substring filter only runs when we DIDN'T use the search
+            // index. The search index already ranked & filtered by relevance
+            // (BM25-style), so applying a stricter substring match here would
+            // drop legitimate fuzzy/stemmed hits.
+            if (!useSearchIndex && parsed.text.length > 0) {
               const subjectHit = ciIncludes(thread.subject, parsed.text);
               const snippetHit = ciIncludes(thread.snippet ?? "", parsed.text);
               const emailHit = emails.some(
@@ -413,19 +856,14 @@ export const list = query({
           // Folder-specific filters that need emails:
           if (folder === "sent") {
             return emails.some(
-              (e) => allAccountEmails.includes(e.fromAddress) && !e.isDraft,
+              (e) => isSelfAddress(allAccountEmails, e.fromAddress) && !e.isDraft,
             );
           }
           if (folder === "drafts") {
             return emails.some((e) => e.isDraft);
           }
-          if (!folder || folder === "inbox") {
-            // Inbox: must have at least one received (non-self) email.
-            const hasReceived = emails.some(
-              (e) => !allAccountEmails.includes(e.fromAddress),
-            );
-            if (!hasReceived) return false;
-          }
+          // Inbox-default's "must have a received email" check is handled
+          // upfront with thread.lastReceivedAt — no need to inspect emails here.
           return true;
         })
         .map(({ thread }) => thread);
@@ -496,10 +934,13 @@ export const list = query({
         if (isDraftsFolder) {
           primary = emailsDesc.find((e) => e.isDraft) ?? null;
         } else {
-          // Show the latest message in the conversation row, regardless of
-          // whether it was inbound or sent by the user. This keeps the inbox
-          // preview aligned with the same latest-activity ordering above.
-          primary = emailsDesc[0] ?? null;
+          // Prefer the most recent non-self message for the row preview so
+          // inbox cards don't read "From: yourself"; fall back to the latest
+          // message if every message in the thread came from the user.
+          primary =
+            emailsDesc.find((e) => !isSelfAddress(allAccountEmails, e.fromAddress)) ??
+            emailsDesc[0] ??
+            null;
         }
         const comments = await ctx.db
           .query("threadComments")
@@ -570,11 +1011,9 @@ export const get = query({
       throw new Error("Access denied");
     }
 
-    // Cap how many emails we hydrate. Some marketing threads have 20+
-    // messages with 80–500 KB bodies each — reading every body row at once
-    // trips Convex's 16 MiB byte cap and leaves the viewer stuck on the
-    // spinner. The UI shows the most recent K messages by default, which
-    // matches Gmail/Spark's collapsed-history behavior.
+    // Cap how many emails we hydrate. Long marketing threads with image-embedded
+    // bodies (20+ messages, 80–500 KB each) easily push past Convex's 16 MiB
+    // read limit. UI shows the most recent K by default — Gmail/Spark style.
     const MAX_HYDRATED = 25;
     const allEmails = await ctx.db
       .query("emails")
@@ -582,12 +1021,27 @@ export const get = query({
       .order("asc")
       .collect();
     const totalCount = allEmails.length;
-    // Keep the newest K — if the thread is shorter, that's everything.
     const emails =
       totalCount > MAX_HYDRATED
         ? allEmails.slice(totalCount - MAX_HYDRATED)
         : allEmails;
     const olderHidden = totalCount - emails.length;
+
+    // Even within the kept tail, a single email can be huge (base64-inlined
+    // image, kitchen-sink HTML signature). Strip bodies on any single message
+    // > 1 MB, but keep the latest 3 untouched so reply context never breaks.
+    const PER_EMAIL_MAX = 1 * 1024 * 1024;
+    const KEEP_FULL_NEWEST = 3;
+    for (let i = 0; i < emails.length; i++) {
+      const allowFull = i >= emails.length - KEEP_FULL_NEWEST;
+      const bytes = (emails[i].bodyHtml?.length ?? 0) + (emails[i].bodyText?.length ?? 0);
+      if (!allowFull && bytes > PER_EMAIL_MAX) {
+        const stripped = emails[i] as Record<string, unknown>;
+        stripped.bodyHtml = undefined;
+        stripped.bodyText = undefined;
+        (stripped as { bodyTruncated?: boolean }).bodyTruncated = true;
+      }
+    }
 
     const emailsHydrated = await Promise.all(
       emails.map(async (e) => {
@@ -734,10 +1188,42 @@ export const markRead = mutation({
     if (!(await userOwnsThread(ctx, userId, thread))) {
       throw new Error("Access denied");
     }
-    await ctx.db.patch(threadId, { isRead: isRead ?? true });
+    const newIsRead = isRead ?? true;
+    await ctx.db.patch(threadId, {
+      isRead: newIsRead,
+      readStateLocalAt: Date.now(),
+    });
+    await scheduleProviderReadStatePush(ctx, thread.accountId, thread.providerThreadId, newIsRead);
     return { ok: true };
   },
 });
+
+// Helper: schedule the appropriate provider action to mirror our local
+// read-state change. If the user owns multiple accounts on different
+// providers, only the thread's own account is touched.
+async function scheduleProviderReadStatePush(
+  ctx: { db: any; scheduler: any },
+  accountId: Id<"mailAccounts">,
+  providerThreadId: string,
+  isRead: boolean,
+): Promise<void> {
+  const account = await ctx.db.get(accountId);
+  if (!account) return;
+  const provider = (account as Doc<"mailAccounts">).provider;
+  if (provider === "GMAIL") {
+    await ctx.scheduler.runAfter(0, internal.sync.gmail._pushThreadReadState, {
+      accountId,
+      providerThreadId,
+      isRead,
+    });
+  } else if (provider === "MICROSOFT") {
+    await ctx.scheduler.runAfter(0, internal.sync.microsoft._pushThreadReadState, {
+      accountId,
+      providerThreadId,
+      isRead,
+    });
+  }
+}
 
 // Generic update — used for star/archive/trash/labels (mirror PATCH /api/threads/:id)
 export const update = mutation({
@@ -758,7 +1244,10 @@ export const update = mutation({
       throw new Error("Access denied");
     }
     const patch: Record<string, unknown> = {};
-    if (rest.isRead !== undefined) patch.isRead = rest.isRead;
+    if (rest.isRead !== undefined) {
+      patch.isRead = rest.isRead;
+      patch.readStateLocalAt = Date.now();
+    }
     if (rest.isStarred !== undefined) patch.isStarred = rest.isStarred;
     if (rest.isArchived !== undefined) {
       patch.isArchived = rest.isArchived;
@@ -771,6 +1260,23 @@ export const update = mutation({
     if (rest.isTrashed !== undefined) patch.isTrashed = rest.isTrashed;
     if (rest.labels !== undefined) patch.labels = rest.labels;
     await ctx.db.patch(threadId, patch);
+    // Archiving or trashing resolves any open "Needs Response" signal on
+    // this thread — the user has decided they don't owe a reply.
+    if (rest.isArchived === true || rest.isTrashed === true) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.ai.needsResponseData._dismissOpenSignalsForThread,
+        { threadId, kind: "archived" },
+      );
+    }
+    if (rest.isRead !== undefined) {
+      await scheduleProviderReadStatePush(
+        ctx,
+        thread.accountId,
+        thread.providerThreadId,
+        rest.isRead,
+      );
+    }
     const updated = await ctx.db.get(threadId);
     return { data: updated };
   },
@@ -803,6 +1309,13 @@ export const markArchived = mutation({
       ? thread.labels.filter((label) => label !== "INBOX")
       : Array.from(new Set([...thread.labels, "INBOX"]));
     await ctx.db.patch(threadId, { isArchived, labels });
+    if (isArchived) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.ai.needsResponseData._dismissOpenSignalsForThread,
+        { threadId, kind: "archived" },
+      );
+    }
     return { ok: true };
   },
 });
@@ -875,98 +1388,42 @@ export const unsnooze = internalMutation({
   },
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Shared threads ("Shared With Me")
-// ─────────────────────────────────────────────────────────────────────────────
-
-export const listShared = query({
-  args: {
-    page: v.optional(v.number()),
-    limit: v.optional(v.number()),
-  },
-  handler: async (ctx, args) => {
+// Count of unread inbox threads, capped at 100 so the badge query is cheap
+// no matter the mailbox size. Bell UI shows "99+" past that.
+export const unreadCount = query({
+  args: {},
+  handler: async (ctx) => {
     const userId = await requireUser(ctx);
-    const pageNum = args.page ?? 1;
-    const limitNum = Math.min(args.limit ?? 50, 100);
-    const skip = (pageNum - 1) * limitNum;
-
-    const accessRows = await ctx.db
-      .query("threadAccess")
+    const MAX_BADGE = 100;
+    const accts = await ctx.db
+      .query("mailAccounts")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
-
-    const threads = await Promise.all(
-      accessRows.map((a) => ctx.db.get(a.threadId)),
-    );
-    const valid = threads.filter(
-      (t): t is Doc<"threads"> => t !== null,
-    );
-    valid.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
-    const paged = valid.slice(skip, skip + limitNum);
-
-    const data = await Promise.all(
-      paged.map(async (t) => {
-        const emailsDesc = await ctx.db
-          .query("emails")
-          .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
-          .order("desc")
-          .take(1);
-        const comments = await ctx.db
-          .query("threadComments")
-          .withIndex("by_thread", (q) => q.eq("threadId", t._id))
-          .collect();
-        return {
-          ...t,
-          id: t._id,
-          emails: emailsDesc.map((e) => ({
-            fromAddress: e.fromAddress,
-            fromName: e.fromName,
-            snippet: e.snippet,
-            receivedAt: e.receivedAt,
-          })),
-          _count: { comments: comments.length },
-        };
-      }),
-    );
-
-    return {
-      data,
-      total: valid.length,
-      page: pageNum,
-      limit: limitNum,
-    };
-  },
-});
-
-// ───────────────────────────────────────────────────────────────────────────────────────
-// Lightweight unread badge count. Bounded by index + filter — we cap the
-// scan per account so a power-user mailbox can't blow the read budget. The
-// count is "good enough" for a sidebar badge; exact totals come from list.
-// ───────────────────────────────────────────────────────────────────────────────────────
-
-const UNREAD_COUNT_MAX_PER_ACCOUNT = 500;
-
-export const unreadCount = query({
-  args: { accountId: v.optional(v.id("mailAccounts")) },
-  handler: async (ctx, { accountId }) => {
-    const userId = await requireUser(ctx);
-    const accountIds = accountId
-      ? [accountId]
-      : await getUserMailAccountIds(ctx, userId);
-    if (accountIds.length === 0) return { count: 0 };
-
-    let count = 0;
-    let capped = false;
-    for (const id of accountIds) {
-      const threads = await ctx.db
+    let total = 0;
+    for (const a of accts) {
+      // Walk recent threads per account; stop as soon as we hit MAX_BADGE.
+      const remaining = MAX_BADGE - total;
+      if (remaining <= 0) break;
+      const recent = await ctx.db
         .query("threads")
-        .withIndex("by_account_isArchived_isTrashed", (q) =>
-          q.eq("accountId", id).eq("isArchived", false).eq("isTrashed", false),
-        )
-        .take(UNREAD_COUNT_MAX_PER_ACCOUNT);
-      if (threads.length === UNREAD_COUNT_MAX_PER_ACCOUNT) capped = true;
-      for (const t of threads) if (!t.isRead) count += 1;
+        .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", a._id))
+        .order("desc")
+        .take(remaining * 3); // small over-fetch so unread density doesn't starve
+      for (const t of recent) {
+        if (
+          !t.isRead &&
+          !t.isTrashed &&
+          !t.isArchived &&
+          !t.snoozedUntil &&
+          !t.labels.includes("SPAM") &&
+          t.lastReceivedAt !== undefined
+        ) {
+          total++;
+          if (total >= MAX_BADGE) break;
+        }
+      }
     }
-    return { count, capped };
+    return { count: total };
   },
 });
+

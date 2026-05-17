@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Mail,
   Star,
@@ -12,8 +12,10 @@ import {
   Clock,
   Plus,
 } from 'lucide-react';
-import { useAccounts, useStartOAuth, useDeleteAccount, useSyncAccount } from '../../hooks/useAccounts';
-import { useHistoricalSyncStatus, useStartHistoricalSync } from '../../hooks/useHistoricalSync';
+import * as Popover from '@radix-ui/react-popover';
+import { useAccounts, useStartOAuth, useDeleteAccount, useSyncAccount, useSetAccountColor, useUpdateAccount } from '../../hooks/useAccounts';
+import { useHistoricalSyncStatus, useStartHistoricalSync, useStartContactBackfill } from '../../hooks/useHistoricalSync';
+import { ACCOUNT_COLORS, getAccountColor } from '../../lib/constants';
 import { useSignatures } from '../../hooks/useSignatures';
 import { useUiStore } from '../../stores/uiStore';
 import { cn } from '../../lib/utils';
@@ -23,24 +25,12 @@ const PROVIDER_INFO: Record<string, { label: string; color: string; icon: JSX.El
   GMAIL: {
     label: 'Gmail',
     color: '#EA4335',
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none">
-        <path d="M22 6L12 13L2 6V4L12 11L22 4V6Z" fill="#EA4335" />
-        <path d="M22 6V18C22 19.1 21.1 20 20 20H4C2.9 20 2 19.1 2 18V6L12 13L22 6Z" fill="#FBBC05" fillOpacity="0.3" />
-      </svg>
-    ),
+    icon: <img src="/icons/gmail.svg" alt="Gmail" className="h-5 w-5 object-contain" />,
   },
   MICROSOFT: {
-    label: 'Office 365',
+    label: 'Outlook',
     color: '#0078D4',
-    icon: (
-      <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none">
-        <rect x="2" y="2" width="9.5" height="9.5" fill="#F25022" />
-        <rect x="12.5" y="2" width="9.5" height="9.5" fill="#7FBA00" />
-        <rect x="2" y="12.5" width="9.5" height="9.5" fill="#00A4EF" />
-        <rect x="12.5" y="12.5" width="9.5" height="9.5" fill="#FFB900" />
-      </svg>
-    ),
+    icon: <img src="/icons/outlook.svg" alt="Outlook" className="h-7 w-7 -m-1 object-contain" />,
   },
   APPLE_IMAP: {
     label: 'IMAP',
@@ -49,17 +39,39 @@ const PROVIDER_INFO: Record<string, { label: string; color: string; icon: JSX.El
   },
 };
 
-function AccountCard({ account, isDefault, onSetDefault }: {
+function AccountCard({ account, accountIndex, isDefault, onSetDefault }: {
   account: any;
+  accountIndex: number;
   isDefault: boolean;
   onSetDefault: () => void;
 }) {
   const deleteAccount = useDeleteAccount();
   const syncAccount = useSyncAccount();
   const startHistoricalSync = useStartHistoricalSync();
+  const startContactBackfill = useStartContactBackfill();
   const startOAuth = useStartOAuth();
+  const setAccountColor = useSetAccountColor();
+  const updateAccount = useUpdateAccount();
+  const [colorOpen, setColorOpen] = useState(false);
+  const [hexInput, setHexInput] = useState('');
+  const [labelDraft, setLabelDraft] = useState<string>(account.displayName ?? '');
+  // Resync the label draft if the saved name changes (e.g. via reactive
+  // Convex update from another tab) and we're not actively editing.
+  useEffect(() => {
+    setLabelDraft(account.displayName ?? '');
+  }, [account.displayName]);
+  const commitLabel = () => {
+    const next = labelDraft.trim();
+    const current = (account.displayName ?? '').trim();
+    if (next === current) return;
+    updateAccount.mutate({
+      id: account.id,
+      displayName: next.length > 0 ? next : null,
+    });
+  };
   const { data: syncStatusData } = useHistoricalSyncStatus(account.id);
   const { data: sigData } = useSignatures();
+  const effectiveColor: string = account.color ?? getAccountColor(accountIndex);
   const syncStatus = syncStatusData?.data;
   const isImporting = syncStatus?.historicalSyncStatus === 'IN_PROGRESS';
   const isCompleted = syncStatus?.historicalSyncStatus === 'COMPLETED';
@@ -86,12 +98,36 @@ function AccountCard({ account, isDefault, onSetDefault }: {
     )}>
       {/* Header row */}
       <div className="flex items-start gap-3">
-        <div className="mt-0.5">{provider.icon}</div>
+        {/* Provider icon wrapped in a colored ring matching this account's
+            color — same visual the user gets in the thread list, so the
+            picker preview matches reality. */}
+        <div
+          className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
+          style={{ boxShadow: `0 0 0 2px white, 0 0 0 3.5px ${effectiveColor}` }}
+        >
+          {provider.icon}
+        </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <p className="text-sm font-semibold text-text-primary truncate">
-              {account.displayName || account.email}
-            </p>
+            {/* Inline rename. Empty value clears the label (the navigation
+                menu and thread list will fall back to the email address). */}
+            <input
+              type="text"
+              value={labelDraft}
+              onChange={(e) => setLabelDraft(e.target.value)}
+              onBlur={commitLabel}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  (e.target as HTMLInputElement).blur();
+                } else if (e.key === 'Escape') {
+                  setLabelDraft(account.displayName ?? '');
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+              placeholder={account.email}
+              aria-label="Account label"
+              className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-text-primary outline-none placeholder:font-normal placeholder:text-text-tertiary focus:placeholder:text-text-tertiary/60"
+            />
             {isDefault && (
               <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
                 Default
@@ -103,6 +139,77 @@ function AccountCard({ account, isDefault, onSetDefault }: {
             {provider.label}
           </p>
         </div>
+        {/* Color picker — opens a small palette + hex input. */}
+        <Popover.Root open={colorOpen} onOpenChange={setColorOpen}>
+          <Popover.Trigger asChild>
+            <button
+              type="button"
+              aria-label="Change account color"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full ring-1 ring-border transition-transform hover:scale-105"
+              style={{ background: effectiveColor }}
+            />
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content
+              align="end"
+              sideOffset={6}
+              className="z-50 w-60 rounded-lg border border-border bg-white p-3 shadow-lg"
+            >
+              <p className="mb-2 text-[11px] font-medium text-text-secondary">
+                Account color
+              </p>
+              <div className="grid grid-cols-5 gap-2">
+                {ACCOUNT_COLORS.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    onClick={() => {
+                      setAccountColor.mutate({ id: account.id, color: c });
+                      setColorOpen(false);
+                    }}
+                    aria-label={`Use ${c}`}
+                    className={cn(
+                      'h-7 w-7 rounded-full ring-1 ring-border transition-transform hover:scale-110',
+                      effectiveColor.toLowerCase() === c.toLowerCase() && 'ring-2 ring-text-primary',
+                    )}
+                    style={{ background: c }}
+                  />
+                ))}
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <span className="text-[11px] text-text-tertiary">Hex</span>
+                <input
+                  type="text"
+                  value={hexInput}
+                  onChange={(e) => setHexInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key !== 'Enter') return;
+                    const v = hexInput.trim();
+                    if (!/^#[0-9a-fA-F]{6}$/.test(v)) {
+                      toast.error('Use a 6-digit hex like #FF7E16');
+                      return;
+                    }
+                    setAccountColor.mutate({ id: account.id, color: v });
+                    setHexInput('');
+                    setColorOpen(false);
+                  }}
+                  placeholder="#FF7E16"
+                  className="flex-1 rounded-md border border-border px-2 py-1 text-[12px] outline-none focus:border-primary"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setAccountColor.mutate({ id: account.id, color: null });
+                  setColorOpen(false);
+                }}
+                className="mt-3 w-full rounded-md border border-border px-2 py-1 text-[11px] text-text-secondary hover:bg-surface"
+              >
+                Reset to default
+              </button>
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
       </div>
 
       {/* Stats row */}
@@ -180,6 +287,21 @@ function AccountCard({ account, isDefault, onSetDefault }: {
         )}
         {(account.provider === 'GMAIL' || account.provider === 'MICROSOFT') && (
           <button
+            onClick={() =>
+              startContactBackfill.mutate(account.id).then(
+                () => toast.success('Rebuilding contacts from your sent email...'),
+                (err) => toast.error(err?.message ?? 'Rebuild failed to start'),
+              )
+            }
+            disabled={startContactBackfill.isPending}
+            className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface hover:text-text-primary disabled:opacity-50"
+          >
+            <RefreshCw className="h-3 w-3" />
+            Rebuild contacts
+          </button>
+        )}
+        {(account.provider === 'GMAIL' || account.provider === 'MICROSOFT') && (
+          <button
             onClick={() => startOAuth.mutate(account.provider === 'GMAIL' ? 'gmail' : 'microsoft')}
             className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface hover:text-text-primary"
           >
@@ -205,7 +327,7 @@ function AccountCard({ account, isDefault, onSetDefault }: {
 
 export function AccountsSettings() {
   const { data: accountsData } = useAccounts();
-  const accounts = accountsData?.data ?? [];
+  const accounts = accountsData ?? [];
   const startOAuth = useStartOAuth();
   const defaultAccountId = useUiStore((s) => s.defaultAccountId);
   const setDefaultAccountId = useUiStore((s) => s.setDefaultAccountId);
@@ -228,10 +350,11 @@ export function AccountsSettings() {
 
       {/* Account cards */}
       <div className="space-y-3">
-        {accounts.map((account: any) => (
+        {accounts.map((account: any, index: number) => (
           <AccountCard
             key={account.id}
             account={account}
+            accountIndex={index}
             isDefault={account.id === effectiveDefault}
             onSetDefault={() => {
               setDefaultAccountId(account.id);
@@ -247,15 +370,15 @@ export function AccountsSettings() {
           onClick={() => startOAuth.mutate('gmail')}
           className="flex items-center gap-2 rounded-lg border border-dashed border-border px-4 py-3 text-xs font-medium text-text-secondary transition-colors hover:border-text-tertiary hover:bg-surface hover:text-text-primary"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <img src="/icons/gmail.svg" alt="" className="h-4 w-4 object-contain" />
           Add Gmail
         </button>
         <button
           onClick={() => startOAuth.mutate('microsoft')}
           className="flex items-center gap-2 rounded-lg border border-dashed border-border px-4 py-3 text-xs font-medium text-text-secondary transition-colors hover:border-text-tertiary hover:bg-surface hover:text-text-primary"
         >
-          <Plus className="h-3.5 w-3.5" />
-          Add Office 365
+          <img src="/icons/outlook.svg" alt="" className="h-6 w-6 -m-1 object-contain" />
+          Add Outlook
         </button>
       </div>
 

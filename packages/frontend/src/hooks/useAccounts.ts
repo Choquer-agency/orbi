@@ -72,6 +72,12 @@ export function useStartOAuth() {
       if (native) {
         const { Browser } = await import('@capacitor/browser');
         await Browser.open({ url, presentationStyle: 'popover' });
+      } else if (isElectron) {
+        // Hand the OAuth URL to the system browser via the Electron bridge.
+        // Otherwise window.location.href would replace the app's main window
+        // with the provider's login page and the user has no way back.
+        const w = window as unknown as { electronAPI?: { openExternal?: (u: string) => Promise<void> } };
+        await w.electronAPI?.openExternal?.(url);
       } else {
         window.location.href = url;
       }
@@ -119,6 +125,32 @@ export function useUpdateAccount() {
     mutateAsync,
     isPending,
     isLoading: isPending,
+  };
+}
+
+export function useSetAccountColor() {
+  const fn = useMutation(api.mailAccounts.setColor);
+  const [isPending, setIsPending] = useState(false);
+  const mutateAsync = async (args: {
+    id: Id<'mailAccounts'> | string;
+    color: string | null;
+  }) => {
+    setIsPending(true);
+    try {
+      return await fn({
+        accountId: args.id as Id<'mailAccounts'>,
+        color: args.color,
+      });
+    } finally {
+      setIsPending(false);
+    }
+  };
+  return {
+    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
+      void mutateAsync(args);
+    },
+    mutateAsync,
+    isPending,
   };
 }
 

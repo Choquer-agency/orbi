@@ -37,6 +37,9 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const saveVersionRef = useRef(0);
   const lastFieldsRef = useRef<DraftFields | null>(null);
+  // Set once the user has clicked Send. Disarms further autosaves and the
+  // unmount cleanup so neither can race with / undo the just-sent email.
+  const sentRef = useRef(false);
 
   const saveDraftMutation = useSaveDraft();
   const deleteDraftMutation = useDeleteDraft();
@@ -44,6 +47,7 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
   const saveDraft = useCallback(
     async (fields: DraftFields) => {
       if (!enabled || !accountId) return;
+      if (sentRef.current) return;
 
       // Skip if nothing meaningful to save
       const hasContent =
@@ -103,9 +107,14 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
     }
   }, [deleteDraftMutation]);
 
+  const markSent = useCallback(() => {
+    sentRef.current = true;
+  }, []);
+
   // Cleanup empty drafts on unmount
   useEffect(() => {
     return () => {
+      if (sentRef.current) return;
       const id = draftIdRef.current;
       const fields = lastFieldsRef.current;
       if (id && !fields?.bodyText?.trim()) {
@@ -116,5 +125,5 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { draftId, saveDraft, deleteDraft, isSaving, lastSavedAt };
+  return { draftId, saveDraft, deleteDraft, markSent, isSaving, lastSavedAt };
 }

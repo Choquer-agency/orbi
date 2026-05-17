@@ -5,6 +5,7 @@ import { useUiStore } from '../../stores/uiStore';
 import { getInitials } from '../../lib/utils';
 import { NotificationPopover } from './NotificationPopover';
 import { KeyboardShortcutsWidget } from '../ui/KeyboardShortcutsWidget';
+import { UnreadBadge } from './UnreadBadge';
 
 export function HeaderIcons() {
   const { user, logout } = useAuthStore();
@@ -12,7 +13,7 @@ export function HeaderIcons() {
 
   return (
     <div className="titlebar-no-drag flex items-center gap-3">
-      {/* Notifications */}
+      <UnreadBadge />
       <NotificationPopover />
       <KeyboardShortcutsWidget inline />
 
@@ -21,7 +22,7 @@ export function HeaderIcons() {
         <DropdownMenu.Root>
           <DropdownMenu.Trigger asChild>
             <button
-              className="flex h-6 w-6 items-center justify-center rounded-full bg-primary text-[10px] font-medium text-white transition-opacity hover:opacity-80"
+              className="flex h-[19px] w-[19px] items-center justify-center rounded-full bg-primary text-[8px] font-medium text-white transition-opacity hover:opacity-80"
               aria-label="Account menu"
             >
               {getInitials(user.name)}

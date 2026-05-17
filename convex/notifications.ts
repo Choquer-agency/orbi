@@ -48,26 +48,39 @@ export const list = query({
   handler: async (ctx, { page = 1, limit = 20 }) => {
     const userId = await requireUser(ctx);
     const cappedLimit = Math.min(Math.max(limit, 1), 50);
-    const skip = (Math.max(page, 1) - 1) * cappedLimit;
-
-    // Pull all and slice in memory — notifications are user-scoped and small.
-    const all = await ctx.db
+    const cappedPage = Math.max(page, 1);
+    // We can't .collect() this anymore — accounts can easily have 30k+
+    // notifications after a historical sync, which trips the per-call
+    // 32k-doc cap. Read just enough rows to satisfy the requested page
+    // (plus one to detect hasMore). `by_user_isRead` orders by userId,
+    // isRead, then _creationTime; .order("desc") + .take() walks newest-first.
+    const skip = (cappedPage - 1) * cappedLimit;
+    const upTo = skip + cappedLimit + 1;
+    // Cap the page we'll serve so a runaway client can't force us to read
+    // an arbitrary number of rows.
+    const HARD_READ_CAP = 500;
+    const toTake = Math.min(upTo, HARD_READ_CAP);
+    const slice = await ctx.db
       .query("notifications")
       .withIndex("by_user_isRead", (q) => q.eq("userId", userId))
-      .collect();
-    all.sort((a, b) => b._creationTime - a._creationTime);
-
-    const total = all.length;
-    const data = all.slice(skip, skip + cappedLimit);
-    const unreadCount = all.filter((n) => !n.isRead).length;
+      .order("desc")
+      .take(toTake);
+    const data = slice.slice(skip, skip + cappedLimit);
+    const hasMore = slice.length > skip + cappedLimit;
+    // `total` and `unreadCount` are intentionally lower bounds — the
+    // notifications drawer doesn't display them precisely (the badge uses the
+    // dedicated unreadCount query, which is capped at 100). Anything past
+    // `HARD_READ_CAP` is just reported as "at least this many".
+    const total = slice.length;
+    const unreadCount = slice.filter((n) => !n.isRead).length;
 
     return {
       data,
       total,
       unreadCount,
-      page,
+      page: cappedPage,
       limit: cappedLimit,
-      hasMore: skip + cappedLimit < total,
+      hasMore,
     };
   },
 });
@@ -83,18 +96,52 @@ export const markRead = mutation({
   },
 });
 
+const MARK_ALL_READ_BATCH = 500;
+
 export const markAllRead = mutation({
   args: {},
   handler: async (ctx) => {
     const userId = await requireUser(ctx);
-    const unread = await ctx.db
+    // Patch the first batch synchronously so the badge updates immediately
+    // for the user, then hand the rest off to a background sweeper that
+    // re-schedules itself until the unread set is drained. We can't `collect`
+    // 30k+ rows in one mutation — that hits the per-call doc cap.
+    const slice = await ctx.db
       .query("notifications")
       .withIndex("by_user_isRead", (q) =>
         q.eq("userId", userId).eq("isRead", false),
       )
-      .collect();
-    for (const n of unread) await ctx.db.patch(n._id, { isRead: true });
-    return { success: true };
+      .take(MARK_ALL_READ_BATCH);
+    for (const n of slice) await ctx.db.patch(n._id, { isRead: true });
+    if (slice.length === MARK_ALL_READ_BATCH) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.notifications._markAllReadChunk,
+        { userId },
+      );
+    }
+    return { success: true, patched: slice.length };
+  },
+});
+
+export const _markAllReadChunk = internalMutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId }) => {
+    const slice = await ctx.db
+      .query("notifications")
+      .withIndex("by_user_isRead", (q) =>
+        q.eq("userId", userId).eq("isRead", false),
+      )
+      .take(MARK_ALL_READ_BATCH);
+    for (const n of slice) await ctx.db.patch(n._id, { isRead: true });
+    if (slice.length === MARK_ALL_READ_BATCH) {
+      await ctx.scheduler.runAfter(
+        0,
+        internal.notifications._markAllReadChunk,
+        { userId },
+      );
+    }
+    return { patched: slice.length };
   },
 });
 
@@ -121,13 +168,18 @@ export const unreadCount = query({
   args: {},
   handler: async (ctx) => {
     const userId = await requireUser(ctx);
-    const unread = await ctx.db
+    // The badge UI only differentiates 0, 1-99, and "99+", so we never need
+    // an exact count past 100. Collecting the entire unread set used to read
+    // 30k+ documents per call after a historical sync — the index already
+    // narrows to the unread slice, so this is just a stop-at-100 short read.
+    const MAX_BADGE_COUNT = 100;
+    const slice = await ctx.db
       .query("notifications")
       .withIndex("by_user_isRead", (q) =>
         q.eq("userId", userId).eq("isRead", false),
       )
-      .collect();
-    return { count: unread.length };
+      .take(MAX_BADGE_COUNT);
+    return { count: slice.length };
   },
 });
 

@@ -25,6 +25,12 @@ interface TriageFeedbackPayload {
   suggestedCategory: string;
   finalCategory: string;
   wasConfirmed: boolean;
+  // When the user opts in via the allow-sender dialog, the backend persists
+  // a `senderTriageOverrides` row so future emails matching this pattern
+  // skip the classifier and go straight to `finalCategory`. `allowKind`
+  // distinguishes exact-email from whole-domain patterns.
+  allowPattern?: string;
+  allowKind?: 'email' | 'domain';
 }
 
 // ─── Settings ────────────────────────────────────────────────
@@ -140,6 +146,8 @@ export function useTriageFeedback() {
         suggestedCategory: payload.suggestedCategory,
         finalCategory: payload.finalCategory,
         wasConfirmed: payload.wasConfirmed,
+        allowPattern: payload.allowPattern,
+        allowKind: payload.allowKind,
       });
     } finally {
       setIsPending(false);

@@ -34,8 +34,16 @@ function isMeaningfulHeaderName(fromName: string | undefined | null, fromAddress
  */
 export function useContactNameResolver() {
   const { isAuthenticated } = useConvexAuth();
-  const nameMap = useQuery(api.contacts.nameMap, isAuthenticated ? {} : 'skip');
-  const lookup = useMemo(() => new Map(nameMap ?? []), [nameMap]);
+  // Backend returns an array of { email, name } pairs (avoids Convex's per-object
+  // 1024-field limit for large address books). Build a lookup Map locally.
+  const entries = useQuery(api.contacts.nameMap, isAuthenticated ? {} : 'skip');
+  const lookup = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const e of entries ?? []) {
+      m.set(e.email, e.name);
+    }
+    return m;
+  }, [entries]);
 
   const resolveName = useCallback(
     (fromAddress: string | undefined | null, fromName: string | undefined | null): string => {
@@ -43,7 +51,13 @@ export function useContactNameResolver() {
       if (isMeaningfulHeaderName(fromName, fromAddress)) return fromName.trim();
       const resolved = lookup.get(fromAddress.toLowerCase());
       if (resolved) return resolved;
-      return fromName || fromAddress;
+      if (fromName && fromName.trim()) return fromName.trim();
+      const at = fromAddress.indexOf('@');
+      if (at > 0) {
+        const domain = fromAddress.slice(at + 1).split('.')[0];
+        if (domain) return domain.charAt(0).toUpperCase() + domain.slice(1);
+      }
+      return fromAddress;
     },
     [lookup],
   );

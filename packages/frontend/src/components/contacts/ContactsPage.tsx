@@ -89,7 +89,9 @@ export function ContactsTable() {
   const [selectedForMerge, setSelectedForMerge] = useState<Set<string>>(new Set());
 
   const { setSelectedPerson } = useUiStore();
-  const { data, isLoading } = usePersons({ q: searchQuery, limit: 500 });
+  // Server returns every person in one shot — sorting + filtering happen
+  // client-side. No cap.
+  const { data, isLoading } = usePersons({ q: searchQuery });
   const mergePersons = useMergePersons();
   const unlinkContact = useUnlinkContact();
   const persons = data?.data ?? [];

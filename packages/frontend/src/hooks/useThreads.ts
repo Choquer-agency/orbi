@@ -31,7 +31,6 @@ function isLikelyConvexId(value: unknown): value is string {
 //   useUpdateThread()               — { mutate, mutateAsync, isPending }
 //   useSnoozeThread()               — { mutate, mutateAsync, isPending }
 //   useUnsnoozeThread()             — { mutate, mutateAsync, isPending }
-//   useSharedThreads()              — { data, isLoading }
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface ThreadListParams {
@@ -97,11 +96,9 @@ export function useThreads(params: ThreadListParams = {}) {
     setStalePages((prev) => (pages.length > 0 ? pages : prev));
     setPage(1);
     setPages([]);
-    // Synchronous in-memory hit (re-visiting a previously seen view this session)
     const inMem = getCachedPageSync<ThreadListResponse>(paramsKey);
     setCachedPage1(inMem ?? null);
     lastParamsKey.current = paramsKey;
-    // Async IDB hit (first time after cold start)
     if (!inMem) {
       void loadCachedPage<ThreadListResponse>(paramsKey).then((p) => {
         if (p && lastParamsKey.current === paramsKey) {
@@ -150,15 +147,12 @@ export function useThreads(params: ThreadListParams = {}) {
       // Persist page-1 of each view for next cold start.
       saveCachedPage<ThreadListResponse>(paramsKey, result);
       setCachedPage1(result);
-      // Live data for the new view arrived — we no longer need the previous
-      // view's pages as a placeholder.
       setStalePages(null);
     }
   }, [result, paramsKey]);
 
   // Visible pages: prefer live; otherwise the most-recent previous view's
-  // pages (so filter switches feel instant); otherwise the cached snapshot
-  // for cold start.
+  // pages (so filter switches feel instant); otherwise the cached snapshot.
   const livePages = pages.length > 0 ? pages : result ? [result] : [];
   const visiblePages =
     livePages.length > 0
@@ -518,15 +512,5 @@ export function useUnsnoozeThread() {
     mutateAsync,
     isPending,
     isLoading: isPending,
-  };
-}
-
-export function useSharedThreads() {
-  const result = useQuery(api.threads.listShared, {});
-  return {
-    data: result,
-    isLoading: result === undefined,
-    isError: false,
-    error: undefined,
   };
 }

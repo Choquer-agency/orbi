@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { usePersonAutocomplete } from '../../hooks/usePersons';
+import { useAnyHistoricalSyncInProgress } from '../../hooks/useHistoricalSync';
 import { getAvatarColor } from '../../lib/constants';
 import { cn, getInitials } from '../../lib/utils';
 
@@ -22,6 +23,14 @@ export function RecipientInput({ value, onChange, placeholder }: RecipientInputP
 
   const { data } = usePersonAutocomplete(currentSegment);
   const suggestions = data?.data ?? [];
+  const importStatus = useAnyHistoricalSyncInProgress();
+  // Show the "still indexing" hint when the user is typing but we don't yet
+  // have a match and an import (or contact backfill) is mid-flight — the
+  // contact they're looking for may simply not be indexed yet.
+  const showIndexingHint =
+    currentSegment.length >= 1 &&
+    suggestions.length === 0 &&
+    (importStatus.inProgress || importStatus.contactBackfillInProgress);
 
   // Build flat list for keyboard navigation: persons + their expanded emails
   const flatItems: { type: 'person' | 'email'; person: any; contact?: any; index: number }[] = [];
@@ -36,10 +45,12 @@ export function RecipientInput({ value, onChange, placeholder }: RecipientInputP
   }
 
   useEffect(() => {
-    setShowDropdown(currentSegment.length >= 1 && suggestions.length > 0);
+    setShowDropdown(
+      currentSegment.length >= 1 && (suggestions.length > 0 || showIndexingHint),
+    );
     setActiveIndex(0);
     setExpandedPersonId(null);
-  }, [currentSegment, suggestions.length]);
+  }, [currentSegment, suggestions.length, showIndexingHint]);
 
   // Close on outside click
   useEffect(() => {
@@ -116,7 +127,7 @@ export function RecipientInput({ value, onChange, placeholder }: RecipientInputP
         onChange={(e) => onChange(e.target.value)}
         onKeyDown={handleKeyDown}
         onFocus={() => {
-          if (currentSegment.length >= 1 && suggestions.length > 0) {
+          if (currentSegment.length >= 1 && (suggestions.length > 0 || showIndexingHint)) {
             setShowDropdown(true);
           }
         }}
@@ -129,7 +140,7 @@ export function RecipientInput({ value, onChange, placeholder }: RecipientInputP
         data-lpignore="true"
       />
 
-      {showDropdown && flatItems.length > 0 && (
+      {showDropdown && (flatItems.length > 0 || showIndexingHint) && (
         <div
           ref={dropdownRef}
           className="absolute left-0 top-full z-50 mt-1 w-[360px] max-h-[300px] overflow-y-auto rounded-lg border border-border bg-white py-1 shadow-lg"
@@ -203,6 +214,13 @@ export function RecipientInput({ value, onChange, placeholder }: RecipientInputP
               </button>
             );
           })}
+          {showIndexingHint && (
+            <div className="border-t border-border px-3 py-2 text-[11px] text-text-tertiary">
+              Still indexing your contacts — more matches will appear as your
+              email finishes importing. You can type the address directly to
+              keep going.
+            </div>
+          )}
         </div>
       )}
     </div>

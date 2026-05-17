@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { X, Eye, Pencil, Send } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
-import { useMutation as useConvexMutation } from 'convex/react';
+import { useMutation } from 'convex/react';
 import { api as convexApi } from '../../../../../convex/_generated/api';
 import type { Id } from '../../../../../convex/_generated/dataModel';
 import { useUndoSendStore, type PendingUndoEmail } from '../../stores/undoSendStore';
@@ -142,14 +142,14 @@ function EditPanel({ email }: { email: PendingUndoEmail }) {
     textareaRef.current?.focus();
   }, []);
 
-  const editPending = useConvexMutation(convexApi.emails.editPendingSend);
+  const updatePending = useMutation(convexApi.emails.updatePending);
 
   const handleSave = async () => {
     setSaving(true);
     try {
       const bodyHtml = `<p>${body.replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br/>')}</p>`;
 
-      await editPending({
+      await updatePending({
         emailId: email.id as Id<'emails'>,
         bodyText: body,
         bodyHtml,
@@ -193,27 +193,20 @@ function EditPanel({ email }: { email: PendingUndoEmail }) {
 }
 
 export function UndoSendToast() {
-  const { pendingEmails, removePendingEmail } = useUndoSendStore();
-  const queryClient = useQueryClient();
-  const undoSendMutation = useConvexMutation(convexApi.emails.undoSend);
-  const sendNowMutation = useConvexMutation(convexApi.emails.sendNow);
+  const undoMutation = useMutation(convexApi.emails.undoSend);
+  const sendNowMutation = useMutation(convexApi.emails.sendNow);
 
   const handleCancel = useCallback(async (email: PendingUndoEmail) => {
     try {
-      await undoSendMutation({ emailId: email.id as Id<'emails'> });
+      await undoMutation({ emailId: email.id as Id<'emails'> });
       removePendingEmail(email.id);
       toast.success('Send cancelled');
-
-      if (email.threadId) {
-        queryClient.invalidateQueries({ queryKey: ['thread', email.threadId] });
-        queryClient.invalidateQueries({ queryKey: ['threads'] });
-      }
     } catch (err) {
       console.error('Cancel failed:', err);
       toast.error('Could not cancel — email may have already sent');
       removePendingEmail(email.id);
     }
-  }, [removePendingEmail, queryClient]);
+  }, [removePendingEmail, undoMutation]);
 
   const handleExpired = useCallback((id: string) => {
     removePendingEmail(id);
@@ -223,16 +216,11 @@ export function UndoSendToast() {
     try {
       await sendNowMutation({ emailId: email.id as Id<'emails'> });
       removePendingEmail(email.id);
-
-      if (email.threadId) {
-        queryClient.invalidateQueries({ queryKey: ['thread', email.threadId] });
-        queryClient.invalidateQueries({ queryKey: ['threads'] });
-      }
     } catch {
       toast.error('Could not send — email may have already sent');
       removePendingEmail(email.id);
     }
-  }, [removePendingEmail, queryClient]);
+  }, [removePendingEmail, sendNowMutation]);
 
   if (pendingEmails.length === 0) return null;
 

@@ -167,12 +167,24 @@ export const _continueHistorical = internalAction({
     const existingProgress = (cursorInfo?.historicalSyncProgress ?? null) as
       | HistoricalProgress
       | null;
-    const progress: HistoricalProgress = existingProgress ?? {
-      syncedThreads: 0,
-      totalThreads: 0,
-      startedAt: Date.now(),
-      lastBatchAt: Date.now(),
-    };
+    // Sanitize: a deployment outage mid-write once left NaN values in these
+    // counters, and Math.max(NaN, ...) keeps re-poisoning every subsequent
+    // chunk's progress record. Coerce non-finite numbers back to 0 so a
+    // single bad write can't permanently break the progress UI.
+    const safeNumber = (n: unknown): number =>
+      typeof n === "number" && Number.isFinite(n) ? n : 0;
+    const progress: HistoricalProgress = existingProgress
+      ? {
+          ...existingProgress,
+          syncedThreads: safeNumber(existingProgress.syncedThreads),
+          totalThreads: safeNumber(existingProgress.totalThreads),
+        }
+      : {
+          syncedThreads: 0,
+          totalThreads: 0,
+          startedAt: Date.now(),
+          lastBatchAt: Date.now(),
+        };
 
     // Cap backfill at 3 years. Older mail stays in the user's Gmail account
     // but doesn't get pulled into Convex on the initial sync. Gmail's `after:`
@@ -189,7 +201,9 @@ export const _continueHistorical = internalAction({
           "https://gmail.googleapis.com/gmail/v1/users/me/threads",
         );
         url.searchParams.set("maxResults", String(BATCH_SIZE));
-        url.searchParams.set("q", `-in:spam -in:trash after:${cutoffStr}`);
+        // Include SPAM-labeled threads — Orbi's Spam folder reads the Gmail SPAM
+        // label directly rather than re-classifying. Trash stays excluded.
+        url.searchParams.set("q", `-in:trash after:${cutoffStr}`);
         if (pageToken) url.searchParams.set("pageToken", pageToken);
         return await gmailFetch<GmailThreadListResponse>(url.toString(), token);
       });

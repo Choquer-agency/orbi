@@ -157,8 +157,11 @@ export default defineSchema({
     // Discovered "send as" aliases (Gmail), refreshed periodically.
     aliases: v.optional(v.array(v.string())),
     aliasesUpdatedAt: v.optional(v.number()),
-    // Contact backfill bookkeeping.
-    contactBackfillStatus: v.optional(v.string()),
+    // Contact backfill bookkeeping. Set once the chunked recipient scan
+    // finishes so the next deploy doesn't re-trigger it.
+    contactBackfillStatus: v.optional(
+      v.union(v.literal("PENDING"), v.literal("IN_PROGRESS"), v.literal("COMPLETED")),
+    ),
     contactBackfillCursor: v.optional(v.number()),
     contactBackfillCount: v.optional(v.number()),
     contactBackfillCompletedAt: v.optional(v.number()),
@@ -167,9 +170,8 @@ export default defineSchema({
     historicalSyncStatus: historicalSyncStatus,
     historicalSyncProgress: v.optional(v.any()),
     historicalSyncCompletedAt: v.optional(v.number()),
-    // Microsoft folder-id lookup cache (TTL'd in microsoft.ts). Avoids 6 Graph
-    // calls per sync chunk to resolve well-known folder ids. Stored as an
-    // array of [folderId, labels[]] pairs since Convex values can't be Maps.
+    // Microsoft folder-id lookup cache (TTL'd in microsoft.ts). Avoids ~6 Graph
+    // calls per sync chunk to resolve well-known folder ids.
     msFolderMapCache: v.optional(
       v.object({
         entries: v.array(
@@ -200,6 +202,10 @@ export default defineSchema({
     messageCount: v.number(),
     lastMessageAt: v.number(),
     lastReceivedAt: v.optional(v.number()),
+    // Timestamp of the last user-driven read-state change made in this app.
+    // Used to suppress sync-driven read→unread regressions in the brief window
+    // between marking read locally and Gmail/Outlook acknowledging it.
+    readStateLocalAt: v.optional(v.number()),
   })
     .index("by_account_providerThreadId", ["accountId", "providerThreadId"])
     .index("by_account_lastMessageAt", ["accountId", "lastMessageAt"])
@@ -209,7 +215,13 @@ export default defineSchema({
       "isArchived",
       "isTrashed",
     ])
-    .index("by_account_snoozedUntil", ["accountId", "snoozedUntil"]),
+    .index("by_account_snoozedUntil", ["accountId", "snoozedUntil"])
+    // Server-side full-text search over thread subjects so search hits the
+    // entire mailbox instead of the most recent N threads in memory.
+    .searchIndex("search_subject", {
+      searchField: "subject",
+      filterFields: ["accountId", "isTrashed"],
+    }),
 
   // ───────────────────────────────────────────────────────────────────────────
   // Emails (messages within threads)
@@ -261,11 +273,20 @@ export default defineSchema({
     .index("by_providerMessageId", ["providerMessageId"])
     .index("by_thread_receivedAt", ["threadId", "receivedAt"])
     .index("by_account_receivedAt", ["accountId", "receivedAt"])
+    // Lets drafts.count / drafts.list narrow to draft rows without dragging in
+    // every other email in the mailbox (avoids the 16MB read limit).
     .index("by_account_isDraft_receivedAt", ["accountId", "isDraft", "receivedAt"])
     .index("by_account_sendStatus_receivedAt", ["accountId", "sendStatus", "receivedAt"])
     .index("by_sendStatus_undoDeadline", ["sendStatus", "undoDeadlineAt"])
     .index("by_account_fromAddress", ["accountId", "fromAddress"])
-    .index("by_account_fromName", ["accountId", "fromName"]),
+    .index("by_account_fromName", ["accountId", "fromName"])
+    // Server-side full-text search over message bodies. Pairs with the
+    // threads.search_subject index so search covers both subjects and body
+    // text across the entire mailbox.
+    .searchIndex("search_body", {
+      searchField: "bodyText",
+      filterFields: ["accountId"],
+    }),
 
   // ───────────────────────────────────────────────────────────────────────────
   // Email bodies — split off the `emails` row so metadata reads stay tiny.
@@ -476,7 +497,10 @@ export default defineSchema({
   emailClassifications: defineTable({
     emailId: v.id("emails"),
     category: v.string(),
-    // Legacy rows pre-date these two fields — keep optional in the schema.
+    // The trio below (confidence, urgency, summary) used to be required but
+    // is no longer displayed. Kept as optional so we can drop them from new
+    // writes (saves ~40% per row) without breaking legacy rows. A one-shot
+    // purge wipes them from existing rows; afterward all values are undefined.
     confidence: v.optional(v.number()),
     urgency: v.optional(v.string()), // "low" | "normal" | "high" | "urgent"
     summary: v.optional(v.string()),
@@ -484,8 +508,7 @@ export default defineSchema({
     overriddenBy: v.optional(v.string()),
   })
     .index("by_email", ["emailId"])
-    .index("by_category", ["category"])
-    .index("by_urgency", ["urgency"]),
+    .index("by_category", ["category"]),
 
   routingRules: defineTable({
     userId: v.id("users"),
@@ -721,6 +744,116 @@ export default defineSchema({
     autoSortEnabled: v.boolean(),
     confidenceThreshold: v.number(),
   }).index("by_user", ["userId"]),
+
+  // Per-email scoring of whether the user owes a reply. Drives the
+  // Needs Response folder. One row per inbound email that the AI looked at.
+  //   - `score` — 0-100, how strongly the AI thinks the user should reply.
+  //   - `reason` — one-line explanation surfaced as a tooltip on the card.
+  //   - `dueByHint` — extracted deadline (epoch ms) if the email mentioned one.
+  //   - `dismissedAt` — set when the user replies, archives, trashes, or
+  //     manually clicks "Done". Open signals = signals with dismissedAt
+  //     undefined. The folder query only considers open signals.
+  needsResponseSignals: defineTable({
+    userId: v.id("users"),
+    emailId: v.id("emails"),
+    threadId: v.id("threads"),
+    score: v.number(),
+    reason: v.optional(v.string()),
+    dueByHint: v.optional(v.number()),
+    computedAt: v.number(),
+    dismissedAt: v.optional(v.number()),
+    // v2: To-vs-CC awareness. `userIsDirectAddressee` = user-owned address
+    // appears in `email.toAddresses`. `userIsCcd` = appears only in CC/BCC.
+    userIsDirectAddressee: v.optional(v.boolean()),
+    userIsCcd: v.optional(v.boolean()),
+    // v2: true when the sender's domain matches one of the user's
+    // connected-account domains (e.g. a teammate emailing about a shared
+    // client). Biases the score ceiling down.
+    senderIsTeamInternal: v.optional(v.boolean()),
+    // v2: raw `score` is the AI's 0-100 judgment of the email in isolation;
+    // `displayScore` adds the deadline-urgency bonus and the active-thread
+    // penalty. The folder query orders by displayScore so an "untouched
+    // urgent ask" outranks a chatty thread of the same nominal score.
+    displayScore: v.optional(v.number()),
+  })
+    .index("by_email", ["emailId"])
+    .index("by_thread", ["threadId"])
+    // The Needs Response folder query walks open (dismissedAt undefined) signals
+    // for a user, ordered by score desc for the "top 5". The compound index
+    // keeps that scan O(open-signals) rather than O(all-signals).
+    .index("by_user_dismissedAt_score", ["userId", "dismissedAt", "score"]),
+
+  // Per-user Needs Response preferences. `retentionDays` caps how far back
+  // the scorer will look (default 45). `confidenceFloor` is the lowest
+  // score that persists as an open signal (default 50). `perAccountFilter`
+  // narrows the folder view to specific mailboxes; null/empty = all.
+  needsResponseSettings: defineTable({
+    userId: v.id("users"),
+    retentionDays: v.number(),
+    confidenceFloor: v.number(),
+    perAccountFilter: v.optional(v.array(v.id("mailAccounts"))),
+  }).index("by_user", ["userId"]),
+
+  // Implicit-signal store for Needs Response calibration. One row per
+  // dismissal. The scorer reads recent rows for the same sender so future
+  // emails from senders the user keeps dismissing can be biased downward
+  // without any explicit "Not for me" UI.
+  //   - kind="replied"        : user sent into the thread (genuine handle)
+  //   - kind="archived"       : user archived/trashed (moderate "didn't matter")
+  //   - kind="manual-done"    : user clicked Done without replying (strongest
+  //                              "shouldn't have been flagged")
+  //   - kind="auto-other-acc" : another connected account replied
+  needsResponseFeedback: defineTable({
+    userId: v.id("users"),
+    threadId: v.id("threads"),
+    emailId: v.id("emails"),
+    senderAddress: v.string(),
+    senderDomain: v.string(),
+    category: v.optional(v.string()),
+    scoreAtDismissal: v.number(),
+    reasonAtDismissal: v.optional(v.string()),
+    kind: v.union(
+      v.literal("replied"),
+      v.literal("archived"),
+      v.literal("manual-done"),
+      v.literal("auto-other-acc"),
+    ),
+    timeOnList: v.number(),
+  })
+    .index("by_user_sender", ["userId", "senderAddress"])
+    .index("by_user_domain", ["userId", "senderDomain"])
+    .index("by_user_kind", ["userId", "kind"]),
+
+  // Per-user retention policy. A daily cron looks for threads in each bucket
+  // older than the configured number of days and hard-deletes them so the
+  // mailbox doesn't accumulate noise forever.
+  //   - spamRetentionDays: applies to threads with the SPAM label
+  //   - trashRetentionDays: applies to threads with isTrashed = true
+  //   - blockedSenderImmediate: true → delete blocked-sender mail on arrival
+  //     instead of trashing it (so retention doesn't even apply); false →
+  //     trash on arrival, then trashRetentionDays takes over.
+  // Use 0 for "never auto-delete".
+  retentionSettings: defineTable({
+    userId: v.id("users"),
+    spamRetentionDays: v.number(),
+    trashRetentionDays: v.number(),
+    blockedSenderImmediate: v.boolean(),
+  }).index("by_user", ["userId"]),
+
+  // Hard per-sender / per-domain overrides for the AI triage classifier.
+  // When the user moves an email out of Spam they're prompted to allow the
+  // sender forever — we persist that choice here and short-circuit the
+  // classifier on future emails whose fromAddress matches.
+  // `kind: 'email'` matches the exact lowercased address; `kind: 'domain'`
+  // matches the substring `@<domain>` at the end of the address.
+  senderTriageOverrides: defineTable({
+    userId: v.id("users"),
+    kind: v.union(v.literal("email"), v.literal("domain")),
+    pattern: v.string(),
+    forceCategory: v.string(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_pattern", ["userId", "pattern"]),
 
   trackingExclusions: defineTable({
     userId: v.id("users"),

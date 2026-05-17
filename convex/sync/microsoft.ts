@@ -856,3 +856,57 @@ export const _sendAutoReplyIfAllowed = internalAction({
     });
   },
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Push thread read-state up to Microsoft Graph. Outlook stores isRead per
+// message; we patch each message in the conversation. Best-effort.
+// ─────────────────────────────────────────────────────────────────────────────
+export const _pushThreadReadState = internalAction({
+  args: {
+    accountId: v.id("mailAccounts"),
+    providerThreadId: v.string(),
+    isRead: v.boolean(),
+  },
+  handler: async (ctx, { accountId, providerThreadId, isRead }) => {
+    try {
+      await withRefreshOn401(ctx, accountId, async (accessToken) => {
+        const listUrl = `${GRAPH_BASE}/me/messages?$filter=conversationId eq '${providerThreadId}'&$select=id,isRead&$top=50`;
+        const listRes = await fetch(listUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!listRes.ok) {
+          const text = await listRes.text();
+          const err = new Error(
+            `Graph list-by-conversation failed (${listRes.status}): ${text.slice(0, 200)}`,
+          ) as Error & { status: number };
+          err.status = listRes.status;
+          throw err;
+        }
+        const json = (await listRes.json()) as {
+          value?: { id: string; isRead?: boolean }[];
+        };
+        const messages = json.value ?? [];
+        for (const m of messages) {
+          if (m.isRead === isRead) continue;
+          const patchRes = await fetch(`${GRAPH_BASE}/me/messages/${m.id}`, {
+            method: "PATCH",
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ isRead }),
+          });
+          if (!patchRes.ok && patchRes.status === 401) {
+            const err = new Error("Graph patch unauthorized") as Error & {
+              status: number;
+            };
+            err.status = 401;
+            throw err;
+          }
+        }
+      });
+    } catch (err) {
+      console.error("[microsoft-sync] push read-state failed:", err);
+    }
+  },
+});

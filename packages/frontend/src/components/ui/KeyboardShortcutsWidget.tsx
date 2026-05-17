@@ -43,8 +43,13 @@ export function KeyboardShortcutsWidget({ inline = false }: { inline?: boolean }
 
   return (
     <>
-      {/* Trigger button */}
-      <div className={inline ? undefined : 'fixed bottom-4 right-4 z-40'}>
+      {/* Trigger button + (when floating) build version label */}
+      <div className={inline ? undefined : 'fixed bottom-4 right-4 z-40 flex items-center gap-2'}>
+        {!inline && (
+          <span className="select-none rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-medium text-text-tertiary ring-1 ring-border/60 shadow-sm backdrop-blur">
+            V.1
+          </span>
+        )}
         <button
           onClick={() => setShortcutsModalOpen(true)}
           className={cn(

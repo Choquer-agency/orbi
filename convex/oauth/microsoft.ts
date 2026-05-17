@@ -12,7 +12,7 @@ import { internalAction } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { v } from "convex/values";
 import type { Id } from "../_generated/dataModel";
-import { encrypt } from "./tokenManager";
+import { encrypt, withRefreshOn401 } from "./tokenManager";
 
 const SCOPES = ["Mail.ReadWrite", "Mail.Send", "User.Read", "offline_access"];
 
@@ -178,5 +178,126 @@ export const refreshToken = internalAction({
     });
 
     return newAccessToken;
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Send a message via Microsoft Graph. Uses /me/sendMail (single call, fire
+// and forget) — Graph does not return a message id from sendMail, so the
+// caller patches sendStatus=SENT without a providerMessageId update; the
+// real id will surface on the next incremental sync.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const recipientV = v.object({
+  email: v.string(),
+  name: v.optional(v.string()),
+});
+
+function toGraphRecipient(a: { email: string; name?: string }) {
+  return {
+    emailAddress: a.name
+      ? { address: a.email, name: a.name }
+      : { address: a.email },
+  };
+}
+
+export const send = internalAction({
+  args: {
+    accountId: v.id("mailAccounts"),
+    message: v.object({
+      to: v.array(recipientV),
+      cc: v.optional(v.array(recipientV)),
+      bcc: v.optional(v.array(recipientV)),
+      subject: v.string(),
+      bodyHtml: v.string(),
+      bodyText: v.string(),
+      inReplyTo: v.optional(v.string()),
+      emailId: v.id("emails"),
+    }),
+  },
+  handler: async (
+    ctx,
+    { accountId, message },
+  ): Promise<{ providerMessageId: string | undefined }> => {
+    const ctxData = await ctx.runQuery(internal.emails._loadForSend, {
+      emailId: message.emailId,
+    });
+    if (!ctxData) throw new Error("Email not found for send");
+    const { account } = ctxData;
+    if (account.provider !== "MICROSOFT") {
+      throw new Error(`Account is not a Microsoft account: ${account.provider}`);
+    }
+
+    const attachmentMeta = await ctx.runQuery(
+      internal.emails._getAttachmentsForSend,
+      { emailId: message.emailId },
+    );
+    const graphAttachments: Array<Record<string, unknown>> = [];
+    for (const a of attachmentMeta) {
+      const blob = await ctx.storage.get(a.storageId);
+      if (!blob) continue;
+      const buf = await blob.arrayBuffer();
+      graphAttachments.push({
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        name: a.filename,
+        contentType: a.mimeType,
+        contentBytes: Buffer.from(buf).toString("base64"),
+      });
+    }
+
+    const internetMessageHeaders: Array<{ name: string; value: string }> = [];
+    if (message.inReplyTo) {
+      const ref = message.inReplyTo.startsWith("<")
+        ? message.inReplyTo
+        : `<${message.inReplyTo}>`;
+      internetMessageHeaders.push({ name: "In-Reply-To", value: ref });
+      internetMessageHeaders.push({ name: "References", value: ref });
+    }
+
+    const graphMessage: Record<string, unknown> = {
+      subject: message.subject || "",
+      body: {
+        contentType: "HTML",
+        content: message.bodyHtml || message.bodyText || "",
+      },
+      toRecipients: message.to.map(toGraphRecipient),
+      ccRecipients: (message.cc ?? []).map(toGraphRecipient),
+      bccRecipients: (message.bcc ?? []).map(toGraphRecipient),
+    };
+    if (graphAttachments.length > 0) {
+      graphMessage.attachments = graphAttachments;
+    }
+    if (internetMessageHeaders.length > 0) {
+      graphMessage.internetMessageHeaders = internetMessageHeaders;
+    }
+
+    await withRefreshOn401(ctx, accountId, async (token) => {
+      const res = await fetch(
+        "https://graph.microsoft.com/v1.0/me/sendMail",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            message: graphMessage,
+            saveToSentItems: true,
+          }),
+        },
+      );
+      if (!res.ok && res.status !== 202) {
+        const text = await res.text();
+        const err = new Error(
+          `Microsoft send failed (${res.status}): ${text.slice(0, 400)}`,
+        ) as Error & { status: number };
+        err.status = res.status;
+        throw err;
+      }
+    });
+
+    // sendMail does not return a message id; sync will fill it in on the
+    // next pull.
+    return { providerMessageId: undefined };
   },
 });

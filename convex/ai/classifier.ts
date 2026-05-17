@@ -22,7 +22,9 @@ const MODEL = "claude-haiku-4-5-20251001";
 
 const CLASSIFICATION_PROMPT = `You are an email classifier for a digital agency. Classify the incoming email into exactly one category. Respond with JSON only, no markdown.
 
-IMPORTANT: When in doubt, prefer a business category over a triage category. Client and business emails belong in the primary inbox — only classify as marketing/spam when you are confident the email is NOT from a client, vendor, or business contact.
+IMPORTANT: When in doubt, prefer a business category over a triage category. Client and business emails belong in the primary inbox — only classify as marketing when you are confident the email is NOT from a client, vendor, or business contact.
+
+Spam is NOT one of your categories. The mail provider (Gmail / Outlook) handles spam upstream; trust it. Even if an email looks suspicious or unsolicited, choose the closest non-spam category below.
 
 Categories (primary inbox — these stay in the user's inbox):
 - revision_request: Client asking for changes to deliverables
@@ -38,12 +40,15 @@ Categories (primary inbox — these stay in the user's inbox):
 Categories (triage — auto-sortable noise; do not create follow-up watches):
 - notification: Automated system emails — analytics platforms, CI/CD pipelines, search console, server alerts, app notifications, calendar invites/RSVPs/Google Calendar invitations
 - marketing: Newsletters, mailing lists, subscription content, promotional campaigns, sales emails, offers, cold outreach pitches (e.g. TechCrunch digests, Substack, SaaS upgrade nudges, Black Friday deals)
-- spam: Unsolicited junk mail, phishing attempts, scam emails
 
 Respond with this exact JSON structure:
-{"category": "string", "confidence": 0.0-1.0, "urgency": "low|normal|high|urgent", "summary": "one sentence max 100 chars"}`;
+{"category": "string"}`;
 
-export const TRIAGE_CATEGORIES = ["marketing", "spam", "notification"] as const;
+// Spam is intentionally not in TRIAGE_CATEGORIES — Orbi's Spam folder mirrors
+// the upstream provider's spam label directly (see threads.list spam fast path).
+// The classifier may still emit "spam" rarely; we coerce it to "marketing"
+// in parseModelOutput so it never lands in our triage UI as spam.
+export const TRIAGE_CATEGORIES = ["marketing"] as const;
 const FOLLOW_UP_SKIP_CATEGORIES = new Set(["marketing", "spam", "notification", "newsletter", "junk"]);
 export type TriageCategory = (typeof TRIAGE_CATEGORIES)[number];
 
@@ -57,9 +62,6 @@ export function isTriageCategory(cat: string): cat is TriageCategory {
 
 interface ParsedClassification {
   category: string;
-  confidence: number;
-  urgency: string;
-  summary: string;
 }
 
 function parseModelOutput(text: string): ParsedClassification {
@@ -68,9 +70,14 @@ function parseModelOutput(text: string): ParsedClassification {
       .replace(/```json?\n?/g, "")
       .replace(/```/g, "")
       .trim();
-    return JSON.parse(jsonStr) as ParsedClassification;
+    const parsed = JSON.parse(jsonStr) as ParsedClassification;
+    // Belt-and-suspenders: even though the prompt forbids "spam", the model
+    // sometimes returns it anyway. Coerce to marketing so it never leaks
+    // into our triage UI as spam (we use the provider's SPAM label for that).
+    if (parsed.category === "spam") parsed.category = "marketing";
+    return parsed;
   } catch {
-    return { category: "other", confidence: 0.5, urgency: "normal", summary: "" };
+    return { category: "other" };
   }
 }
 
@@ -84,16 +91,14 @@ function isAnthropicAuthError(error: unknown): boolean {
 
 const CLASSIFIER_UNAVAILABLE_FALLBACK: ParsedClassification = {
   category: "other",
-  confidence: 0.2,
-  urgency: "normal",
-  summary: "AI classifier unavailable",
 };
 
 interface ClassificationDoc {
   _id: Id<"emailClassifications">;
   category: string;
-  confidence: number;
-  urgency: string;
+  // Kept optional for back-compat with legacy rows; new writes don't set them.
+  confidence?: number;
+  urgency?: string;
   summary?: string;
   manualOverride: boolean;
   overriddenBy?: string;
@@ -362,13 +367,7 @@ export const classifyEmail = internalAction({
     }
     return (await ctx.runMutation(
       internal.ai.classifierData._persistClassification,
-      {
-        emailId,
-        category: parsed.category,
-        confidence: parsed.confidence,
-        urgency: parsed.urgency,
-        summary: parsed.summary || undefined,
-      },
+      { emailId, category: parsed.category },
     )) as ClassificationDoc | null;
   },
 });
@@ -405,6 +404,27 @@ export const classifyEmailWithContext = internalAction({
       return {
         classification: fetched.existing,
         isTriageCategory: isTriageCategory(fetched.existing.category),
+      };
+    }
+
+    // User-set sender / domain override — skip Claude entirely and persist
+    // the forced category so future renders are instant. Cheap + zero AI tokens.
+    const override = (await ctx.runQuery(
+      internal.ai.classifierData._getSenderOverride,
+      { userId, fromAddress: fetched.email.fromAddress },
+    )) as { category: string; kind: "email" | "domain" } | null;
+    if (override) {
+      const classification = (await ctx.runMutation(
+        internal.ai.classifierData._persistClassification,
+        {
+          emailId,
+          category: override.category,
+          manualOverride: true,
+        },
+      )) as ClassificationDoc;
+      return {
+        classification,
+        isTriageCategory: isTriageCategory(override.category),
       };
     }
 
@@ -515,13 +535,7 @@ export const classifyEmailWithContext = internalAction({
     }
     const classification = (await ctx.runMutation(
       internal.ai.classifierData._persistClassification,
-      {
-        emailId,
-        category: parsed.category,
-        confidence: parsed.confidence,
-        urgency: parsed.urgency,
-        summary: parsed.summary || undefined,
-      },
+      { emailId, category: parsed.category },
     )) as ClassificationDoc | null;
 
     if (classification && shouldCreateInboundFollowUp(classification.category, email.fromAddress)) {

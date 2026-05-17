@@ -20,6 +20,7 @@
 import { query, mutation, internalMutation } from "./_generated/server";
 import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
+import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import { assignOrCreatePerson } from "./lib/personMerge";
 import {
@@ -216,6 +217,9 @@ export const autocomplete = query({
  * array (not an object) because Convex caps object field counts at 1024 and a
  * mailbox can easily exceed that.
  */
+// Returns an *array* of [email, name] pairs rather than a plain object — once
+// the user has more than 1024 contacts, an object response hits Convex's
+// max-fields-per-object limit. The caller assembles its own Map.
 export const nameMap = query({
   args: {},
   handler: async (ctx) => {
@@ -235,15 +239,16 @@ export const nameMap = query({
       if (p) personMap.set(p._id, p.displayName);
     }
 
-    const out: Array<[string, string]> = [];
+    const entries: Array<{ email: string; name: string }> = [];
     for (const c of named) {
+      const email = c.email.toLowerCase();
       if (c.personId && personMap.has(c.personId)) {
-        out.push([c.email.toLowerCase(), personMap.get(c.personId)!]);
+        entries.push({ email, name: personMap.get(c.personId)! });
       } else if (c.name) {
-        out.push([c.email.toLowerCase(), c.name]);
+        entries.push({ email, name: c.name });
       }
     }
-    return out;
+    return entries;
   },
 });
 
@@ -380,5 +385,153 @@ export const upsertFromEmail = internalMutation({
     }
 
     return contactId;
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recipient-contact backfill — chunked, resumable.
+//
+// Scans the user's already-synced emails for OUTBOUND messages and upserts
+// contacts for every TO/CC/BCC recipient. Necessary for users who imported
+// their inbox before the per-email outbound recipient extraction landed.
+//
+// Trigger surfaces:
+//   - `startContactBackfill(accountId)` — public mutation, called by the
+//     "Rebuild contacts" button in Settings.
+//   - `_resumeOrStartContactBackfill(accountId)` — internal, fired by the
+//     historical-sync resume cron once the historical import is COMPLETED but
+//     the contact backfill hasn't yet run.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const CONTACT_BACKFILL_BATCH = 200;
+
+export const startContactBackfill = mutation({
+  args: { accountId: v.id("mailAccounts") },
+  handler: async (ctx, { accountId }) => {
+    const userId = await requireUser(ctx);
+    const account = await ctx.db.get(accountId);
+    if (!account || account.userId !== userId) {
+      throw new Error("Account not found");
+    }
+    if (account.contactBackfillStatus === "IN_PROGRESS") {
+      throw new Error("Contact backfill already running");
+    }
+    await ctx.db.patch(accountId, {
+      contactBackfillStatus: "IN_PROGRESS",
+      contactBackfillCursor: undefined,
+      contactBackfillCount: 0,
+    });
+    await ctx.scheduler.runAfter(0, internal.contacts._backfillRecipientsChunk, {
+      accountId,
+      cursor: undefined,
+    });
+    return { ok: true };
+  },
+});
+
+// Internal kickoff used by the resume cron — same as startContactBackfill but
+// won't throw if a backfill is already running, and is a no-op if the account
+// is already COMPLETED.
+export const _resumeOrStartContactBackfill = internalMutation({
+  args: { accountId: v.id("mailAccounts") },
+  handler: async (ctx, { accountId }) => {
+    const account = await ctx.db.get(accountId);
+    if (!account) return;
+    if (account.contactBackfillStatus === "COMPLETED") return;
+    if (account.contactBackfillStatus === "IN_PROGRESS") return;
+    await ctx.db.patch(accountId, {
+      contactBackfillStatus: "IN_PROGRESS",
+      contactBackfillCursor: undefined,
+      contactBackfillCount: account.contactBackfillCount ?? 0,
+    });
+    await ctx.scheduler.runAfter(0, internal.contacts._backfillRecipientsChunk, {
+      accountId,
+      cursor: undefined,
+    });
+  },
+});
+
+export const _backfillRecipientsChunk = internalMutation({
+  args: {
+    accountId: v.id("mailAccounts"),
+    // Cursor: only consider emails with receivedAt strictly less than this.
+    // Undefined on the first invocation (start at the most recent).
+    cursor: v.optional(v.number()),
+  },
+  handler: async (ctx, { accountId, cursor }) => {
+    const account = await ctx.db.get(accountId);
+    if (!account) return;
+
+    // All addresses the user owns — we skip these as recipients (don't add
+    // self) and use them to detect outbound messages.
+    const userAccounts = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", account.userId))
+      .collect();
+    const selfEmails = new Set(
+      userAccounts.map((a) => a.email.toLowerCase().trim()),
+    );
+
+    const emailsBatch = await ctx.db
+      .query("emails")
+      .withIndex("by_account_receivedAt", (q) =>
+        cursor !== undefined
+          ? q.eq("accountId", accountId).lt("receivedAt", cursor)
+          : q.eq("accountId", accountId),
+      )
+      .order("desc")
+      .take(CONTACT_BACKFILL_BATCH);
+
+    let count = account.contactBackfillCount ?? 0;
+    let lastReceivedAt: number | undefined;
+
+    for (const email of emailsBatch) {
+      lastReceivedAt = email.receivedAt;
+      const from = email.fromAddress.toLowerCase().trim();
+      // Outbound = sender is one of the user's own addresses.
+      if (!selfEmails.has(from)) continue;
+
+      const recipients = [
+        ...((email.toAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+        ...((email.ccAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+        ...((email.bccAddresses as { email?: string; name?: string }[] | undefined) ?? []),
+      ];
+      for (const r of recipients) {
+        const addr = (r?.email ?? "").toLowerCase().trim();
+        if (!addr || !addr.includes("@")) continue;
+        if (selfEmails.has(addr)) continue;
+        await ctx.scheduler.runAfter(0, internal.contacts.upsertFromEmail, {
+          userId: account.userId,
+          email: addr,
+          name: r?.name ?? null,
+          isSender: false,
+          isOutbound: true,
+          bodyText: null,
+          receivedAt: email.receivedAt,
+        });
+        count++;
+      }
+    }
+
+    const isFullBatch = emailsBatch.length === CONTACT_BACKFILL_BATCH;
+    if (isFullBatch && lastReceivedAt !== undefined) {
+      await ctx.db.patch(accountId, {
+        contactBackfillCursor: lastReceivedAt,
+        contactBackfillCount: count,
+      });
+      await ctx.scheduler.runAfter(
+        0,
+        internal.contacts._backfillRecipientsChunk,
+        { accountId, cursor: lastReceivedAt },
+      );
+      return;
+    }
+
+    // Last chunk — finalize.
+    await ctx.db.patch(accountId, {
+      contactBackfillStatus: "COMPLETED",
+      contactBackfillCount: count,
+      contactBackfillCompletedAt: Date.now(),
+    });
   },
 });

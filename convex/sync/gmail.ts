@@ -125,9 +125,18 @@ function getHeader(
 }
 
 function parseAddress(raw: string): { email: string; name?: string } {
-  const m = raw.match(/^(.+?)\s*<(.+?)>$/);
-  if (m) return { name: m[1].replace(/"/g, "").trim(), email: m[2].trim() };
-  return { email: raw.trim() };
+  if (!raw) return { email: "" };
+  const trimmed = raw.trim();
+  if (!trimmed) return { email: "" };
+  // "Name" <email@x.com>
+  const m = trimmed.match(/^(.+?)\s*<([^>]+)>\s*$/);
+  if (m) {
+    const name = m[1].replace(/"/g, "").trim();
+    return { name: name || undefined, email: m[2].trim() };
+  }
+  // Bare email
+  if (trimmed.includes("@")) return { email: trimmed };
+  return { email: trimmed };
 }
 
 function parseAddressList(
@@ -151,9 +160,11 @@ function decodeBase64Url(b64url: string): string {
 function getBody(payload: GmailPayload): { text: string; html: string } {
   let text = "";
   let html = "";
-  if (payload.mimeType === "text/plain" && payload.body?.data) {
+  // Strip params like "text/html; charset=UTF-8" → "text/html"
+  const mt = (payload.mimeType ?? "").split(";")[0].trim().toLowerCase();
+  if (mt === "text/plain" && payload.body?.data) {
     text = decodeBase64Url(payload.body.data);
-  } else if (payload.mimeType === "text/html" && payload.body?.data) {
+  } else if (mt === "text/html" && payload.body?.data) {
     html = decodeBase64Url(payload.body.data);
   }
   if (payload.parts) {
@@ -474,6 +485,121 @@ async function persistGmailThread(
 
   return { newEmailIds, bodyTextByEmailId, isOutboundByEmailId };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Background self-heal: scans for orphan threads (zero email rows) across all
+// active Gmail accounts and refetches them. Cron-driven; safe to run idempotently.
+// ─────────────────────────────────────────────────────────────────────────────
+const ORPHAN_REPAIR_BATCH = 25; // cap per run so we never block on a huge backlog
+
+export const repairOrphanThreads = internalAction({
+  args: {},
+  handler: async (ctx): Promise<{ scanned: number; repaired: number; failed: number }> => {
+    const accounts: Array<{ _id: Id<"mailAccounts"> }> = await ctx.runQuery(
+      internal.sync.gmailData._listActiveAccounts,
+      {},
+    );
+    let scanned = 0;
+    let repaired = 0;
+    let failed = 0;
+
+    for (const a of accounts) {
+      const orphans: Array<{
+        threadId: Id<"threads">;
+        providerThreadId: string;
+        userEmails: string[];
+      }> = await ctx.runQuery(internal.sync.gmailData._listOrphanThreads, {
+        accountId: a._id,
+        limit: ORPHAN_REPAIR_BATCH,
+      });
+      scanned += orphans.length;
+      for (const o of orphans) {
+        try {
+          await syncOneThread(ctx, a._id, o.providerThreadId, o.userEmails);
+          repaired++;
+        } catch (err) {
+          failed++;
+          console.error(`[orphan-repair] thread ${o.threadId} failed:`, err);
+        }
+      }
+    }
+    return { scanned, repaired, failed };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-fetch an entire thread from Gmail. Used to repair threads that came
+// through with no email rows (orphan threads from historical sync hiccups).
+// ─────────────────────────────────────────────────────────────────────────────
+export const refreshThread = action({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, { threadId }): Promise<{ ok: boolean; reason?: string; emailCount?: number }> => {
+    const userId = await requireUser(ctx);
+    const data = (await ctx.runQuery(
+      internal.sync.gmailData._getThreadForRefresh,
+      { threadId },
+    )) as {
+      providerThreadId: string;
+      accountId: Id<"mailAccounts">;
+      ownerUserId: Id<"users">;
+      provider: string;
+      userEmails: string[];
+    } | null;
+    if (!data) return { ok: false, reason: "Thread not found" };
+    if (data.ownerUserId !== userId) return { ok: false, reason: "Not authorized" };
+    if (data.provider !== "GMAIL") return { ok: false, reason: "Only Gmail supported" };
+
+    await syncOneThread(ctx, data.accountId, data.providerThreadId, data.userEmails);
+    return { ok: true };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Re-fetch a single email from Gmail and patch its body / sender fields.
+// Used to repair emails that came through with empty body or sender during a
+// historical sync (e.g., calendar invites, RSVP notifications).
+// ─────────────────────────────────────────────────────────────────────────────
+export const refreshEmail = action({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }): Promise<{ ok: boolean; reason?: string }> => {
+    const userId = await requireUser(ctx);
+    const data = (await ctx.runQuery(
+      internal.sync.gmailData._getEmailForRefresh,
+      { emailId },
+    )) as {
+      providerMessageId: string;
+      accountId: Id<"mailAccounts">;
+      ownerUserId: Id<"users">;
+      provider: string;
+    } | null;
+    if (!data) return { ok: false, reason: "Email not found" };
+    if (data.ownerUserId !== userId) return { ok: false, reason: "Not authorized" };
+    if (data.provider !== "GMAIL") return { ok: false, reason: "Only Gmail supported" };
+
+    const message: GmailMessage = await withRefreshOn401(
+      ctx,
+      data.accountId,
+      async (token) =>
+        await gmailFetch<GmailMessage>(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(
+            data.providerMessageId,
+          )}?format=full`,
+          token,
+        ),
+    );
+    const headers = message.payload?.headers ?? [];
+    const from = parseAddress(getHeader(headers, "From") || "");
+    const body = getBody(message.payload ?? {});
+    await ctx.runMutation(internal.sync.gmailData._patchEmailBodyAndFrom, {
+      emailId,
+      fromAddress: from.email,
+      fromName: from.name,
+      bodyHtml: body.html || undefined,
+      bodyText: body.text || undefined,
+    });
+    return { ok: true };
+  },
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public trigger: queue an incremental sync for a single account. The caller
@@ -918,6 +1044,47 @@ export const _sendAutoReplyIfAllowed = internalAction({
       });
     } catch (err) {
       console.error("[gmail-sync] auto-reply send failed:", err);
+    }
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Push the user's read-state change up to Gmail. Best-effort: if it fails we
+// log and move on — local DB is already updated and the next incremental sync
+// will reconcile.
+// ─────────────────────────────────────────────────────────────────────────────
+export const _pushThreadReadState = internalAction({
+  args: {
+    accountId: v.id("mailAccounts"),
+    providerThreadId: v.string(),
+    isRead: v.boolean(),
+  },
+  handler: async (ctx, { accountId, providerThreadId, isRead }) => {
+    try {
+      await withRefreshOn401(ctx, accountId, async (token) => {
+        const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(providerThreadId)}/modify`;
+        const body = isRead
+          ? { removeLabelIds: ["UNREAD"] }
+          : { addLabelIds: ["UNREAD"] };
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          const err = new Error(
+            `Gmail label modify failed (${res.status}): ${text.slice(0, 200)}`,
+          ) as Error & { status: number };
+          err.status = res.status;
+          throw err;
+        }
+      });
+    } catch (err) {
+      console.error("[gmail-sync] push read-state failed:", err);
     }
   },
 });

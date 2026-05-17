@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
 import { Save, X, Plus, Trash2, Loader2, Brain, Sparkles } from 'lucide-react';
-import { useAction, useQuery } from 'convex/react';
-import { api } from '../../lib/api';
-import { api as convexApi } from '../../../../../convex/_generated/api';
+import { useQuery, useMutation, useAction } from 'convex/react';
+import { api } from '../../../../../convex/_generated/api';
 import toast from 'react-hot-toast';
 
 interface Preferences {
@@ -29,11 +28,11 @@ interface ContactStyle {
 interface StyleCorrection {
   id: string;
   category: string;
-  summary: string | null;
-  contactEmail: string | null;
+  summary?: string;
+  contactEmail?: string;
   originalText: string;
   editedText: string;
-  createdAt: string;
+  createdAt: number;
 }
 
 const GREETING_OPTIONS = ['Hey', 'Hi', 'Hello', 'Dear'];
@@ -51,7 +50,14 @@ const DESCRIPTOR_SUGGESTIONS = [
   'measured',
 ];
 
-export function WritingPreferences({ onClose }: { onClose?: () => void }) {
+export function WritingPreferences({ onClose: _onClose }: { onClose?: () => void }) {
+  const serverPrefs = useQuery(api.writingPreferences.getPreferences, {});
+  const serverContactStyles = useQuery(api.writingPreferences.listContactStyles, {});
+  const serverCorrections = useQuery(api.writingPreferences.listStyleCorrections, { limit: 20 });
+  const updatePreferences = useMutation(api.writingPreferences.updatePreferences);
+  const deleteContactStyleMut = useMutation(api.writingPreferences.deleteContactStyle);
+  const deleteStyleCorrection = useMutation(api.writingPreferences.deleteStyleCorrection);
+
   const [prefs, setPrefs] = useState<Preferences>({
     greetingStyle: 'Hey',
     signOffStyle: 'Best',
@@ -60,17 +66,14 @@ export function WritingPreferences({ onClose }: { onClose?: () => void }) {
     descriptors: [],
     customRules: [],
   });
-  const [contactStyles, setContactStyles] = useState<ContactStyle[]>([]);
-  const [corrections, setCorrections] = useState<StyleCorrection[]>([]);
-  const [correctionCount, setCorrectionCount] = useState(0);
-  const [loading, setLoading] = useState(true);
+  const [hydrated, setHydrated] = useState(false);
   const [saving, setSaving] = useState(false);
   const [newRule, setNewRule] = useState('');
   const [newDescriptor, setNewDescriptor] = useState('');
   const [customGreeting, setCustomGreeting] = useState('');
   const [customSignoff, setCustomSignoff] = useState('');
   // Auto-learned style profile (rebuilt from real sent emails on demand).
-  const styleProfile = useQuery((convexApi as any).ai.styleProfileData.getProfile, {}) as
+  const styleProfile = useQuery((api as any).ai.styleProfileData.getProfile, {}) as
     | {
         summary: string;
         bulletRules: string[];
@@ -83,7 +86,7 @@ export function WritingPreferences({ onClose }: { onClose?: () => void }) {
       }
     | null
     | undefined;
-  const refreshStyleProfile = useAction((convexApi as any).ai.styleProfile.refresh);
+  const refreshStyleProfile = useAction((api as any).ai.styleProfile.refresh);
   const [profileLearning, setProfileLearning] = useState(false);
   const handleLearnProfile = async () => {
     setProfileLearning(true);
@@ -102,33 +105,74 @@ export function WritingPreferences({ onClose }: { onClose?: () => void }) {
     }
   };
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [prefsRes, stylesRes, correctionsRes] = await Promise.all([
-        api.get<{ data: Preferences | null }>('/settings/writing-preferences'),
-        api.get<{ data: ContactStyle[] }>('/settings/contact-styles'),
-        api.get<{ data: { corrections: StyleCorrection[]; totalCount: number } }>('/settings/style-corrections'),
-      ]);
-      if (prefsRes.data) setPrefs(prefsRes.data);
-      setContactStyles(stylesRes.data);
-      setCorrections(correctionsRes.data.corrections);
-      setCorrectionCount(correctionsRes.data.totalCount);
-    } catch (err) {
-      console.error('Failed to fetch preferences:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  // Hydrate local state from server once, then let user edits flow.
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (hydrated) return;
+    if (serverPrefs === undefined) return;
+    if (serverPrefs) {
+      setPrefs({
+        greetingStyle: serverPrefs.greetingStyle ?? null,
+        signOffStyle: serverPrefs.signOffStyle ?? null,
+        tone: serverPrefs.tone ?? 3,
+        verbosity: serverPrefs.verbosity ?? 3,
+        descriptors: serverPrefs.descriptors ?? [],
+        customRules: serverPrefs.customRules ?? [],
+      });
+    }
+    setHydrated(true);
+  }, [serverPrefs, hydrated]);
+
+  // Auto-save on every change once hydrated. Debounced so we don't spam the
+  // server when the user is dragging a slider. The explicit Save button
+  // remains as a "hurry it up" affordance but is no longer required — the
+  // previous flow let users pick "Hey", never click Save, and silently fall
+  // back to the AI's default "Hi" greeting.
+  useEffect(() => {
+    if (!hydrated) return;
+    const handle = setTimeout(() => {
+      setSaving(true);
+      updatePreferences({
+        greetingStyle: prefs.greetingStyle ?? undefined,
+        signOffStyle: prefs.signOffStyle ?? undefined,
+        tone: prefs.tone,
+        verbosity: prefs.verbosity,
+        descriptors: prefs.descriptors,
+        customRules: prefs.customRules,
+      })
+        .catch((err) => console.error('Failed to auto-save preferences:', err))
+        .finally(() => setSaving(false));
+    }, 400);
+    return () => clearTimeout(handle);
+    // updatePreferences is stable; depending on prefs is the point.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefs, hydrated]);
+
+  const contactStyles: ContactStyle[] = (serverContactStyles ?? []).map((cs: any) => ({
+    id: cs._id,
+    contactEmail: cs.contactEmail,
+    contactName: cs.contactName ?? null,
+    tone: cs.tone ?? null,
+    verbosity: cs.verbosity ?? null,
+    greetingStyle: cs.greetingStyle ?? null,
+    signOffStyle: cs.signOffStyle ?? null,
+    notes: cs.notes ?? null,
+    isAutoLearned: !!cs.isAutoLearned,
+  }));
+  const corrections: StyleCorrection[] = serverCorrections?.corrections ?? [];
+  const correctionCount = serverCorrections?.totalCount ?? 0;
+  const loading = !hydrated || serverContactStyles === undefined || serverCorrections === undefined;
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      await api.put('/settings/writing-preferences', prefs);
+      await updatePreferences({
+        greetingStyle: prefs.greetingStyle ?? undefined,
+        signOffStyle: prefs.signOffStyle ?? undefined,
+        tone: prefs.tone,
+        verbosity: prefs.verbosity,
+        descriptors: prefs.descriptors,
+        customRules: prefs.customRules,
+      });
     } catch (err) {
       console.error('Failed to save preferences:', err);
     } finally {
@@ -163,8 +207,7 @@ export function WritingPreferences({ onClose }: { onClose?: () => void }) {
 
   const deleteContactStyle = async (contactEmail: string) => {
     try {
-      await api.delete(`/settings/contact-styles/${encodeURIComponent(contactEmail)}`);
-      setContactStyles((s) => s.filter((c) => c.contactEmail !== contactEmail));
+      await deleteContactStyleMut({ contactEmail });
     } catch (err) {
       console.error('Failed to delete contact style:', err);
     }
@@ -172,23 +215,22 @@ export function WritingPreferences({ onClose }: { onClose?: () => void }) {
 
   const deleteCorrection = async (id: string) => {
     try {
-      await api.delete(`/settings/style-corrections/${id}`);
-      setCorrections((c) => c.filter((item) => item.id !== id));
-      setCorrectionCount((n) => Math.max(0, n - 1));
+      await deleteStyleCorrection({ id: id as any });
     } catch (err) {
       console.error('Failed to delete correction:', err);
     }
   };
 
-  const formatTimeAgo = (dateStr: string) => {
-    const diff = Date.now() - new Date(dateStr).getTime();
+  const formatTimeAgo = (createdAt: number | string) => {
+    const ts = typeof createdAt === 'number' ? createdAt : new Date(createdAt).getTime();
+    const diff = Date.now() - ts;
     const minutes = Math.floor(diff / 60000);
     if (minutes < 60) return `${minutes}m ago`;
     const hours = Math.floor(minutes / 60);
     if (hours < 24) return `${hours}h ago`;
     const days = Math.floor(hours / 24);
     if (days < 30) return `${days}d ago`;
-    return new Date(dateStr).toLocaleDateString();
+    return new Date(ts).toLocaleDateString();
   };
 
   const setGreeting = (value: string) => {

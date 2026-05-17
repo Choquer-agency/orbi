@@ -45,8 +45,6 @@ const DEFAULT_PILLS = [
 
 const THREAD_PILLS = [
   'Summarize this thread',
-  'Draft a reply',
-  'What are the action items?',
 ];
 
 const ALL_EMAILS_PILLS = [
@@ -165,6 +163,11 @@ export function AiChatPanel() {
       .replace(/<li[^>]*>/gi, '• ')
       .replace(/<\/li>/gi, '\n')
       .replace(/<\/?(?:ul|ol)[^>]*>/gi, '\n')
+      // Tables → tab-separated rows so the plain-text fallback (used when
+      // the recipient's client strips HTML) stays legible.
+      .replace(/<\/(?:th|td)>\s*<(?:th|td)[^>]*>/gi, '\t')
+      .replace(/<\/tr>\s*<tr[^>]*>/gi, '\n')
+      .replace(/<\/?(?:table|thead|tbody|tr|th|td)[^>]*>/gi, '')
       .replace(/<[^>]+>/g, '')
       .replace(/\n{3,}/g, '\n\n')
       .trim();
@@ -181,7 +184,14 @@ export function AiChatPanel() {
       aiOriginal: { body: plainBody },
     });
     if (draft.threadId) {
+      // Reply on an existing thread → open that thread; EmailViewer's
+      // pendingDraft effect picks it up and opens reply mode.
       setSelectedThread(draft.threadId);
+    } else {
+      // Brand-new email → open a fresh compose window. setComposingNew
+      // clears selectedThreadId so the open thread (e.g. RBC) doesn't
+      // capture the draft as a reply-all.
+      useUiStore.getState().setComposingNew(true);
     }
   };
 
@@ -345,10 +355,7 @@ export function AiChatPanel() {
             </>
           )}
           {!msg.draft && msg.content.includes('**Summary**') && (
-            <>
-              <FollowUpPill label="Draft a reply" onClick={() => handleSend('Draft a reply')} />
-              <FollowUpPill label="What questions are unanswered?" onClick={() => handleSend('What questions are unanswered?')} />
-            </>
+            <FollowUpPill label="What questions are unanswered?" onClick={() => handleSend('What questions are unanswered?')} />
           )}
           {!msg.draft && msg.content.includes('**Action Items**') && !msg.content.includes('**Summary**') && (
             <FollowUpPill label="Draft follow-up for overdue items" onClick={() => handleSend('Draft a follow-up email for any overdue or pending items')} />
