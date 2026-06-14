@@ -3,6 +3,8 @@ import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
+
 interface TrackingExclusion {
   id: string;
   emailAddress: string;
@@ -31,7 +33,7 @@ export function useTrackingExclusions() {
 export function useAddTrackingExclusion() {
   const fn = useMutation(api.trackingExclusions.add);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (
+  const mutateAsync = async (
     args: { emailAddress: string; reason?: string },
     opts?: { onSuccess?: (data: any) => void; onError?: (err: unknown) => void },
   ) => {
@@ -47,13 +49,19 @@ export function useAddTrackingExclusion() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 export function useDeleteTrackingExclusion() {
   const fn = useMutation(api.trackingExclusions.remove);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (
+  const mutateAsync = async (
     id: string,
     opts?: { onSuccess?: (data: any) => void; onError?: (err: unknown) => void },
   ) => {
@@ -69,5 +77,11 @@ export function useDeleteTrackingExclusion() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }

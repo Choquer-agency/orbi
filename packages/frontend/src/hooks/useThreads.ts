@@ -13,6 +13,8 @@ import {
   saveCachedThread,
 } from '../lib/threadBodyCache';
 
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
+
 // Convex Ids are opaque base32-ish strings. Stale values like "current" or
 // other model-emitted placeholders sometimes leak into selectedThreadId via
 // persisted UI state, so guard query callers before hitting Convex.
@@ -261,8 +263,10 @@ export function useThread(threadId: Id<'threads'> | string | null) {
   return {
     data,
     isLoading: threadId !== null && result === undefined && cached === undefined,
+    // True while we're showing cached (previous) data before the live query resolves.
+    isPlaceholderData: result === undefined && cached !== undefined,
     isError: false,
-    error: undefined,
+    error: undefined as unknown,
   };
 }
 
@@ -412,10 +416,10 @@ export function useUpdateThread() {
       // Patch every thread-list query that has this thread.
       for (const q of localStore.getAllQueries(api.threads.list)) {
         if (!q.value) continue;
-        const list = q.value as { data: Array<{ id: string }> };
+        const list = q.value;
         if (!list.data?.some?.((t) => t.id === threadId)) continue;
         const nextData = list.data.map((t) =>
-          t.id === threadId ? ({ ...t, ...patch } as typeof t) : t,
+          t.id === threadId ? { ...t, ...patch } : t,
         );
         // If archived/trashed and the current view isn't archived/trash,
         // drop the row from this list so the UI matches the eventual server
@@ -426,7 +430,7 @@ export function useUpdateThread() {
         localStore.setQuery(api.threads.list, q.args, {
           ...list,
           data: drop ? nextData.filter((t) => t.id !== threadId) : nextData,
-        });
+        } as typeof list);
       }
     },
   );
@@ -450,8 +454,11 @@ export function useUpdateThread() {
   };
 
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -483,8 +490,11 @@ export function useSnoozeThread() {
   };
 
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -506,8 +516,11 @@ export function useUnsnoozeThread() {
   };
 
   return {
-    mutate: (id: Id<'threads'> | string) => {
-      void mutateAsync(id);
+    mutate: (id: Id<'threads'> | string, options?: MutateOptions) => {
+      mutateAsync(id).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,

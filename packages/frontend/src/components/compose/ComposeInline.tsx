@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Sparkles, X, Loader2, CalendarClock, Save, Play, ChevronDown, TextQuote, Trash2, Paperclip, Maximize2, Minimize2 } from 'lucide-react';
+import { Sparkles, X, CalendarClock, Save, Play, ChevronDown, TextQuote, Trash2, Paperclip, Maximize2, Minimize2 } from 'lucide-react';
 import { SignatureIcon } from '../icons/SignatureIcon';
 import { RecipientInput } from './RecipientInput';
 import { useQueryClient } from '@tanstack/react-query';
@@ -10,7 +10,7 @@ import { useUndoSendStore } from '../../stores/undoSendStore';
 import { api as convexApi } from '../../../../../convex/_generated/api';
 import type { Id } from '../../../../../convex/_generated/dataModel';
 import { ScheduleSendMenu } from './ScheduleSendMenu';
-import { useSignatures, type Signature } from '../../hooks/useSignatures';
+import { useSignatures } from '../../hooks/useSignatures';
 import { useSnippets } from '../../hooks/useSnippets';
 import { useAuthStore } from '../../stores/authStore';
 import { useAccounts } from '../../hooks/useAccounts';
@@ -67,7 +67,7 @@ function formatScheduleLabel(date: Date): string {
   return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at ${time}`;
 }
 
-export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose, initialDraft, aiOriginal: initialAiOriginal, replyRecipients, fromEmail, existingDraftId, onExpandedChange }: ComposeInlineProps) {
+export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose, initialDraft, aiOriginal: initialAiOriginal, replyRecipients, fromEmail: _fromEmail, existingDraftId, onExpandedChange }: ComposeInlineProps) {
   const { toggleAiChat, editingScheduledId, setEditingScheduledId, setComposeContext } = useUiStore();
   const queryClient = useQueryClient();
   const [to, setTo] = useState(initialDraft?.to ?? '');
@@ -340,7 +340,6 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   const replyEmailMutation = useMutation(convexApi.emails.reply);
   const forwardEmailMutation = useMutation(convexApi.emails.forward);
   const updateDraftMutation = useMutation(convexApi.drafts.update);
-  const createScheduledMutation = useMutation(convexApi.scheduledEmails.create);
   const updateScheduledMutation = useMutation(convexApi.scheduledEmails.update);
   const recordEditAction = useAction(convexApi.ai.learn.recordEdit);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

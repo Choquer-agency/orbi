@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useCallback, useEffect, type UIEvent } from 'react';
+import type { Id } from '../../../../../convex/_generated/dataModel';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Search, Check, Plus, X, Archive, Star, Trash2, Loader2, Mail, MailOpen, MailSearch, User, Inbox, Calendar, Paperclip, Tag, RefreshCw } from 'lucide-react';
 import { useThreads, useUpdateThread, usePrefetchAdjacentThreads, useIdleThreadPrefetch, useThreadHoverPrefetch } from '../../hooks/useThreads';
@@ -182,7 +183,7 @@ export function ThreadList() {
   };
 
   const { data, isLoading, isError, refetch, fetchNextPage, hasNextPage, isFetchingNextPage } = useThreads({
-    accountId: selectedAccountId ?? undefined,
+    accountId: (selectedAccountId ?? undefined) as Id<'mailAccounts'> | undefined,
     folder: isSearching ? undefined : (selectedFolder !== 'dashboard' ? selectedFolder : 'inbox'),
     search: searchFrom ? undefined : (debouncedSearch || undefined),
     from: searchFrom,
@@ -421,7 +422,7 @@ export function ThreadList() {
   });
 
   // Track which date group header is currently stuck at top on mobile
-  const [visibleDateGroup, setVisibleDateGroup] = useState<string | null>(null);
+  const [, setVisibleDateGroup] = useState<string | null>(null);
   const dateGroupRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 

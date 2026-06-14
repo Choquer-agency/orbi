@@ -3,6 +3,8 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Drop-in TanStack Query → Convex replacement.
 //
@@ -58,8 +60,11 @@ export function useSaveDraft() {
   };
 
   return {
-    mutate: (params: SaveDraftParams) => {
-      void mutateAsync(params);
+    mutate: (params: SaveDraftParams, options?: MutateOptions) => {
+      mutateAsync(params).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -81,8 +86,11 @@ export function useDeleteDraft() {
   };
 
   return {
-    mutate: (draftId: Id<'emails'> | string) => {
-      void mutateAsync(draftId);
+    mutate: (draftId: Id<'emails'> | string, options?: MutateOptions) => {
+      mutateAsync(draftId).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -110,8 +118,11 @@ export function useSendDraft() {
   };
 
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,

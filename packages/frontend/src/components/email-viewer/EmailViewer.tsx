@@ -1,7 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, lazy, Suspense } from 'react';
 import {
   Archive,
-  Reply,
   Forward,
   Star,
   Trash2,
@@ -64,7 +63,6 @@ import { useMarkThreadNotificationsRead } from '../../hooks/useNotifications';
 import { haptic } from '../../lib/haptics';
 import { ImageLightbox } from './ImageLightbox';
 import DOMPurify from 'dompurify';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useMutation as useConvexMutation, useQuery as useConvexQuery } from 'convex/react';
 import { useAuthToken } from '@convex-dev/auth/react';
 import { convex } from '../../lib/convex';
@@ -325,246 +323,9 @@ function stripQuotedContent(html: string): { body: string; hasQuoted: boolean } 
   return { body: cleaned, hasQuoted: removedQuoted };
 }
 
-/**
- * Split an email body into separate "cards" at each quoted-reply boundary.
- * For a fresh email with no quoted content, returns [html] (one card).
- * For a reply that contains the previous email inline, returns [reply, previous].
- * Handles nested quotes recursively (chains of replies → 3+ cards).
- */
-function splitIntoCards(html: string): string[] {
-  if (!html) return [];
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, 'text/html');
 
-  // Patterns identical to stripQuotedContent — keep the two in sync.
-  const quoteStartPatterns = [
-    /On\s+.{5,120}\s+wrote:\s*$/,
-    /wrote:\s*$/,
-    /^-{3,}\s*(Forwarded|Original)\s*(message|Message)/i,
-    /^_{5,}/,
-    /^Begin forwarded message/i,
-  ];
-  const headerPattern = /^From:\s+.+/im;
-  const sentPattern = /^Sent:\s+.+/im;
 
-  // Try to find a "cut element" — first element that begins a quoted block.
-  // Returns null if no quote found.
-  function findCutEl(body: HTMLElement): Element | null {
-    // Phase 1: well-known wrapper elements (these mark the START of quoted content).
-    const wrappers = body.querySelectorAll([
-      '.gmail_quote', '.gmail_extra',
-      '#appendonsend', '#divRplyFwdMsg', '[name="divRplyFwdMsg"]',
-      '.yahoo_quoted',
-      'blockquote[type="cite"]', 'blockquote.cite',
-    ].join(','));
-    if (wrappers.length > 0) return wrappers[0];
 
-    // Phase 2: text-marker scan
-    const allEls = Array.from(body.querySelectorAll('*'));
-    for (const el of allEls) {
-      const fullText = (el.textContent ?? '').trim();
-      if (fullText.length < 3) continue;
-      if (fullText.length < 500 && headerPattern.test(fullText) && sentPattern.test(fullText)) {
-        return el;
-      }
-      const directText = Array.from(el.childNodes)
-        .filter((n) => n.nodeType === Node.TEXT_NODE)
-        .map((n) => n.textContent?.trim() ?? '')
-        .join(' ')
-        .trim();
-      if (directText.length < 3) continue;
-      if (quoteStartPatterns.some((p) => p.test(directText))) return el;
-    }
-    return null;
-  }
-
-  const fragments: string[] = [];
-  let currentBody: HTMLElement = doc.body;
-  let safety = 8; // never produce more than 8 cards (chains of forwards rarely exceed this)
-
-  while (safety-- > 0) {
-    const cutEl = findCutEl(currentBody);
-    if (!cutEl) {
-      const remaining = currentBody.innerHTML.trim();
-      if (remaining.length > 0) fragments.push(remaining);
-      break;
-    }
-
-    // Walk up from cutEl to find a target ancestor that isn't the body and
-    // doesn't engulf 90%+ of the document (heuristic from stripQuotedContent).
-    let target: Element = cutEl;
-    const bodyLen = currentBody.innerHTML.length;
-    while (target.parentElement && target.parentElement !== currentBody) {
-      if (target.parentElement.innerHTML.length > bodyLen * 0.85) break;
-      target = target.parentElement;
-    }
-
-    // Clone the body to a working DOM, remove [target..end] for the "before" fragment.
-    const beforeDoc = parser.parseFromString(currentBody.innerHTML, 'text/html');
-    // Locate the corresponding target in the cloned doc by index path.
-    const findCutInClone = findCutEl(beforeDoc.body);
-    if (!findCutInClone) {
-      // Shouldn't happen; bail to avoid infinite loop.
-      fragments.push(currentBody.innerHTML);
-      break;
-    }
-    let cloneTarget: Element = findCutInClone;
-    while (cloneTarget.parentElement && cloneTarget.parentElement !== beforeDoc.body) {
-      if (cloneTarget.parentElement.innerHTML.length > beforeDoc.body.innerHTML.length * 0.85) break;
-      cloneTarget = cloneTarget.parentElement;
-    }
-    let next: Element | null = cloneTarget;
-    while (next) {
-      const toRemove = next;
-      next = next.nextElementSibling;
-      toRemove.remove();
-    }
-    const beforeHtml = beforeDoc.body.innerHTML.trim();
-    if (beforeHtml.length > 0) fragments.push(beforeHtml);
-
-    // For the "after" fragment, capture target + following siblings.
-    // Strip the leading "On ... wrote:" attribution line if it sits as a sibling
-    // before the actual quoted body.
-    const afterDoc = parser.parseFromString(currentBody.innerHTML, 'text/html');
-    const afterCut = findCutEl(afterDoc.body);
-    if (!afterCut) break;
-    let afterTarget: Element = afterCut;
-    while (afterTarget.parentElement && afterTarget.parentElement !== afterDoc.body) {
-      if (afterTarget.parentElement.innerHTML.length > afterDoc.body.innerHTML.length * 0.85) break;
-      afterTarget = afterTarget.parentElement;
-    }
-    // Remove everything BEFORE afterTarget from the body so what remains is the quoted block + tail.
-    let prev: Element | null = afterTarget.previousElementSibling;
-    while (prev) {
-      const toRemove = prev;
-      prev = prev.previousElementSibling;
-      toRemove.remove();
-    }
-    // If the target is a Gmail .gmail_quote wrapper, unwrap one level so the
-    // inner content can be re-split for nested quotes.
-    if (afterTarget.classList?.contains('gmail_quote') || afterTarget.tagName.toLowerCase() === 'blockquote') {
-      // Use the inner HTML so nested quotes can be detected.
-      currentBody = afterDoc.createElement('div');
-      currentBody.innerHTML = afterTarget.innerHTML;
-    } else {
-      currentBody = afterDoc.body;
-    }
-  }
-
-  return fragments.length > 0 ? fragments : [html];
-}
-
-/**
- * Parse the attribution line ("On <date> <person> <email> wrote:" or
- * Outlook-style "From: ... Sent: ...") at the top of a quoted email fragment.
- * Returns attribution metadata + the body with the attribution line stripped.
- */
-function extractAttributionAndBody(html: string): {
-  senderName?: string;
-  senderEmail?: string;
-  date?: string;
-  body: string;
-} {
-  const parser = new DOMParser();
-  const doc = parser.parseFromString(html, 'text/html');
-  const text = doc.body.textContent ?? '';
-
-  // Patterns
-  const gmailMatch = text.match(
-    /On\s+([^<\n]{5,150}?)\s+([^<\n]{1,80}?)\s*<([^>\s]+@[^>\s]+)>\s*wrote:/i,
-  );
-  const fromMatch = text.match(/From:\s*([^<\n]+?)\s*<([^>\s]+@[^>\s]+)>/);
-  const sentMatch = text.match(/Sent:\s*([^\n]+)/);
-
-  let senderName: string | undefined;
-  let senderEmail: string | undefined;
-  let date: string | undefined;
-
-  if (gmailMatch) {
-    date = gmailMatch[1].trim().replace(/\s+/g, ' ').replace(/[,\s]+$/, '');
-    senderName = gmailMatch[2].trim();
-    senderEmail = gmailMatch[3].trim();
-  } else if (fromMatch) {
-    senderName = fromMatch[1].trim();
-    senderEmail = fromMatch[2].trim();
-    date = sentMatch?.[1].trim();
-  }
-
-  // Strip the attribution element so the body doesn't duplicate it.
-  const attrPattern = /(On\s+[^<\n]{5,150}\s+[^<\n]{1,80}\s*<[^>]+>\s*wrote:|From:\s+[^<\n]+\s*<[^>]+>)/i;
-  const allEls = Array.from(doc.body.querySelectorAll('*'));
-  for (const el of allEls) {
-    const t = (el.textContent ?? '').trim();
-    if (t.length > 0 && t.length < 500 && attrPattern.test(t)) {
-      // Only remove if this element is "small" — don't accidentally remove the whole body
-      if ((el.innerHTML ?? '').length < 1500) {
-        el.remove();
-        break;
-      }
-    }
-  }
-
-  return { senderName, senderEmail, date, body: doc.body.innerHTML.trim() };
-}
-
-/**
- * Try to parse a date string into a millis timestamp. Falls back to null on
- * unparseable input.
- */
-function parseDateGuess(s?: string): number | null {
-  if (!s) return null;
-  const t = Date.parse(s);
-  if (!Number.isNaN(t)) return t;
-  // Try replacing "at" → " "
-  const t2 = Date.parse(s.replace(/\s+at\s+/i, ' '));
-  if (!Number.isNaN(t2)) return t2;
-  return null;
-}
-
-/**
- * Expand an email containing quoted history into one synthetic email per
- * historical message, so they render as peer cards in the timeline.
- *
- * Returns [original (with quoted stripped), ...syntheticOlderEmails].
- * Synthetic emails have id like "<originalId>__q1", a `synthetic: true`
- * flag, parsed sender from the attribution line, and the corresponding
- * body fragment.
- */
-function expandEmailWithQuotedHistory(email: any): any[] {
-  const html = email.bodyHtml as string | null | undefined;
-  if (!html) return [email];
-  const fragments = splitIntoCards(html);
-  if (fragments.length <= 1) return [email];
-
-  // First fragment = the main email's user-visible content.
-  const main = { ...email, bodyHtml: fragments[0] };
-
-  const synthetics: any[] = [];
-  let parentReceivedAt = email.receivedAt
-    ? new Date(email.receivedAt).getTime()
-    : Date.now();
-
-  for (let i = 1; i < fragments.length; i++) {
-    const { senderName, senderEmail, date, body } = extractAttributionAndBody(
-      fragments[i],
-    );
-    const ts = parseDateGuess(date) ?? parentReceivedAt - 60_000 * i;
-    parentReceivedAt = ts;
-    synthetics.push({
-      ...email,
-      id: `${email.id}__q${i}`,
-      synthetic: true,
-      fromAddress: senderEmail ?? email.fromAddress,
-      fromName: senderName ?? email.fromName,
-      receivedAt: new Date(ts).toISOString(),
-      bodyHtml: body,
-      bodyText: null,
-      attachments: [],
-    });
-  }
-
-  return [main, ...synthetics];
-}
 
 /**
  * Strip quoted content from plain text emails.
@@ -704,17 +465,6 @@ function isPreviewable(mimeType: string, filename: string): boolean {
   return ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'txt', 'csv', 'json', 'xml', 'html', 'md'].includes(ext);
 }
 
-/** Fetch attachment as blob URL for preview */
-async function fetchAttachmentBlob(_emailId: string, attachmentId: string): Promise<string> {
-  const { url } = await convex.action(convexApi.emails.downloadAttachment, {
-    attachmentId: attachmentId as Id<'attachments'>,
-  });
-  if (!url) throw new Error('Preview failed');
-  const res = await fetch(url);
-  if (!res.ok) throw new Error('Preview failed');
-  const blob = await res.blob();
-  return URL.createObjectURL(blob);
-}
 
 /** Lightweight attachment preview overlay */
 function AttachmentPreview({ emailId, attachment, onClose }: {
@@ -1441,9 +1191,9 @@ function BlankThreadAutoFix({ threadId }: { threadId: Id<'threads'> }) {
 }
 
 type TimelineItem =
-  | { type: 'email'; timestamp: string; data: any }
-  | { type: 'comment'; timestamp: string; data: any }
-  | { type: 'scheduled'; timestamp: string; data: any };
+  | { type: 'email'; timestamp: number; data: any }
+  | { type: 'comment'; timestamp: number; data: any }
+  | { type: 'scheduled'; timestamp: number; data: any };
 
 interface EmailViewerProps {
   onBack?: () => void;
@@ -1505,87 +1255,6 @@ function addressListEmails(value: unknown): string {
     .join(', ');
 }
 
-function compactAddressLabel(addr: { email?: string; name?: string }): string {
-  return addr.name || addr.email || '';
-}
-
-function EmailRecipientSummary({ to, cc, bcc }: { to: unknown; cc?: unknown; bcc?: unknown }) {
-  const [expanded, setExpanded] = useState(false);
-  const wrapperRef = useRef<HTMLSpanElement>(null);
-  const toList = asAddressArray(to).filter((a) => a.email || a.name);
-  const ccList = asAddressArray(cc).filter((a) => a.email || a.name);
-  const bccList = asAddressArray(bcc).filter((a) => a.email || a.name);
-  const extraCount = ccList.length + bccList.length;
-  const toLabel = toList.slice(0, 2).map(compactAddressLabel).filter(Boolean).join(', ') || 'undisclosed recipients';
-  const hiddenToCount = Math.max(0, toList.length - 2);
-
-  useEffect(() => {
-    if (!expanded) return;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!wrapperRef.current?.contains(event.target as Node)) setExpanded(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setExpanded(false);
-    };
-    document.addEventListener('pointerdown', handlePointerDown);
-    document.addEventListener('keydown', handleKeyDown);
-    return () => {
-      document.removeEventListener('pointerdown', handlePointerDown);
-      document.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [expanded]);
-
-  return (
-    <span ref={wrapperRef} className="relative ml-2 inline-flex items-center gap-1 text-[11px] text-text-tertiary">
-      <span>to {toLabel}</span>
-      {(hiddenToCount > 0 || extraCount > 0) && (
-        <button
-          type="button"
-          aria-expanded={expanded}
-          onClick={(e) => {
-            e.stopPropagation();
-            setExpanded((v) => !v);
-          }}
-          className="rounded-full border border-border bg-surface px-1.5 py-0.5 text-[10px] font-semibold text-text-secondary transition-colors hover:border-primary/40 hover:text-primary"
-        >
-          +{hiddenToCount + extraCount}
-        </button>
-      )}
-      {expanded && (
-        <div className="absolute left-0 top-5 z-20 w-[min(420px,80vw)] rounded-xl border border-border bg-white p-3 text-[11px] text-text-secondary shadow-lg">
-          <div className="mb-1 flex items-center justify-between border-b border-border/60 pb-2">
-            <span className="font-semibold text-text-primary">Recipients</span>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setExpanded(false);
-              }}
-              className="rounded-md p-1 text-text-tertiary hover:bg-surface hover:text-text-primary"
-              aria-label="Close recipients"
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
-          </div>
-          <RecipientRow label="To" list={toList} />
-          {ccList.length > 0 && <RecipientRow label="Cc" list={ccList} />}
-          {bccList.length > 0 && <RecipientRow label="Bcc" list={bccList} />}
-        </div>
-      )}
-    </span>
-  );
-}
-
-function RecipientRow({ label, list }: { label: string; list: Array<{ email?: string; name?: string }> }) {
-  return (
-    <div className="grid grid-cols-[34px_1fr] gap-2 py-1">
-      <span className="font-semibold text-text-tertiary">{label}</span>
-      <span className="break-words text-text-secondary">
-        {list.map((a) => a.name && a.email ? `${a.name} <${a.email}>` : compactAddressLabel(a)).join(', ')}
-      </span>
-    </div>
-  );
-}
 
 function parseAddressString(value: string | undefined): Array<{ email: string }> {
   if (!value) return [];
@@ -1760,7 +1429,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const cancelScheduledMutation = useCancelScheduledEmail();
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
-  const [replyMode, setReplyMode] = useState<'reply' | 'forward' | null>(null);
+  const [replyMode, setReplyMode] = useState<'reply' | 'forward' | 'compose' | null>(null);
   const [newComment, setNewComment] = useState('');
   const [showNoteInput, setShowNoteInput] = useState(false);
   const [showTagMenu, setShowTagMenu] = useState(false);
@@ -2036,15 +1705,15 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     const comments = Array.isArray(data.data.comments) ? data.data.comments : [];
     const scheduled = Array.isArray(scheduledEmails) ? scheduledEmails : [];
     for (const email of emails) {
-      items.push({ type: 'email', timestamp: email.receivedAt, data: email });
+      items.push({ type: 'email', timestamp: new Date(email.receivedAt).getTime(), data: email });
     }
     for (const comment of comments) {
-      items.push({ type: 'comment', timestamp: comment.createdAt, data: comment });
+      items.push({ type: 'comment', timestamp: new Date(comment._creationTime).getTime(), data: comment });
     }
     for (const se of scheduled) {
-      items.push({ type: 'scheduled', timestamp: se.sendAt, data: se });
+      items.push({ type: 'scheduled', timestamp: new Date(se.sendAt).getTime(), data: se });
     }
-    items.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    items.sort((a, b) => a.timestamp - b.timestamp);
     return items;
   }, [data, scheduledEmails]);
 

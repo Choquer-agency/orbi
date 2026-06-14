@@ -18,7 +18,7 @@ function looksLikeEmailLocalPart(value: string, email: string): boolean {
   return normalized.length > 0 && (normalized === local || local.includes(normalized) || normalized.includes(local));
 }
 
-function isMeaningfulHeaderName(fromName: string | undefined | null, fromAddress: string): fromName is string {
+function isMeaningfulHeaderName(fromName: string | undefined | null, fromAddress: string): boolean {
   const name = fromName?.trim();
   if (!name) return false;
   if (name.includes('@')) return false;
@@ -48,7 +48,7 @@ export function useContactNameResolver() {
   const resolveName = useCallback(
     (fromAddress: string | undefined | null, fromName: string | undefined | null): string => {
       if (!fromAddress) return fromName || 'Unknown';
-      if (isMeaningfulHeaderName(fromName, fromAddress)) return fromName.trim();
+      if (isMeaningfulHeaderName(fromName, fromAddress)) return fromName!.trim();
       const resolved = lookup.get(fromAddress.toLowerCase());
       if (resolved) return resolved;
       if (fromName && fromName.trim()) return fromName.trim();

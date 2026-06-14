@@ -3,20 +3,6 @@ import { Columns3, Save, GripVertical, Loader2 } from 'lucide-react';
 import { useInboxSplits, useUpdateInboxSplits, type InboxSplit } from '../../hooks/useInboxSplits';
 import { cn } from '../../lib/utils';
 
-const CATEGORIES = [
-  { value: 'all', label: 'All (no filter)' },
-  { value: 'revision_request', label: 'Revision Requests' },
-  { value: 'new_inquiry', label: 'New Inquiries' },
-  { value: 'feedback', label: 'Feedback' },
-  { value: 'billing', label: 'Billing' },
-  { value: 'project_update', label: 'Project Updates' },
-  { value: 'meeting_scheduling', label: 'Meetings' },
-  { value: 'support_request', label: 'Support' },
-  { value: 'internal', label: 'Internal' },
-  { value: 'notification', label: 'Notifications' },
-  { value: 'other', label: 'Other' },
-];
-
 export function InboxSplitSettings() {
   const { data: splits } = useInboxSplits();
   const updateSplits = useUpdateInboxSplits();

@@ -209,7 +209,7 @@ async function syncConversationBatch(
   ctx: ActionCtx,
   conversationId: string,
   messages: GraphMessage[],
-  accessToken: string,
+  _accessToken: string,
   cctx: ChunkContext,
 ): Promise<void> {
   if (messages.length === 0) return;

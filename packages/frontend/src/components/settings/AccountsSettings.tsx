@@ -1,3 +1,4 @@
+import type React from 'react';
 import { useState, useEffect } from 'react';
 import {
   Mail,
@@ -7,10 +8,8 @@ import {
   Download,
   Check,
   Loader2,
-  ExternalLink,
   Shield,
   Clock,
-  Plus,
 } from 'lucide-react';
 import * as Popover from '@radix-ui/react-popover';
 import { useAccounts, useStartOAuth, useDeleteAccount, useSyncAccount, useSetAccountColor, useUpdateAccount } from '../../hooks/useAccounts';
@@ -21,7 +20,7 @@ import { useUiStore } from '../../stores/uiStore';
 import { cn } from '../../lib/utils';
 import toast from 'react-hot-toast';
 
-const PROVIDER_INFO: Record<string, { label: string; color: string; icon: JSX.Element }> = {
+const PROVIDER_INFO: Record<string, { label: string; color: string; icon: React.JSX.Element }> = {
   GMAIL: {
     label: 'Gmail',
     color: '#EA4335',
@@ -78,7 +77,7 @@ function AccountCard({ account, accountIndex, isDefault, onSetDefault }: {
   const progress = syncStatus?.historicalSyncProgress;
 
   const provider = PROVIDER_INFO[account.provider] ?? PROVIDER_INFO.APPLE_IMAP;
-  const accountSignatures = (sigData?.data ?? []).filter(
+  const accountSignatures = (sigData ?? []).filter(
     (s: any) => s.accountIds?.includes(account.id),
   );
 
@@ -221,7 +220,7 @@ function AccountCard({ account, accountIndex, isDefault, onSetDefault }: {
         {isImporting && progress && (
           <span className="flex items-center gap-1">
             <Loader2 className="h-3 w-3 animate-spin" />
-            Importing {progress.syncedThreads?.toLocaleString() ?? progress.syncedMessages?.toLocaleString() ?? 0}
+            Importing {progress.syncedThreads?.toLocaleString() ?? 0}
           </span>
         )}
         {isCompleted && (
@@ -288,10 +287,10 @@ function AccountCard({ account, accountIndex, isDefault, onSetDefault }: {
         {(account.provider === 'GMAIL' || account.provider === 'MICROSOFT') && (
           <button
             onClick={() =>
-              startContactBackfill.mutate(account.id).then(
-                () => toast.success('Rebuilding contacts from your sent email...'),
-                (err) => toast.error(err?.message ?? 'Rebuild failed to start'),
-              )
+              startContactBackfill.mutate(account.id, {
+                onSuccess: () => toast.success('Rebuilding contacts from your sent email...'),
+                onError: (err) => toast.error(err?.message ?? 'Rebuild failed to start'),
+              })
             }
             disabled={startContactBackfill.isPending}
             className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-[11px] font-medium text-text-secondary transition-colors hover:bg-surface hover:text-text-primary disabled:opacity-50"
@@ -331,7 +330,6 @@ export function AccountsSettings() {
   const startOAuth = useStartOAuth();
   const defaultAccountId = useUiStore((s) => s.defaultAccountId);
   const setDefaultAccountId = useUiStore((s) => s.setDefaultAccountId);
-  const setSettingsOpen = useUiStore((s) => s.setSettingsOpen);
 
   // If no default is set, treat the first account as default
   const effectiveDefault = defaultAccountId && accounts.some((a: any) => a.id === defaultAccountId)

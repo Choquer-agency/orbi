@@ -14,7 +14,6 @@ import { UndoSendToast } from '../compose/UndoSendToast';
 import { BiometricLockOverlay } from '../ui/BiometricLockOverlay';
 
 import { OfflineBanner } from '../ui/OfflineBanner';
-import { isIOS } from '../../lib/platform';
 
 const AiChatPanel = lazy(() =>
   import('../ai-chat/AiChatPanel').then((module) => ({ default: module.AiChatPanel })),

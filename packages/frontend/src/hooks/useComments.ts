@@ -3,6 +3,8 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Drop-in TanStack Query → Convex replacement.
 //
@@ -48,8 +50,11 @@ export function useAddComment() {
   };
 
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -71,8 +76,11 @@ export function useResolveComment() {
   };
 
   return {
-    mutate: (commentId: Id<'threadComments'> | string) => {
-      void mutateAsync(commentId);
+    mutate: (commentId: Id<'threadComments'> | string, options?: MutateOptions) => {
+      mutateAsync(commentId).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -100,8 +108,11 @@ export function useAddReaction() {
   };
 
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,

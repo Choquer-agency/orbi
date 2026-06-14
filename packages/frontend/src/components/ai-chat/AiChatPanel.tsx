@@ -14,7 +14,6 @@ import {
   AlertCircle,
   Clock,
   CheckCircle2,
-  User,
   Building2,
   CalendarClock,
   ListTodo,
@@ -569,7 +568,7 @@ export function AiChatPanel() {
               >
                 <Mail className="h-3 w-3" />
                 {scope === 'thread' && selectedThread && (
-                  <span className="max-w-[120px] truncate">{selectedThread.subject}</span>
+                  <span className="max-w-[120px] truncate">{selectedThread.data.subject}</span>
                 )}
                 {scope === 'thread' && !selectedThread && 'Thread'}
               </button>

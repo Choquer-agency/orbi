@@ -8,7 +8,7 @@ export interface PendingUndoEmail {
   bodyHtml?: string;
   to: string;
   subject: string;
-  mode: 'reply' | 'forward' | 'compose';
+  mode?: 'reply' | 'forward' | 'compose';
   lastEmailId?: string;
   // Epoch milliseconds; the Convex backend hands us `Date.now() + UNDO_WINDOW_MS`.
   undoDeadlineAt: number;

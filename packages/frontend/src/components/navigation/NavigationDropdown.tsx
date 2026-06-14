@@ -5,7 +5,6 @@ import {
   ChevronDown,
   Mail,
   Plus,
-  Settings,
   Menu,
   RefreshCw,
   Download,

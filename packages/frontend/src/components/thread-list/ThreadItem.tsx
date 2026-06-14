@@ -2,7 +2,7 @@ import { memo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'rea
 import { AlarmClockOff, Archive, CalendarDays, Clock, Forward, FolderInput, Inbox, Mail, MailOpen, Moon, Reply, Star, Sun, Trash2 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as ContextMenu from '@radix-ui/react-context-menu';
-import { motion, useMotionValue, useMotionValueEvent, useTransform, useAnimate } from 'framer-motion';
+import { motion, useMotionValue, useMotionValueEvent, useAnimate } from 'framer-motion';
 import toast from 'react-hot-toast';
 import { useUpdateThread, useSnoozeThread, useUnsnoozeThread } from '../../hooks/useThreads';
 import { useContactNameResolver } from '../../hooks/useContacts';

@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { TextQuote, Plus, Trash2, Pencil, Check, X } from 'lucide-react';
+import { TextQuote, Plus, Trash2, Pencil, Check } from 'lucide-react';
 import {
   useSnippets,
   useCreateSnippet,

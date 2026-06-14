@@ -7,13 +7,10 @@ import {
   Star,
   Clock,
   Users,
-  Sparkles,
   LayoutDashboard,
   CalendarClock,
-  BellRing,
   ContactIcon,
   Megaphone,
-  Bell,
   ShieldAlert,
   AlarmClock,
 } from 'lucide-react';

@@ -41,5 +41,6 @@ export function useTracking(emailId: string | undefined) {
   return {
     data: undefined as TrackingData | undefined,
     isLoading: false,
+    isError: false,
   };
 }

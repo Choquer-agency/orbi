@@ -3,6 +3,8 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
+
 interface ScheduledEmail {
   id: string;
   userId: string;
@@ -98,7 +100,7 @@ export function useThreadScheduledEmails(threadId: string | null | undefined) {
 export function useCreateScheduledEmail() {
   const fn = useMutation(api.scheduledEmails.create);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (data: {
+  const mutateAsync = async (data: {
     accountId: string;
     threadId?: string;
     parentEmailId?: string;
@@ -133,13 +135,19 @@ export function useCreateScheduledEmail() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 export function useCancelScheduledEmail() {
   const fn = useMutation(api.scheduledEmails.cancel);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (id: string) => {
+  const mutateAsync = async (id: string) => {
     setIsPending(true);
     try {
       return await fn({ id: id as Id<'scheduledEmails'> });
@@ -147,13 +155,19 @@ export function useCancelScheduledEmail() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 export function useUpdateScheduledEmail() {
   const fn = useMutation(api.scheduledEmails.update);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async ({
+  const mutateAsync = async ({
     id,
     sendAt,
     subject,
@@ -182,7 +196,13 @@ export function useUpdateScheduledEmail() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 /**
@@ -193,7 +213,7 @@ export function useUpdateScheduledEmail() {
 export function useSendScheduledNow() {
   const fn = useMutation(api.scheduledEmails.update);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async ({
+  const mutateAsync = async ({
     id,
   }: {
     id: string;
@@ -216,5 +236,11 @@ export function useSendScheduledNow() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }

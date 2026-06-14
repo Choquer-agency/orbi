@@ -3,6 +3,8 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Drop-in TanStack Query → Convex replacement.
 //
@@ -71,8 +73,11 @@ export function useCreateHandoff() {
   };
 
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -102,8 +107,11 @@ export function useRespondToHandoff() {
   };
 
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -126,8 +134,11 @@ export function useReturnHandoff() {
   };
 
   return {
-    mutate: (id: Id<'threadHandoffs'> | string) => {
-      void mutateAsync(id);
+    mutate: (id: Id<'threadHandoffs'> | string, options?: MutateOptions) => {
+      mutateAsync(id).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,

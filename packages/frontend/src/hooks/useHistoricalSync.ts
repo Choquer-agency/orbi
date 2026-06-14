@@ -105,10 +105,12 @@ export function useAnyHistoricalSyncInProgress() {
   };
 }
 
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
+
 export function useStartContactBackfill() {
   const fn = useMutation(api.contacts.startContactBackfill);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (accountId: string) => {
+  const mutateAsync = async (accountId: string) => {
     setIsPending(true);
     try {
       return await fn({ accountId: accountId as Id<'mailAccounts'> });
@@ -116,13 +118,19 @@ export function useStartContactBackfill() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (accountId: string, options?: MutateOptions) => {
+    mutateAsync(accountId).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 export function useStartHistoricalSync() {
   const fn = useMutation(api.mailAccounts.triggerHistoricalSync);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (accountId: string) => {
+  const mutateAsync = async (accountId: string) => {
     setIsPending(true);
     try {
       return await fn({ accountId: accountId as Id<'mailAccounts'> });
@@ -130,5 +138,11 @@ export function useStartHistoricalSync() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (accountId: string, options?: MutateOptions) => {
+    mutateAsync(accountId).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }

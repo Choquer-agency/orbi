@@ -218,41 +218,6 @@ function stripQuoted(html: string): { body: string; hasQuoted: boolean } {
   return { body: cleaned, hasQuoted: removedQuoted };
 }
 
-/**
- * Run-once whitespace cleanup. Removes runs of empty wrappers / extra <br>s
- * (Outlook + Apple Mail signatures) but keeps a single blank line so the
- * paragraph→signature spacing matches Gmail/Spark.
- */
-function trimWhitespaceServer(html: string): string {
-  if (!html) return html;
-  const $ = cheerioLoad(`<!doctype html><html><body>${html}</body></html>`);
-  const body = $("body");
-
-  body.find("br").each((_i, br) => {
-    // Skip <br>s that live inside a table — those are intentional layout
-    // beats in email signatures (Outlook / Apple Mail / Spark all use
-    // table-based signatures and rely on exact <br> counts for spacing).
-    // Only collapse runs of <br>s in flow content where 3+ in a row is
-    // almost always Outlook reply-template noise.
-    if ($(br).parents("table").length > 0) return;
-    let cur: any = br;
-    let keep = 1;
-    while (true) {
-      let next: any = cur.next;
-      while (next && next.type === "text" && !(next.data ?? "").trim()) {
-        next = next.next;
-      }
-      if (!next || next.type !== "tag" || next.name !== "br") break;
-      keep++;
-      const toRemove = next;
-      cur = next;
-      if (keep > 2) $(toRemove).remove();
-    }
-  });
-
-  return body.html() ?? html;
-}
-
 export function preprocessEmailBody(
   bodyHtml: string | undefined,
   bodyText: string | undefined,

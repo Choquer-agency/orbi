@@ -19,14 +19,15 @@ export function useAccounts() {
   const result = useQuery(api.mailAccounts.list, {});
   const rows = Array.isArray(result) ? result : [];
   return {
-    // Keep the REST-era shape all current consumers expect:
-    // `const accounts = accountsData?.data ?? []`.
-    data: result === undefined ? undefined : { data: rows },
+    // Consumers treat `data` as the bare array of accounts.
+    data: result === undefined ? undefined : rows,
     isLoading: result === undefined,
     isError: false,
     error: undefined,
   };
 }
+
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
 
 export function useDeleteAccount() {
   const fn = useMutation(api.mailAccounts.disconnect);
@@ -42,8 +43,11 @@ export function useDeleteAccount() {
   };
 
   return {
-    mutate: (id: Id<'mailAccounts'> | string) => {
-      void mutateAsync(id);
+    mutate: (id: Id<'mailAccounts'> | string, options?: MutateOptions) => {
+      mutateAsync(id).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -90,8 +94,11 @@ export function useStartOAuth() {
   };
 
   return {
-    mutate: (provider: 'gmail' | 'microsoft') => {
-      void mutateAsync(provider);
+    mutate: (provider: 'gmail' | 'microsoft', options?: MutateOptions) => {
+      mutateAsync(provider).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -119,8 +126,11 @@ export function useUpdateAccount() {
   };
 
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -146,8 +156,11 @@ export function useSetAccountColor() {
     }
   };
   return {
-    mutate: (args: Parameters<typeof mutateAsync>[0]) => {
-      void mutateAsync(args);
+    mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+      mutateAsync(args).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,
@@ -168,8 +181,11 @@ export function useSyncAccount() {
   };
 
   return {
-    mutate: (id: Id<'mailAccounts'> | string) => {
-      void mutateAsync(id);
+    mutate: (id: Id<'mailAccounts'> | string, options?: MutateOptions) => {
+      mutateAsync(id).then(
+        (res) => options?.onSuccess?.(res),
+        (err) => options?.onError?.(err),
+      );
     },
     mutateAsync,
     isPending,

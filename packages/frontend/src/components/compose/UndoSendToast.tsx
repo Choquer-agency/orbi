@@ -195,6 +195,7 @@ function EditPanel({ email }: { email: PendingUndoEmail }) {
 export function UndoSendToast() {
   const undoMutation = useMutation(convexApi.emails.undoSend);
   const sendNowMutation = useMutation(convexApi.emails.sendNow);
+  const { pendingEmails, removePendingEmail } = useUndoSendStore();
 
   const handleCancel = useCallback(async (email: PendingUndoEmail) => {
     try {

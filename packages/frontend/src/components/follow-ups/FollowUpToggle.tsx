@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { BellRing, BellOff, Loader2 } from 'lucide-react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { useCreateFollowUp, useCancelFollowUp } from '../../hooks/useFollowUps';

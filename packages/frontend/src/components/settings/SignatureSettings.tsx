@@ -6,7 +6,6 @@ import {
   useCreateSignature,
   useUpdateSignature,
   useDeleteSignature,
-  type Signature,
 } from '../../hooks/useSignatures';
 import { useAccounts } from '../../hooks/useAccounts';
 import { cn } from '../../lib/utils';
@@ -198,7 +197,7 @@ export function SignatureSettings() {
   const [showEditor, setShowEditor] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  const accounts: AccountOption[] = (accountsRes?.data ?? []).map((a: any) => ({
+  const accounts: AccountOption[] = (accountsRes ?? []).map((a: any) => ({
     id: a.id,
     email: a.email,
     displayName: a.displayName,

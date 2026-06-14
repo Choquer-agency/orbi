@@ -30,7 +30,7 @@
 
 import type { QueryInitializer, OrderedQuery } from "convex/server";
 
-type Pageable<Doc> = QueryInitializer<any> | OrderedQuery<any>;
+type Pageable<_Doc> = QueryInitializer<any> | OrderedQuery<any>;
 
 export async function safePaginate<Doc, T>(
   q: Pageable<Doc>,

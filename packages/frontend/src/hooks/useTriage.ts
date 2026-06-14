@@ -3,6 +3,8 @@ import { useQuery, useMutation, useAction } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 
+type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
+
 // ─── Types ───────────────────────────────────────────────────
 
 interface TriageSettings {
@@ -52,7 +54,7 @@ export function useTriageSettings() {
 export function useUpdateTriageSettings() {
   const fn = useMutation(api.triage.updateSettings);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (settings: Partial<TriageSettings>) => {
+  const mutateAsync = async (settings: Partial<TriageSettings>) => {
     setIsPending(true);
     try {
       return await fn(settings);
@@ -60,7 +62,13 @@ export function useUpdateTriageSettings() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 // ─── Suggestion (action — wrapped to act like a cached query) ──
@@ -133,7 +141,7 @@ export function useTriageSuggestion(threadId: string | null) {
 export function useTriageFeedback() {
   const fn = useMutation(api.triage.submitFeedback);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (payload: TriageFeedbackPayload) => {
+  const mutateAsync = async (payload: TriageFeedbackPayload) => {
     setIsPending(true);
     try {
       return await fn({
@@ -153,7 +161,13 @@ export function useTriageFeedback() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 // ─── Stats ───────────────────────────────────────────────────
@@ -211,7 +225,7 @@ export function useTriageFeedbackList(page: number = 1) {
 export function useUpdateTriageFeedback() {
   const fn = useMutation(api.triage.updateFeedback);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async ({
+  const mutateAsync = async ({
     id,
     finalCategory,
   }: {
@@ -228,13 +242,19 @@ export function useUpdateTriageFeedback() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 export function useDeleteTriageFeedback() {
   const fn = useMutation(api.triage.deleteFeedback);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (id: string) => {
+  const mutateAsync = async (id: string) => {
     setIsPending(true);
     try {
       return await fn({ id: id as Id<'triageFeedback'> });
@@ -242,13 +262,19 @@ export function useDeleteTriageFeedback() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }
 
 export function useCreateManualTriageRule() {
   const fn = useMutation(api.triage.submitFeedback);
   const [isPending, setIsPending] = useState(false);
-  const mutate = async (payload: {
+  const mutateAsync = async (payload: {
     senderAddress: string;
     finalCategory: string;
   }) => {
@@ -264,5 +290,11 @@ export function useCreateManualTriageRule() {
       setIsPending(false);
     }
   };
-  return { mutate, mutateAsync: mutate, isPending };
+  const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
+    mutateAsync(arg).then(
+      (res) => options?.onSuccess?.(res),
+      (err) => options?.onError?.(err),
+    );
+  };
+  return { mutate, mutateAsync, isPending };
 }

@@ -8,17 +8,6 @@ import type { Doc, Id } from "./_generated/dataModel";
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function getUserMailAccountIds(
-  ctx: { db: any },
-  userId: Id<"users">,
-): Promise<Id<"mailAccounts">[]> {
-  const accounts = await ctx.db
-    .query("mailAccounts")
-    .withIndex("by_user", (q: any) => q.eq("userId", userId))
-    .collect();
-  return accounts.map((a: Doc<"mailAccounts">) => a._id);
-}
-
 function normalizeAddressList(value: unknown): Array<{ email?: string; name?: string }> {
   if (Array.isArray(value)) return value as Array<{ email?: string; name?: string }>;
   if (!value) return [];

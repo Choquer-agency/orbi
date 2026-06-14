@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ShieldBan, Plus, Trash2, Globe, Mail } from 'lucide-react';
+import { ShieldBan, Globe, Mail } from 'lucide-react';
 import {
   useBlockedSenders,
   useBlockSender,

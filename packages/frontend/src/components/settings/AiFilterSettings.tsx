@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Filter, Plus, Trash2, Pencil, Zap, FileText, Check, X } from 'lucide-react';
+import { Filter, Plus, Trash2, Pencil, Zap, FileText, Check } from 'lucide-react';
 import {
   useAiFilters,
   useCreateAiFilter,

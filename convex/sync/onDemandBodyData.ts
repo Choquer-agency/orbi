@@ -8,7 +8,6 @@
 
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "../_generated/server";
-import type { Id } from "../_generated/dataModel";
 
 // Look up everything the action needs in one round trip: email row, sibling
 // account, and whether the body has already been fetched.
