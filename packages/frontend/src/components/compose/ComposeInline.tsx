@@ -342,7 +342,6 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   const updateDraftMutation = useMutation(convexApi.drafts.update);
   const createScheduledMutation = useMutation(convexApi.scheduledEmails.create);
   const updateScheduledMutation = useMutation(convexApi.scheduledEmails.update);
-  const generateUploadUrl = useMutation(convexApi.emails.generateAttachmentUploadUrl);
   const recordEditAction = useAction(convexApi.ai.learn.recordEdit);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -619,7 +618,6 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       }
 
       let res: { data: any };
-      const activeAccountId = sendingAccountId || accountId;
 
       // If we have a saved draft, send via draft endpoint. If anything goes
       // wrong with that path (stale row, already converted, deleted), fall
