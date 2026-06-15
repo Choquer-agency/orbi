@@ -668,28 +668,28 @@ function CollapsedEmailBody({
   const hasServerPreprocess = !!preBodyHtmlClean;
 
   const { trimmedHtml, trimmedText, hasQuoted, isForwarded } = useMemo(() => {
-    // Fast path: server already preprocessed the body.
+    // IMPORTANT: we no longer auto-trim "quoted history". The heuristic was
+    // hiding REAL content — blockquotes/indented lists that senders use for
+    // emphasis got mistaken for a reply chain, so everything after them
+    // silently disappeared (a user missed time-sensitive info this way).
+    // Email correctness > tidiness: always render the complete body. The
+    // server-side `bodyHtmlClean` is sanitized but complete.
     if (hasServerPreprocess) {
-      // Subject-gate the forward flag — the server-side flag was historically
-      // computed from the body only, which mislabels reply chains that quote
-      // a forwarded message.
       const subj = (subject ?? '').trim();
       const subjectLooksForward = /^\s*(fwd?|fw|tr|wg|rv|enc):/i.test(subj);
       return {
-        trimmedHtml: preBodyHtmlTrimmed ?? preBodyHtmlClean ?? null,
+        trimmedHtml: preBodyHtmlClean ?? null,
         trimmedText: null,
-        hasQuoted: !!preHasQuotedHistory,
+        hasQuoted: false,
         isForwarded: !!preIsForwarded && subjectLooksForward,
       };
     }
     const forwarded = isForwardedEmail(bodyHtml, bodyText, subject);
     if (bodyHtml) {
-      const result = stripQuotedContent(bodyHtml);
-      return { trimmedHtml: result.body, trimmedText: null, hasQuoted: result.hasQuoted, isForwarded: forwarded };
+      return { trimmedHtml: bodyHtml, trimmedText: null, hasQuoted: false, isForwarded: forwarded };
     }
     if (bodyText) {
-      const result = stripQuotedText(bodyText);
-      return { trimmedHtml: null, trimmedText: result.body, hasQuoted: result.hasQuoted, isForwarded: forwarded };
+      return { trimmedHtml: null, trimmedText: bodyText, hasQuoted: false, isForwarded: forwarded };
     }
     return { trimmedHtml: null, trimmedText: null, hasQuoted: false, isForwarded: false };
   }, [
