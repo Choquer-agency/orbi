@@ -4,19 +4,22 @@ import { internal } from "./_generated/api";
 const crons = cronJobs();
 
 // ── Email sync ──────────────────────────────────────────────────────────────
-// Both providers do an incremental delta sync every minute.
+// Both providers do an incremental delta sync every 10 minutes. (Was every
+// minute, which dominated the team's Database I/O budget — see 2026-06-15
+// cost work. 10 min is plenty fresh for an agency inbox and cuts the
+// constant-churn I/O ~10x.)
 // Each invocation enumerates active accounts and schedules a per-account
 // sync chunk. Chunks self-reschedule via scheduler.runAfter when more pages
 // exist (action time limit ~10 min; we stay well under).
 crons.interval(
   "gmail-incremental-sync",
-  { minutes: 1 },
+  { minutes: 10 },
   internal.sync.gmail.syncAllActiveAccounts,
   {},
 );
 crons.interval(
   "microsoft-incremental-sync",
-  { minutes: 1 },
+  { minutes: 10 },
   internal.sync.microsoft.syncAllActiveAccounts,
   {},
 );
@@ -64,12 +67,14 @@ crons.daily(
 );
 
 // ── Orphan thread repair ────────────────────────────────────────────────────
-// Self-heal: every 10 min, finds threads that ended up with 0 email rows
+// Self-heal: hourly, finds threads that ended up with 0 email rows
 // (sync chunk hiccups, parser failures, etc.) and refetches them from Gmail.
 // Bounded to ORPHAN_REPAIR_BATCH per run so it never starves other crons.
+// (Was every 10 min — it scans 500 threads/account and re-fetches from Gmail
+// each run, so it was a steady I/O drain; hourly is fine for self-healing.)
 crons.interval(
   "orphan-thread-repair",
-  { minutes: 10 },
+  { minutes: 60 },
   internal.sync.gmail.repairOrphanThreads,
   {},
 );
@@ -82,7 +87,7 @@ crons.interval(
 // haven't been backfilled yet.
 crons.interval(
   "historical-sync-resume",
-  { minutes: 5 },
+  { minutes: 30 },
   internal.mailAccounts._resumeStalledHistorical,
   {},
 );
