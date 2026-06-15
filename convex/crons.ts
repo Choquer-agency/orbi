@@ -4,22 +4,24 @@ import { internal } from "./_generated/api";
 const crons = cronJobs();
 
 // ── Email sync ──────────────────────────────────────────────────────────────
-// Both providers do an incremental delta sync every 10 minutes. (Was every
-// minute, which dominated the team's Database I/O budget — see 2026-06-15
-// cost work. 10 min is plenty fresh for an agency inbox and cuts the
-// constant-churn I/O ~10x.)
+// Both providers do an incremental delta sync every minute, for fast mail.
+// This is CHEAP: an empty/near-empty delta poll only reads the account doc +
+// sync cursor (~tens of MB/day total across accounts, ~$1-2/month). The
+// runaway cost on 2026-06-15 was NOT this poll — it was the orphan-repair
+// cron blind-rescanning 500 threads/account (~102GB), now disabled. So fast
+// sync stays; the waste is gone.
 // Each invocation enumerates active accounts and schedules a per-account
 // sync chunk. Chunks self-reschedule via scheduler.runAfter when more pages
 // exist (action time limit ~10 min; we stay well under).
 crons.interval(
   "gmail-incremental-sync",
-  { minutes: 10 },
+  { minutes: 1 },
   internal.sync.gmail.syncAllActiveAccounts,
   {},
 );
 crons.interval(
   "microsoft-incremental-sync",
-  { minutes: 10 },
+  { minutes: 1 },
   internal.sync.microsoft.syncAllActiveAccounts,
   {},
 );
