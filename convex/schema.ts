@@ -206,6 +206,11 @@ export default defineSchema({
     // Used to suppress sync-driven read→unread regressions in the brief window
     // between marking read locally and Gmail/Outlook acknowledging it.
     readStateLocalAt: v.optional(v.number()),
+    // Set true when a thread row is created but no email rows landed in it
+    // (a sync hiccup → "orphan" thread). Cleared once any email is inserted.
+    // The orphan-repair cron queries ONLY flagged threads (indexed), so it
+    // never blind-scans the mailbox like the old version did.
+    needsRepair: v.optional(v.boolean()),
   })
     .index("by_account_providerThreadId", ["accountId", "providerThreadId"])
     .index("by_account_lastMessageAt", ["accountId", "lastMessageAt"])
@@ -216,6 +221,7 @@ export default defineSchema({
       "isTrashed",
     ])
     .index("by_account_snoozedUntil", ["accountId", "snoozedUntil"])
+    .index("by_account_needsRepair", ["accountId", "needsRepair"])
     // Server-side full-text search over thread subjects so search hits the
     // entire mailbox instead of the most recent N threads in memory.
     .searchIndex("search_subject", {

@@ -508,12 +508,23 @@ export const repairOrphanThreads = internalAction({
         threadId: Id<"threads">;
         providerThreadId: string;
         userEmails: string[];
+        hasEmail: boolean;
       }> = await ctx.runQuery(internal.sync.gmailData._listOrphanThreads, {
         accountId: a._id,
         limit: ORPHAN_REPAIR_BATCH,
       });
       scanned += orphans.length;
       for (const o of orphans) {
+        if (o.hasEmail) {
+          // Healthy — freshly-created thread that did get its emails. Just
+          // clear the flag; no Gmail refetch needed.
+          await ctx.runMutation(internal.sync.gmailData._clearNeedsRepair, {
+            threadId: o.threadId,
+          });
+          continue;
+        }
+        // Genuine orphan (0 email rows) — refetch from Gmail. The flag clears
+        // on the next pass once emails land (hasEmail becomes true).
         try {
           await syncOneThread(ctx, a._id, o.providerThreadId, o.userEmails);
           repaired++;
@@ -953,6 +964,14 @@ async function syncOneThread(
       bodyText,
       isOutbound,
     });
+    // Auto-fetch the full body for new mail so it renders immediately — no
+    // manual "Re-fetch from Gmail" click. Fires only for new messages, so no
+    // re-write churn on label/read changes. ~$0.02/mo, big UX win.
+    await ctx.scheduler.runAfter(
+      0,
+      internal.sync.onDemandBody.fetchBodyForNewEmail,
+      { emailId },
+    );
   }
 }
 

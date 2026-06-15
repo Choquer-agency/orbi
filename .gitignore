@@ -15,3 +15,4 @@ coverage/
 .convex/
 .wrangler/
 convex/_generated/
+.vercel

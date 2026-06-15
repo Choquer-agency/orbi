@@ -14,7 +14,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { v } from "convex/values";
-import { action } from "../_generated/server";
+import { action, internalAction } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import { withRefreshOn401 } from "../oauth/tokenManager";
@@ -289,6 +289,39 @@ async function fetchAndPersistMicrosoftBody(
 //     { status: "fetched" }.
 //   - Throws on auth/ownership errors (the frontend should not retry blindly).
 // ─────────────────────────────────────────────────────────────────────────────
+
+// Internal twin of ensureEmailBody, callable from the sync workers (which run
+// as the system, with no logged-in user). Scheduled for each genuinely-new
+// email the moment it's synced, so new mail arrives WITH its body — no manual
+// "Re-fetch from Gmail" click. Idempotent: no-ops if a body already exists.
+// Only fires for new emails (not label/read changes), so there's no re-write
+// churn on an active mailbox.
+export const fetchBodyForNewEmail = internalAction({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }) => {
+    const lookup = await ctx.runQuery(
+      internal.sync.onDemandBodyData._lookupForBodyFetch,
+      { emailId },
+    );
+    if (!lookup || lookup.hasBody) return;
+    const subject = lookup.email.subject;
+    if (lookup.account.provider === "GMAIL") {
+      await fetchAndPersistGmailBody(ctx, {
+        emailId,
+        accountId: lookup.email.accountId,
+        providerMessageId: lookup.email.providerMessageId,
+        subject,
+      });
+    } else if (lookup.account.provider === "MICROSOFT") {
+      await fetchAndPersistMicrosoftBody(ctx, {
+        emailId,
+        accountId: lookup.email.accountId,
+        providerMessageId: lookup.email.providerMessageId,
+        subject,
+      });
+    }
+  },
+});
 
 export const ensureEmailBody = action({
   args: { emailId: v.id("emails") },

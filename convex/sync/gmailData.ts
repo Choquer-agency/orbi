@@ -226,7 +226,10 @@ export const _upsertThread = internalMutation({
       await ctx.db.patch(existing._id, patch);
       return existing._id;
     }
-    return await ctx.db.insert("threads", data);
+    // Flag freshly-created threads as "orphan until proven" — the repair cron
+    // clears this once it confirms email rows exist (or refetches if they
+    // never landed). Indexed, so repair never blind-scans the mailbox.
+    return await ctx.db.insert("threads", { ...data, needsRepair: true });
   },
 });
 
@@ -707,7 +710,10 @@ export const _onNewEmailInserted = internalMutation({
   },
 });
 
-// Used by sync/gmail.ts:repairOrphanThreads — finds threads with 0 email rows.
+// Used by sync/gmail.ts:repairOrphanThreads. Returns only threads FLAGGED
+// needsRepair (freshly created or genuinely broken) via the dedicated index —
+// no mailbox scan. Includes whether each already has an email row so the
+// caller can just clear the flag on healthy ones instead of refetching.
 export const _listOrphanThreads = internalQuery({
   args: { accountId: v.id("mailAccounts"), limit: v.number() },
   handler: async (ctx, { accountId, limit }) => {
@@ -719,33 +725,43 @@ export const _listOrphanThreads = internalQuery({
       .collect();
     const userEmails = peers.map((p) => p.email.toLowerCase());
 
-    // Scan recent threads for this account; skip ones that already have emails.
-    const threads = await ctx.db
+    const flagged = await ctx.db
       .query("threads")
-      .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", accountId))
-      .order("desc")
-      .take(500); // bounded scan; orphans should sit at the top of recently-failed syncs
+      .withIndex("by_account_needsRepair", (q) =>
+        q.eq("accountId", accountId).eq("needsRepair", true),
+      )
+      .take(limit);
 
     const out: Array<{
       threadId: Id<"threads">;
       providerThreadId: string;
       userEmails: string[];
+      hasEmail: boolean;
     }> = [];
-    for (const t of threads) {
-      if (out.length >= limit) break;
-      const hasEmails = await ctx.db
+    for (const t of flagged) {
+      const firstEmail = await ctx.db
         .query("emails")
         .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
         .first();
-      if (!hasEmails) {
-        out.push({
-          threadId: t._id,
-          providerThreadId: t.providerThreadId,
-          userEmails,
-        });
-      }
+      out.push({
+        threadId: t._id,
+        providerThreadId: t.providerThreadId,
+        userEmails,
+        hasEmail: !!firstEmail,
+      });
     }
     return out;
+  },
+});
+
+// Clears the orphan flag once a thread is confirmed healthy (has email rows).
+export const _clearNeedsRepair = internalMutation({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, { threadId }) => {
+    const t = await ctx.db.get(threadId);
+    if (t && t.needsRepair) {
+      await ctx.db.patch(threadId, { needsRepair: undefined });
+    }
   },
 });
 

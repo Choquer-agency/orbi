@@ -300,7 +300,9 @@ export const _upsertThread = internalMutation({
       await ctx.db.patch(existing._id, patch);
       return existing._id;
     }
-    return await ctx.db.insert("threads", data);
+    // Flag freshly-created threads as "orphan until proven" — repair cron clears
+    // it once email rows are confirmed (or refetches). Indexed; no blind scan.
+    return await ctx.db.insert("threads", { ...data, needsRepair: true });
   },
 });
 

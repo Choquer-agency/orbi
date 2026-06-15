@@ -18,10 +18,11 @@ import { v } from "convex/values";
 import { internalAction, internalMutation } from "../_generated/server";
 import { internal } from "../_generated/api";
 
-// 14 days is the sweet spot for an agency workflow: active threads still
-// have instant-open bodies; mail older than two weeks is rare to revisit and
-// fast-enough to re-fetch when needed.
-const RETENTION_DAYS = 14;
+// 2 years (730 days). Storage was never the cost driver (Database I/O was) and
+// there's ample storage headroom, so we keep bodies long for instant-open UX —
+// only stripping truly ancient mail to bound long-term growth. Mail older than
+// this re-fetches on open via ensureEmailBody.
+const RETENTION_DAYS = 730;
 // emailBodies rows can be 100-500 KB each (full marketing-email HTML), so a
 // 500-row take() trivially blows Convex's 16 MB byte cap. Keep this small
 // and reschedule aggressively until the backlog clears.

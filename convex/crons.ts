@@ -68,21 +68,18 @@ crons.daily(
   {},
 );
 
-// ── Orphan thread repair — DISABLED 2026-06-15 ──────────────────────────────
-// This cron's query (`_listOrphanThreads`) re-scanned the 500 most-recent
-// threads PER ACCOUNT on every run to find threads with 0 email rows. In a
-// healthy mailbox it finds none and just re-reads the same 500 threads
-// forever — which measured at ~102 GB of Database I/O (≈60% of the whole
-// team's bandwidth budget). Disabled until it's rebuilt to scan only
-// newly-synced threads (e.g. via an explicit orphan flag set during sync,
-// or a creation-time-windowed index) instead of a blind 500-row re-scan.
-// Manual repair is still available via the `refreshThread` action.
-// crons.interval(
-//   "orphan-thread-repair",
-//   { minutes: 60 },
-//   internal.sync.gmail.repairOrphanThreads,
-//   {},
-// );
+// ── Orphan thread repair (flag-based, hourly) ───────────────────────────────
+// Rebuilt 2026-06-15. Repairs ONLY threads flagged `needsRepair` (set when a
+// thread row is created; cleared once email rows are confirmed), via the
+// dedicated `by_account_needsRepair` index — no mailbox scan. The old version
+// blind-scanned 500 threads/account every 10 min and cost ~102 GB I/O
+// (≈60% of the whole team's budget); this touches only flagged threads.
+crons.interval(
+  "orphan-thread-repair",
+  { minutes: 60 },
+  internal.sync.gmail.repairOrphanThreads,
+  {},
+);
 
 // ── Historical sync resume ─────────────────────────────────────────────────
 // Self-heal: every 5 min, finds accounts whose historical backfill is stuck

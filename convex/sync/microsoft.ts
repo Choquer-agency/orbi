@@ -475,6 +475,13 @@ async function syncConversationMessages(
           isOutbound,
         },
       );
+      // Auto-fetch the full body for new mail so it renders immediately — no
+      // manual "Re-fetch" click. Idempotent + only fires for new messages.
+      await ctx.scheduler.runAfter(
+        0,
+        internal.sync.onDemandBody.fetchBodyForNewEmail,
+        { emailId: upsertResult.emailId },
+      );
     }
   }
 }

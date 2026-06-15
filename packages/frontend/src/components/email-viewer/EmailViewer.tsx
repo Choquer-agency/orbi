@@ -586,6 +586,51 @@ function AttachmentPreview({ emailId, attachment, onClose }: {
  *
  * Link clicks and image clicks are forwarded the same way.
  */
+// Shown while an email's body is still being fetched. The thread hook
+// (useThreads → ensureEmailBody) auto-loads missing bodies and Convex
+// reactivity re-renders this away the instant the body lands — so normally the
+// user just sees a brief spinner. Only after a generous window do we surface a
+// manual retry, in case the auto-fetch genuinely failed.
+function BodyLoadingFallback({ emailId }: { emailId: string }) {
+  const [showButton, setShowButton] = useState(false);
+  useEffect(() => {
+    setShowButton(false);
+    const t = setTimeout(() => setShowButton(true), 12000);
+    return () => clearTimeout(t);
+  }, [emailId]);
+
+  if (!showButton) {
+    return (
+      <div className="flex items-center gap-2 rounded-md bg-surface px-3 py-2 text-[12px] italic text-text-tertiary">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Loading message…
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-md bg-surface px-3 py-2 text-[12px] italic text-text-tertiary">
+      Couldn’t load this message automatically.
+      <button
+        onClick={async () => {
+          setShowButton(false);
+          try {
+            await convex.action(convexApi.sync.onDemandBody.ensureEmailBody, {
+              emailId: emailId as Id<'emails'>,
+            });
+          } catch (err) {
+            toast.error('Couldn’t load message');
+            setShowButton(true);
+            console.error(err);
+          }
+        }}
+        className="ml-2 rounded-md border border-border bg-white px-2 py-0.5 text-[11px] font-medium not-italic text-text-secondary transition-colors hover:bg-surface"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
 function CollapsedEmailBody({
   bodyHtml,
   bodyText,
@@ -723,26 +768,7 @@ function CollapsedEmailBody({
           }}
         />
       ) : (
-        <div className="rounded-md bg-surface px-3 py-2 text-[12px] italic text-text-tertiary">
-          (No body content yet.)
-          <button
-            onClick={async () => {
-              try {
-                const result = await convex.action(convexApi.sync.gmail.refreshEmail, {
-                  emailId: emailId as Id<'emails'>,
-                });
-                if (!result.ok) toast.error(result.reason || 'Refresh failed');
-                else toast.success('Refreshed');
-              } catch (err) {
-                toast.error('Refresh failed');
-                console.error(err);
-              }
-            }}
-            className="ml-2 rounded-md border border-border bg-white px-2 py-0.5 text-[11px] font-medium not-italic text-text-secondary transition-colors hover:bg-surface"
-          >
-            Re-fetch from Gmail
-          </button>
-        </div>
+        <BodyLoadingFallback emailId={emailId} />
       )}
       {hasQuoted && !isForwarded && (
         <button
