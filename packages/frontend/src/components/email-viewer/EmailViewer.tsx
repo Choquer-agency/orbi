@@ -592,14 +592,28 @@ function AttachmentPreview({ emailId, attachment, onClose }: {
 // user just sees a brief spinner. Only after a generous window do we surface a
 // manual retry, in case the auto-fetch genuinely failed.
 function BodyLoadingFallback({ emailId }: { emailId: string }) {
-  const [showButton, setShowButton] = useState(false);
-  useEffect(() => {
-    setShowButton(false);
-    const t = setTimeout(() => setShowButton(true), 12000);
-    return () => clearTimeout(t);
+  const [failed, setFailed] = useState(false);
+  // Actively fetch the body on mount. When it lands, the `threads.get` query
+  // re-runs (Convex reactivity) and the parent re-renders with the real body,
+  // unmounting this fallback. We only surface a manual Retry if the fetch
+  // itself errors.
+  const fetchBody = useCallback(() => {
+    setFailed(false);
+    return convex
+      .action(convexApi.sync.onDemandBody.ensureEmailBody, {
+        emailId: emailId as Id<'emails'>,
+      })
+      .catch((err) => {
+        setFailed(true);
+        console.error('[body] auto-load failed', err);
+      });
   }, [emailId]);
 
-  if (!showButton) {
+  useEffect(() => {
+    void fetchBody();
+  }, [fetchBody]);
+
+  if (!failed) {
     return (
       <div className="flex items-center gap-2 rounded-md bg-surface px-3 py-2 text-[12px] italic text-text-tertiary">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -609,20 +623,9 @@ function BodyLoadingFallback({ emailId }: { emailId: string }) {
   }
   return (
     <div className="rounded-md bg-surface px-3 py-2 text-[12px] italic text-text-tertiary">
-      Couldn’t load this message automatically.
+      Couldn’t load this message.
       <button
-        onClick={async () => {
-          setShowButton(false);
-          try {
-            await convex.action(convexApi.sync.onDemandBody.ensureEmailBody, {
-              emailId: emailId as Id<'emails'>,
-            });
-          } catch (err) {
-            toast.error('Couldn’t load message');
-            setShowButton(true);
-            console.error(err);
-          }
-        }}
+        onClick={() => void fetchBody()}
         className="ml-2 rounded-md border border-border bg-white px-2 py-0.5 text-[11px] font-medium not-italic text-text-secondary transition-colors hover:bg-surface"
       >
         Retry

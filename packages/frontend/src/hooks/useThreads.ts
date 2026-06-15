@@ -238,7 +238,7 @@ export function useThread(threadId: Id<'threads'> | string | null) {
   const ensureEmailBody = useAction(api.sync.onDemandBody.ensureEmailBody);
   const inflight = useRef<Set<string>>(new Set());
   useEffect(() => {
-    const emails = (result as { emails?: Array<{ id: string; bodyHtml?: string; bodyHtmlClean?: string; bodyHtmlTrimmed?: string; bodyText?: string }> } | undefined)?.emails;
+    const emails = (result as { data?: { emails?: Array<{ id: string; bodyHtml?: string; bodyHtmlClean?: string; bodyHtmlTrimmed?: string; bodyText?: string }> } } | undefined)?.data?.emails;
     if (!emails || emails.length === 0) return;
     for (const e of emails) {
       const hasBody =
