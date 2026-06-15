@@ -323,6 +323,69 @@ export const fetchBodyForNewEmail = internalAction({
   },
 });
 
+// One-time backfill: pre-fetch bodies for recent mail so the active inbox
+// opens instantly (no on-open spinner) without re-fetching the entire mailbox
+// (which would blow the I/O budget). Paginates each active account's last
+// `sinceDays` of mail, scheduling fetchBodyForNewEmail per message staggered
+// to stay well under Gmail/Graph rate limits. Self-reschedules across pages
+// and accounts. Kick off with:
+//   npx convex run sync/onDemandBody:backfillRecentBodies '{"sinceDays":30}'
+const BACKFILL_PAGE = 80;
+const BACKFILL_STAGGER_MS = 300;
+
+export const backfillRecentBodies = internalAction({
+  args: {
+    sinceDays: v.number(),
+    accountIdx: v.optional(v.number()),
+    beforeReceivedAt: v.optional(v.number()),
+  },
+  handler: async (ctx, { sinceDays, accountIdx = 0, beforeReceivedAt }) => {
+    const accounts = (await ctx.runQuery(
+      internal.sync.onDemandBodyData._listActiveAccountIds,
+      {},
+    )) as Array<{ _id: Id<"mailAccounts"> }>;
+    if (accountIdx >= accounts.length) return { done: true };
+
+    const account = accounts[accountIdx];
+    const cutoffMs = Date.now() - sinceDays * 86_400_000;
+    const page = (await ctx.runQuery(
+      internal.sync.onDemandBodyData._recentEmailIdsPage,
+      {
+        accountId: account._id,
+        cutoffMs,
+        beforeReceivedAt,
+        limit: BACKFILL_PAGE,
+      },
+    )) as { ids: Id<"emails">[]; lastReceivedAt?: number; full: boolean };
+
+    // Stagger the per-message fetches so we don't burst the provider API.
+    for (let i = 0; i < page.ids.length; i++) {
+      await ctx.scheduler.runAfter(
+        i * BACKFILL_STAGGER_MS,
+        internal.sync.onDemandBody.fetchBodyForNewEmail,
+        { emailId: page.ids[i] },
+      );
+    }
+
+    if (page.full && page.lastReceivedAt !== undefined) {
+      // More mail in this account — continue after this page drains.
+      await ctx.scheduler.runAfter(
+        BACKFILL_PAGE * BACKFILL_STAGGER_MS + 2_000,
+        internal.sync.onDemandBody.backfillRecentBodies,
+        { sinceDays, accountIdx, beforeReceivedAt: page.lastReceivedAt },
+      );
+    } else {
+      // Account done — move to the next one.
+      await ctx.scheduler.runAfter(
+        5_000,
+        internal.sync.onDemandBody.backfillRecentBodies,
+        { sinceDays, accountIdx: accountIdx + 1 },
+      );
+    }
+    return { account: account._id, scheduled: page.ids.length };
+  },
+});
+
 export const ensureEmailBody = action({
   args: { emailId: v.id("emails") },
   returns: v.object({

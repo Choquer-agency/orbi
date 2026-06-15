@@ -40,6 +40,47 @@ export const _lookupForBodyFetch = internalQuery({
   },
 });
 
+// All active mailbox accounts (any provider) — used by the one-time
+// recent-body backfill (backfillRecentBodies).
+export const _listActiveAccountIds = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const all = await ctx.db.query("mailAccounts").collect();
+    return all.filter((a) => a.isActive).map((a) => ({ _id: a._id }));
+  },
+});
+
+// A page of email ids in [cutoffMs, beforeReceivedAt), newest first, for one
+// account. Reads only the lean `emails` rows (bodies live in emailBodies) so
+// the indexed range scan is cheap. Used by the recent-body backfill to find
+// which messages still need their body pre-fetched.
+export const _recentEmailIdsPage = internalQuery({
+  args: {
+    accountId: v.id("mailAccounts"),
+    cutoffMs: v.number(),
+    beforeReceivedAt: v.optional(v.number()),
+    limit: v.number(),
+  },
+  handler: async (ctx, { accountId, cutoffMs, beforeReceivedAt, limit }) => {
+    const rows = await ctx.db
+      .query("emails")
+      .withIndex("by_account_receivedAt", (q) => {
+        const base = q.eq("accountId", accountId).gte("receivedAt", cutoffMs);
+        return beforeReceivedAt !== undefined
+          ? base.lt("receivedAt", beforeReceivedAt)
+          : base;
+      })
+      .order("desc")
+      .take(limit);
+    return {
+      ids: rows.map((e) => e._id),
+      lastReceivedAt:
+        rows.length > 0 ? rows[rows.length - 1].receivedAt : undefined,
+      full: rows.length === limit,
+    };
+  },
+});
+
 // Persist a fetched body. Idempotent — patches the existing emailBodies row
 // if one is present, otherwise inserts. Mirrors the legacy `_migrateOne`
 // helper in emailBodyMigrateData.ts but lives here so the on-demand path
