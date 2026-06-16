@@ -2836,13 +2836,12 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               // of recomputing recipients from the latest email in the thread.
               if (pendingDraft?.to) return parseAddressString(pendingDraft.to);
 
-              const lastEmail = thread.emails?.[thread.emails.length - 1];
-              if (!lastEmail) return [];
-              // Only exclude the address this email was delivered to — i.e. the
-              // mailAccount tied to the thread. Other connected accounts
-              // (shared team inboxes, alt personal accounts) stay in the
-              // reply-all list since the user is replying *as* this specific
-              // account and the others may genuinely belong on the thread.
+              const emails = thread.emails ?? [];
+              if (emails.length === 0) return [];
+
+              // The set of the user's own addresses (receiving account + its
+              // send-as aliases), so we can tell which messages were genuinely
+              // sent TO the user vs. ones that just got bundled into the thread.
               const excluded = new Set<string>();
               const receivingAccount = (accountsData ?? []).find(
                 (a: any) => a.id === thread.accountId,
@@ -2850,13 +2849,30 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               if (receivingAccount?.email) {
                 excluded.add(receivingAccount.email.toLowerCase());
               }
-              // Also exclude every send-as alias on the receiving account —
-              // these are inbox forwards the user owns (e.g.
-              // bryce@choquercreative.com forwarded to bryce@choquer.agency).
-              // Without this they'd end up in their own reply-all To row.
               for (const alias of (receivingAccount?.aliases ?? []) as string[]) {
                 if (alias) excluded.add(alias.toLowerCase());
               }
+
+              const isFromSelf = (e: any) =>
+                !!e.fromAddress && excluded.has(e.fromAddress.toLowerCase());
+              const userIsRecipient = (e: any) =>
+                [...asAddressArray(e.toAddresses), ...asAddressArray(e.ccAddresses)].some(
+                  (a: any) => a?.email && excluded.has(a.email.toLowerCase()),
+                );
+
+              // Reply to the latest message that was actually sent TO the user by
+              // someone else — that's the person you're answering. Gmail/our
+              // splitter sometimes bundles a foreign message (e.g. a side
+              // conversation between other parties) into the thread; blindly
+              // using the chronologically-last message would reply to THEM.
+              // Fall back to the latest non-self message, then the last message.
+              const reversed = [...emails].reverse();
+              const lastEmail =
+                reversed.find((e) => !isFromSelf(e) && userIsRecipient(e)) ??
+                reversed.find((e) => !isFromSelf(e)) ??
+                emails[emails.length - 1];
+              if (!lastEmail) return [];
+
               const all: { email: string; name?: string }[] = [];
               if (lastEmail.fromAddress && !excluded.has(lastEmail.fromAddress.toLowerCase())) {
                 all.push({ email: lastEmail.fromAddress, name: lastEmail.fromName || undefined });
