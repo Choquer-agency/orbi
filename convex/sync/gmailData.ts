@@ -87,12 +87,20 @@ export const _setSyncCursor = internalMutation({
     lastSyncAt: v.optional(v.number()),
   },
   handler: async (ctx, { accountId, syncCursor, lastSyncAt }) => {
-    const patch: Partial<Doc<"mailAccounts">> = {};
-    if (syncCursor !== undefined) patch.syncCursor = syncCursor;
-    if (lastSyncAt !== undefined) patch.lastSyncAt = lastSyncAt;
-    if (Object.keys(patch).length > 0) {
-      await ctx.db.patch(accountId, patch);
+    const existing = await ctx.db.get(accountId);
+    if (!existing) return;
+    // CRITICAL for cost: only write when the cursor ACTUALLY advanced. The
+    // sync runs every minute and used to stamp syncCursor + lastSyncAt every
+    // time — even on quiet runs with no new mail. Since the thread-list /
+    // unread / drafts queries all read `mailAccounts`, that per-minute write
+    // invalidated their query cache (0% cache hit) and forced full DB re-reads
+    // constantly. Now a no-change run writes nothing, so caches stay warm.
+    if (syncCursor === undefined || syncCursor === existing.syncCursor) {
+      return;
     }
+    const patch: Partial<Doc<"mailAccounts">> = { syncCursor };
+    if (lastSyncAt !== undefined) patch.lastSyncAt = lastSyncAt;
+    await ctx.db.patch(accountId, patch);
   },
 });
 

@@ -84,12 +84,18 @@ export const _setSyncCursor = internalMutation({
     lastSyncAt: v.optional(v.number()),
   },
   handler: async (ctx, { accountId, syncCursor, lastSyncAt }) => {
-    const patch: Partial<Doc<"mailAccounts">> = {};
-    if (syncCursor !== undefined) patch.syncCursor = syncCursor;
-    if (lastSyncAt !== undefined) patch.lastSyncAt = lastSyncAt;
-    if (Object.keys(patch).length > 0) {
-      await ctx.db.patch(accountId, patch);
+    const existing = await ctx.db.get(accountId);
+    if (!existing) return;
+    // Only write when the cursor advanced — writing mailAccounts every minute
+    // (even on no-change syncs) invalidated the cache for every query that
+    // reads accounts (thread list, unread, drafts), causing constant full
+    // re-reads. See gmailData._setSyncCursor for the full rationale.
+    if (syncCursor === undefined || syncCursor === existing.syncCursor) {
+      return;
     }
+    const patch: Partial<Doc<"mailAccounts">> = { syncCursor };
+    if (lastSyncAt !== undefined) patch.lastSyncAt = lastSyncAt;
+    await ctx.db.patch(accountId, patch);
   },
 });
 
