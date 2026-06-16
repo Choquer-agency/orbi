@@ -1699,6 +1699,19 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     requestAnimationFrame(tryScroll);
   }, [scrollToScheduled, selectedThreadId, setScrollToScheduled]);
 
+  // Close any open reply when the VIEWED THREAD changes. Otherwise a reply
+  // started on one email lingers onto the next one you open — still showing the
+  // previous email's recipients (ComposeInline locks its chips on mount). An
+  // in-progress draft is auto-saved and re-opens via the saved-draft effect
+  // below when you return to its thread; an untouched reply just closes.
+  const viewedThreadRef = useRef(selectedThreadId);
+  useEffect(() => {
+    if (viewedThreadRef.current !== selectedThreadId) {
+      viewedThreadRef.current = selectedThreadId;
+      setReplyMode(null);
+    }
+  }, [selectedThreadId]);
+
   // Auto-open compose when a pending draft arrives for this thread
   useEffect(() => {
     if (pendingDraft && selectedThreadId && pendingDraft.threadId === selectedThreadId) {
