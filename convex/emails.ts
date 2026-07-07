@@ -1311,6 +1311,7 @@ export async function materializeScheduledEmail(
     });
   }
 
+  const uploads = row.attachments ?? [];
   const emailId = await ctx.db.insert("emails", {
     accountId: account._id,
     threadId,
@@ -1330,12 +1331,25 @@ export async function materializeScheduledEmail(
     isStarred: false,
     isDraft: false,
     labels: ["SENT"],
-    hasAttachments: false,
+    hasAttachments: uploads.length > 0,
     receivedAt: now,
     sentAt: now,
     sendStatus: "PENDING_SEND",
     sendAttempts: 0,
   });
+
+  // Files uploaded at schedule time become attachment rows on the real
+  // email — the provider senders read these (via _getAttachmentsForSend)
+  // and attach the stored bytes.
+  for (const f of uploads) {
+    await ctx.db.insert("attachments", {
+      emailId,
+      filename: f.filename,
+      mimeType: f.mimeType,
+      size: f.size,
+      storageId: f.storageId,
+    });
+  }
 
   if (isReply && parent) {
     await ctx.db.patch(threadId, {

@@ -605,6 +605,10 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           throw new Error('Please add at least one recipient');
         }
 
+        // Upload attachments now so the files are in Convex storage when the
+        // scheduled send fires (possibly days later, app closed).
+        const scheduledUploads = await uploadAttachments(attachments);
+
         await createScheduledEmail({
           accountId: (sendingAccountId || accountId) as Id<'mailAccounts'>,
           threadId: threadId ? (threadId as Id<'threads'>) : undefined,
@@ -617,6 +621,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           bodyHtml,
           bodyText: body,
           sendAt: scheduledAt.getTime(),
+          attachments: scheduledUploads.length > 0 ? scheduledUploads : undefined,
         });
 
         // Retire the autosaved draft, same as the immediate-send path —

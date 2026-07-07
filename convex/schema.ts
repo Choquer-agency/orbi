@@ -516,6 +516,19 @@ export default defineSchema({
     sentEmailId: v.optional(v.string()),
     failureReason: v.optional(v.string()),
     cancelledAt: v.optional(v.number()),
+    // Files uploaded at schedule time. Bytes live in Convex storage; at
+    // dispatch these become `attachments` rows on the materialized email so
+    // the provider send picks them up. Cancelling deletes the stored bytes.
+    attachments: v.optional(
+      v.array(
+        v.object({
+          filename: v.string(),
+          mimeType: v.string(),
+          size: v.number(),
+          storageId: v.id("_storage"),
+        }),
+      ),
+    ),
   })
     .index("by_user_status_sendAt", ["userId", "status", "sendAt"])
     .index("by_user_sendAt", ["userId", "sendAt"])

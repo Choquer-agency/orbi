@@ -22,6 +22,13 @@ const addressShape = v.object({
   name: v.optional(v.string()),
 });
 
+const attachmentUpload = v.object({
+  filename: v.string(),
+  mimeType: v.string(),
+  size: v.number(),
+  storageId: v.id("_storage"),
+});
+
 function normalizeAddressList(value: unknown): Array<{ email?: string; name?: string }> {
   if (Array.isArray(value)) return value as Array<{ email?: string; name?: string }>;
   if (!value) return [];
@@ -44,6 +51,7 @@ export const create = mutation({
     bodyHtml: v.string(),
     bodyText: v.string(),
     sendAt: v.number(),
+    attachments: v.optional(v.array(attachmentUpload)),
   },
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
@@ -72,6 +80,7 @@ export const create = mutation({
       bodyText: args.bodyText,
       sendAt: args.sendAt,
       status: "SCHEDULED",
+      attachments: args.attachments,
     });
 
     // Schedule the actual send (replaces BullMQ delayed job).
@@ -274,9 +283,19 @@ export const cancel = mutation({
         /* ok */
       }
     }
+    // Free the stored attachment bytes — nothing else references them once
+    // the scheduled send is cancelled.
+    for (const att of existing.attachments ?? []) {
+      try {
+        await ctx.storage.delete(att.storageId);
+      } catch {
+        /* already gone — fine */
+      }
+    }
     await ctx.db.patch(id, {
       status: "CANCELLED",
       cancelledAt: Date.now(),
+      attachments: undefined,
     });
     return await ctx.db.get(id);
   },
