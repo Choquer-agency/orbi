@@ -2,7 +2,6 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, X, CalendarClock, Save, Play, ChevronDown, TextQuote, Trash2, Paperclip, Maximize2, Minimize2 } from 'lucide-react';
 import { SignatureIcon } from '../icons/SignatureIcon';
 import { RecipientInput } from './RecipientInput';
-import { useQueryClient } from '@tanstack/react-query';
 import { useMutation, useAction } from 'convex/react';
 import toast from 'react-hot-toast';
 import { useUiStore } from '../../stores/uiStore';
@@ -69,7 +68,6 @@ function formatScheduleLabel(date: Date): string {
 
 export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose, initialDraft, aiOriginal: initialAiOriginal, replyRecipients, fromEmail: _fromEmail, existingDraftId, onExpandedChange }: ComposeInlineProps) {
   const { toggleAiChat, editingScheduledId, setEditingScheduledId, setComposeContext } = useUiStore();
-  const queryClient = useQueryClient();
   const [to, setTo] = useState(initialDraft?.to ?? '');
   const [subject, setSubject] = useState(initialDraft?.subject ?? '');
   const [body, setBody] = useState(initialDraft?.body ?? '');

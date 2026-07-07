@@ -7,7 +7,7 @@ import {
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import { materializeScheduledEmail } from "./emails";
-import type { Doc, Id } from "./_generated/dataModel";
+import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 
 // ─────────────────────────────────────────────────────────────────────────────

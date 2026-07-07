@@ -30,7 +30,9 @@ import {
   MailOpen,
   Eye,
   ChevronDown,
-  Ban,, ArrowRightLeft } from 'lucide-react';
+  Ban,
+  ArrowRightLeft,
+} from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as ScrollArea from '@radix-ui/react-scroll-area';
@@ -206,7 +208,7 @@ function autoLinkify(html: string): string {
  * remove that element and everything after it.  This works regardless of how
  * deeply nested the Outlook/Gmail/Apple Mail markup is.
  */
-function stripQuotedContent(html: string): { body: string; hasQuoted: boolean } {
+export function stripQuotedContent(html: string): { body: string; hasQuoted: boolean } {
   const parser = new DOMParser();
   const doc = parser.parseFromString(html, 'text/html');
 
@@ -332,7 +334,7 @@ function stripQuotedContent(html: string): { body: string; hasQuoted: boolean } 
 /**
  * Strip quoted content from plain text emails.
  */
-function stripQuotedText(text: string): { body: string; hasQuoted: boolean } {
+export function stripQuotedText(text: string): { body: string; hasQuoted: boolean } {
   const lines = text.split('\n');
   let cutIndex = lines.length;
 

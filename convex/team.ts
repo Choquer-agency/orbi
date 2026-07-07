@@ -12,7 +12,7 @@ import { query, mutation, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import { insertSystemOutboundEmail } from "./emails";
-import type { Doc, Id } from "./_generated/dataModel";
+import type { Id } from "./_generated/dataModel";
 
 const inviteRole = v.union(
   v.literal("ADMIN"),
