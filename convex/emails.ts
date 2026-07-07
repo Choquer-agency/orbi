@@ -313,7 +313,11 @@ export const _getAttachmentsForSend = internalQuery({
 export const _setAttachmentStorageId = internalMutation({
   args: { attachmentId: v.id("attachments"), storageId: v.id("_storage") },
   handler: async (ctx, { attachmentId, storageId }) => {
-    await ctx.db.patch(attachmentId, { storageId });
+    await ctx.db.patch(attachmentId, {
+      storageId,
+      // Lets the attachment-blob retention cron age this cache out.
+      storageCachedAt: Date.now(),
+    });
   },
 });
 
@@ -455,6 +459,7 @@ export const send = mutation({
       participantEmails: [account.email, ...args.to.map((a) => a.email)],
       messageCount: 1,
       lastMessageAt: now,
+      hasSentMail: true,
     });
 
     const emailId = await ctx.db.insert("emails", {
@@ -628,6 +633,7 @@ export const reply = mutation({
     await ctx.db.patch(parent.threadId, {
       snippet: (args.bodyText || "").slice(0, 200),
       lastMessageAt: now,
+      hasSentMail: true,
     });
 
     await dispatchOutboundContactExtraction(
@@ -1186,6 +1192,13 @@ export const _markSent = internalMutation({
       patch.internetMessageId = internetMessageId;
     }
     await ctx.db.patch(emailId, patch);
+    // Chokepoint for the denormalized Sent-folder flag: every successful
+    // provider send passes through here (compose, reply, forward, drafts,
+    // scheduled), so the thread is guaranteed to be marked.
+    const threadForFlag = await ctx.db.get(email.threadId);
+    if (threadForFlag && !threadForFlag.hasSentMail) {
+      await ctx.db.patch(email.threadId, { hasSentMail: true });
+    }
     if (scheduledEmailId) {
       const row = await ctx.db.get(scheduledEmailId);
       if (row && row.status === "SENDING") {
@@ -1308,6 +1321,7 @@ export async function materializeScheduledEmail(
       participantEmails: [account.email, ...toAddresses.map((a) => a.email)],
       messageCount: 1,
       lastMessageAt: now,
+      hasSentMail: true,
     });
   }
 

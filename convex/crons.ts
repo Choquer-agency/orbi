@@ -160,4 +160,15 @@ crons.daily(
   {},
 );
 
+// ── Attachment-blob retention ───────────────────────────────────────────────
+// Daily 4 AM UTC: free attachment bytes cached into Convex storage more than
+// 90 days ago, where the provider copy is re-fetchable. Same cache philosophy
+// as strip-old-bodies.
+crons.daily(
+  "strip-old-attachment-blobs",
+  { hourUTC: 4, minuteUTC: 0 },
+  internal.sync.bodyRetention.stripOldAttachmentBlobs,
+  {},
+);
+
 export default crons;

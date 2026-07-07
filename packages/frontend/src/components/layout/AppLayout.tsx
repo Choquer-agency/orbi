@@ -107,7 +107,10 @@ export function AppLayout() {
     document.body.style.userSelect = 'none';
   }, [setThreadListWidth]);
 
-  const isDashboard = selectedFolder === 'dashboard';
+  // Dashboard is disabled (2026-07-07) pending the rollup-table redesign —
+  // its queries were among the heaviest reactive reads in the app. A
+  // persisted 'dashboard' folder selection falls through to the inbox.
+  const isDashboard = false;
   const isContacts = selectedFolder === 'contacts';
   const isFullPage = isDashboard || isContacts;
 

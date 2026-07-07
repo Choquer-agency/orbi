@@ -241,6 +241,9 @@ export const _upsertThread = internalMutation({
       participantEmails: args.participantEmails,
       messageCount: args.messageCount,
       lastMessageAt: args.lastMessageAt,
+      // Denormalized folder flag (see schema) — keeps the Spam folder on an
+      // index instead of scanning 2,000 threads per account per view.
+      isSpam: args.labels.includes("SPAM") ? true : undefined,
       ...(args.lastReceivedAt !== undefined
         ? { lastReceivedAt: args.lastReceivedAt }
         : {}),
@@ -278,6 +281,7 @@ export const _upsertThread = internalMutation({
         existing.lastMessageAt === patch.lastMessageAt &&
         (existing.lastReceivedAt ?? undefined) ===
           (patch.lastReceivedAt ?? undefined) &&
+        (existing.isSpam ?? undefined) === (patch.isSpam ?? undefined) &&
         sameStringArray(existing.labels, patch.labels) &&
         sameStringArray(existing.participantEmails, patch.participantEmails);
       if (same) return existing._id;
@@ -474,6 +478,14 @@ export const _upsertEmail = internalMutation({
         bodyText: args.bodyText,
         bodyHtml: args.bodyHtml,
       });
+    }
+    // Stamp the thread's denormalized Sent flag so the Sent folder can
+    // filter on it instead of loading emails per candidate thread.
+    if (args.labels.includes("SENT") && !args.isDraft) {
+      const t = await ctx.db.get(args.threadId);
+      if (t && !t.hasSentMail) {
+        await ctx.db.patch(args.threadId, { hasSentMail: true });
+      }
     }
     return { emailId, isNew: true };
   },

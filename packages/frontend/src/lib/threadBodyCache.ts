@@ -26,7 +26,20 @@ interface CachedEntry<T> {
   data: T;
 }
 
+// LRU-capped: the desktop app never reloads, so an unbounded Map slowly
+// accumulated the full bodies of every thread ever viewed/prefetched.
+const MEMORY_CAP = 150;
 const memory = new Map<string, unknown>();
+
+function touchLru(key: string, value: unknown) {
+  if (memory.has(key)) memory.delete(key); // re-insert to move to newest
+  memory.set(key, value);
+  while (memory.size > MEMORY_CAP) {
+    const oldest = memory.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    memory.delete(oldest);
+  }
+}
 
 export function getCachedThreadSync<T>(threadId: string): T | undefined {
   return memory.get(threadId) as T | undefined;
@@ -42,7 +55,7 @@ export async function loadCachedThread<T>(threadId: string): Promise<T | undefin
       void idbDel(KEY_PREFIX + threadId).catch(() => {});
       return undefined;
     }
-    memory.set(threadId, raw.data);
+    touchLru(threadId, raw.data);
     return raw.data;
   } catch {
     return undefined;
@@ -50,7 +63,7 @@ export async function loadCachedThread<T>(threadId: string): Promise<T | undefin
 }
 
 export function saveCachedThread<T>(threadId: string, data: T): void {
-  memory.set(threadId, data);
+  touchLru(threadId, data);
   try {
     void idbSet(KEY_PREFIX + threadId, { ts: Date.now(), data } satisfies CachedEntry<T>);
   } catch {

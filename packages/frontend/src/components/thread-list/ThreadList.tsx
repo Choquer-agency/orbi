@@ -238,14 +238,18 @@ export function ThreadList() {
   );
   const totalCount = data?.pages[0]?.total ?? 0;
 
-  // Client-side filtering
-  if (threadListFilter === 'unread') {
-    threads = threads.filter((t: any) => !t.isRead);
-  } else if (threadListFilter === 'starred') {
-    threads = threads.filter((t: any) => t.isStarred);
-  }
+  // Client-side filtering + date grouping, memoized — these rebuilt on every
+  // render (each keystroke in the search box recomputed the whole grouped
+  // layout for hundreds of threads).
+  const filteredThreads = useMemo(() => {
+    if (threadListFilter === 'unread') return threads.filter((t: any) => !t.isRead);
+    if (threadListFilter === 'starred') return threads.filter((t: any) => t.isStarred);
+    return threads;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threads, threadListFilter]);
+  threads = filteredThreads;
 
-  const dateGroups = groupByDate(threads);
+  const dateGroups = useMemo(() => groupByDate(threads), [threads]);
   const allThreadIds = useMemo(() => {
     const ids: string[] = [];
     for (const group of dateGroups) {

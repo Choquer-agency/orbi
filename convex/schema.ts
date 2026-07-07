@@ -157,6 +157,11 @@ export default defineSchema({
     // left). Accounts with a live watch are skipped by the 1-min poll cron —
     // pushes are the primary signal, a 10-min fallback poll catches losses.
     watchExpiration: v.optional(v.number()),
+    // Body-retention watermark: every email with receivedAt below this has
+    // had its display HTML confirmed stripped. The nightly walk starts here
+    // instead of re-scanning the whole sub-cutoff history every night
+    // (which grew with mailbox age forever).
+    bodyStripBefore: v.optional(v.number()),
     // Set when token refresh fails hard (revoked / expired refresh token).
     // Surfaced in the UI as a "reconnect this account" prompt — without it,
     // a dead account just silently stops syncing. Cleared on successful
@@ -221,6 +226,13 @@ export default defineSchema({
     // The orphan-repair cron queries ONLY flagged threads (indexed), so it
     // never blind-scans the mailbox like the old version did.
     needsRepair: v.optional(v.boolean()),
+    // Denormalized folder flags, stamped at email-write time. Before these,
+    // the Sent folder loaded 10 full email docs per candidate thread (up to
+    // 5,000 doc reads per click, reactive) just to learn "does this thread
+    // contain sent mail", and Spam scanned 2,000 threads per account per
+    // view. Backfilled by threads.backfillFolderFlags.
+    hasSentMail: v.optional(v.boolean()),
+    isSpam: v.optional(v.boolean()),
   })
     .index("by_account_providerThreadId", ["accountId", "providerThreadId"])
     .index("by_account_lastMessageAt", ["accountId", "lastMessageAt"])
@@ -232,6 +244,11 @@ export default defineSchema({
     ])
     .index("by_account_snoozedUntil", ["accountId", "snoozedUntil"])
     .index("by_account_needsRepair", ["accountId", "needsRepair"])
+    .index("by_account_isSpam_lastMessageAt", [
+      "accountId",
+      "isSpam",
+      "lastMessageAt",
+    ])
     // Server-side full-text search over thread subjects so search hits the
     // entire mailbox instead of the most recent N threads in memory.
     .searchIndex("search_subject", {
@@ -355,6 +372,11 @@ export default defineSchema({
     contentId: v.optional(v.string()),
     providerAttachmentId: v.optional(v.string()),
     storageId: v.optional(v.id("_storage")),
+    // When the bytes were cached into Convex storage (on first view). The
+    // attachment-blob retention cron frees caches older than the window —
+    // like emailBodies, the blob is a re-fetchable cache, not the source of
+    // truth (Gmail/Outlook hold the original).
+    storageCachedAt: v.optional(v.number()),
   }).index("by_email", ["emailId"]),
 
   // ───────────────────────────────────────────────────────────────────────────

@@ -269,19 +269,22 @@ export const list = query({
     // than running our own — see classifier.ts. Scan recent threads per
     // account and keep the ones whose labels include "SPAM".
     if (folder === "spam" && !searchTerm && !fromEmail) {
-      const perAccountLimit = 2000;
+      // isSpam is stamped at write time and indexed — the old version read
+      // 2,000 threads per account per view and filtered in memory.
       const threadsArrays = await Promise.all(
         accountIds.map((aid) =>
           ctx.db
             .query("threads")
-            .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", aid))
+            .withIndex("by_account_isSpam_lastMessageAt", (q) =>
+              q.eq("accountId", aid).eq("isSpam", true),
+            )
             .order("desc")
-            .take(perAccountLimit),
+            .take(500),
         ),
       );
       const spamThreads = threadsArrays
         .flat()
-        .filter((t) => !t.isTrashed && t.labels.includes("SPAM"))
+        .filter((t) => !t.isTrashed)
         .sort((a, b) => b.lastMessageAt - a.lastMessageAt);
       const total = spamThreads.length;
       const pagedThreads = spamThreads.slice(skip, skip + limitNum);
@@ -664,7 +667,15 @@ export const list = query({
 
     if (fromEmail && fromEmail.length > 0) {
       isFromFastPath = true;
-      candidates = candidates.filter((t) => !t.isTrashed);
+      // participantEmails lives on the thread doc — prefiltering here shrinks
+      // the email-enrichment below from every candidate (2,500/account) to
+      // just the threads this person is actually in.
+      const fe = fromEmail.toLowerCase();
+      candidates = candidates.filter(
+        (t) =>
+          !t.isTrashed &&
+          t.participantEmails.some((pe) => pe.toLowerCase() === fe),
+      );
     } else if (parsed) {
       candidates = candidates.filter((t) => !t.isTrashed);
       if (parsed.isUnread) candidates = candidates.filter((t) => !t.isRead);
@@ -682,7 +693,10 @@ export const list = query({
           );
           break;
         case "sent":
-          candidates = candidates.filter((t) => !t.isTrashed && !t.isArchived);
+          // hasSentMail is stamped at write time — no per-thread email loads.
+          candidates = candidates.filter(
+            (t) => !t.isTrashed && !t.isArchived && t.hasSentMail === true,
+          );
           break;
         case "drafts":
           candidates = candidates.filter((t) => !t.isTrashed);
@@ -759,11 +773,27 @@ export const list = query({
         parsed.before !== undefined || parsed.after !== undefined ||
         parsed.hasAttachment)
     );
-    const needsEmails =
-      isFromFastPath ||
-      hasOperatorFilters ||
-      folder === "sent" ||
-      folder === "drafts";
+    // Sent uses the denormalized hasSentMail flag and Drafts enumerates the
+    // indexed draft rows below — neither needs the 10-emails-per-thread
+    // enrichment anymore (that was up to 25,000 full email-doc reads per
+    // run for a from: filter, re-running reactively on every sync tick).
+    const needsEmails = isFromFastPath || hasOperatorFilters;
+
+    if (folder === "drafts") {
+      const draftArrays = await Promise.all(
+        accountIds.map((aid) =>
+          ctx.db
+            .query("emails")
+            .withIndex("by_account_isDraft_receivedAt", (q) =>
+              q.eq("accountId", aid).eq("isDraft", true),
+            )
+            .order("desc")
+            .take(500),
+        ),
+      );
+      const draftThreadIds = new Set(draftArrays.flat().map((e) => e.threadId));
+      candidates = candidates.filter((t) => draftThreadIds.has(t._id));
+    }
 
     let filtered = candidates;
     if (needsEmails) {
@@ -837,17 +867,7 @@ export const list = query({
             return true;
           }
 
-          // Folder-specific filters that need emails:
-          if (folder === "sent") {
-            return emails.some(
-              (e) => isSelfAddress(allAccountEmails, e.fromAddress) && !e.isDraft,
-            );
-          }
-          if (folder === "drafts") {
-            return emails.some((e) => e.isDraft);
-          }
-          // Inbox-default's "must have a received email" check is handled
-          // upfront with thread.lastReceivedAt — no need to inspect emails here.
+          // (Sent/Drafts no longer reach this path — see needsEmails above.)
           return true;
         })
         .map(({ thread }) => thread);
@@ -999,16 +1019,19 @@ export const get = query({
     // bodies (20+ messages, 80–500 KB each) easily push past Convex's 16 MiB
     // read limit. UI shows the most recent K by default — Gmail/Spark style.
     const MAX_HYDRATED = 25;
-    const allEmails = await ctx.db
+    // Read ONLY the newest K — the old `.collect()` paid the read cost of
+    // every message in the thread (a 150-message newsletter thread read all
+    // 150, legacy in-row bodies included) before slicing to 25.
+    const newestFirst = await ctx.db
       .query("emails")
       .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", threadId))
-      .order("asc")
-      .collect();
-    const totalCount = allEmails.length;
-    const emails =
-      totalCount > MAX_HYDRATED
-        ? allEmails.slice(totalCount - MAX_HYDRATED)
-        : allEmails;
+      .order("desc")
+      .take(MAX_HYDRATED + 1);
+    const hasMore = newestFirst.length > MAX_HYDRATED;
+    const emails = newestFirst.slice(0, MAX_HYDRATED).reverse();
+    const totalCount = hasMore
+      ? Math.max(thread.messageCount, emails.length + 1)
+      : emails.length;
     const olderHidden = totalCount - emails.length;
 
     // Even within the kept tail, a single email can be huge (base64-inlined
@@ -1415,3 +1438,42 @@ export const unreadCount = query({
   },
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One-shot backfill of the denormalized folder flags (hasSentMail / isSpam)
+// from thread labels — both providers put "SENT"/"SPAM" in thread.labels, so
+// this never has to read email rows. Batched cursor walk; self-reschedules.
+// Kick off with: npx convex run threads:backfillFolderFlags '{}'
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const backfillFolderFlags = internalMutation({
+  args: { cursor: v.optional(v.number()) },
+  handler: async (ctx, { cursor }) => {
+    const rows = await ctx.db
+      .query("threads")
+      .withIndex("by_creation_time", (q) =>
+        cursor !== undefined ? q.gt("_creationTime", cursor) : q,
+      )
+      .order("asc")
+      .take(300);
+    let patched = 0;
+    for (const t of rows) {
+      const wantSent = t.labels.includes("SENT") ? true : undefined;
+      const wantSpam = t.labels.includes("SPAM") ? true : undefined;
+      const patch: Partial<Doc<"threads">> = {};
+      if ((t.hasSentMail ?? undefined) !== wantSent) patch.hasSentMail = wantSent;
+      if ((t.isSpam ?? undefined) !== wantSpam) patch.isSpam = wantSpam;
+      if (Object.keys(patch).length > 0) {
+        await ctx.db.patch(t._id, patch);
+        patched++;
+      }
+    }
+    if (rows.length > 0) {
+      await ctx.scheduler.runAfter(1_000, internal.threads.backfillFolderFlags, {
+        cursor: rows[rows.length - 1]._creationTime,
+      });
+      return { patched, status: "continuing" };
+    }
+    return { patched, status: "done" };
+  },
+});

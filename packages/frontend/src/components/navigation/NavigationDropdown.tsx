@@ -149,24 +149,11 @@ export function NavigationDropdown() {
           align="start"
           avoidCollisions
         >
-          {/* Dashboard */}
-          <DropdownMenu.Item
-            onSelect={() => {
-              setSelectedFolder('dashboard');
-              setSelectedAccount(null);
-            }}
-            className={cn(
-              'flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm outline-none transition-colors',
-              selectedFolder === 'dashboard'
-                ? 'bg-selected text-primary font-medium'
-                : 'text-text-primary hover:bg-surface',
-            )}
-          >
-            <DASHBOARD_ITEM.icon className="h-4 w-4" />
-            <span>{DASHBOARD_ITEM.label}</span>
-          </DropdownMenu.Item>
-
-          <DropdownMenu.Separator className="my-2 h-px bg-border" />
+          {/* Dashboard nav entry removed 2026-07-07 (Bryce: "disable the
+              dashboard for now, we will build a new plan for that") — its
+              metrics/needsReply queries re-read ~400 emails + 300 threads per
+              account per open client on every change. Restore alongside the
+              rollup-table redesign. */}
 
           {/* Standard folders */}
           <DropdownMenu.Group>

@@ -45,7 +45,17 @@ export const stripOldBodies = internalAction({
       accountIdx,
       afterReceivedAt,
     });
-    if (res.done) return { done: true };
+    if (res.done) {
+      // Phase B: on-demand refetches re-insert body rows for mail BEHIND the
+      // watermark. Sweep emailBodies rows created in the last 48h (tiny set)
+      // and strip any whose parent email is older than the cutoff.
+      await ctx.scheduler.runAfter(
+        1_000,
+        internal.sync.bodyRetention._stripRecentRefetches,
+        {},
+      );
+      return { done: true };
+    }
     if (res.accountDone) {
       await ctx.scheduler.runAfter(
         2_000,
@@ -75,14 +85,18 @@ export const _stripBatch = internalMutation({
       return { done: true, deleted: 0, accountDone: true };
     }
     const acc = accounts[accountIdx];
+    // Watermark: everything below bodyStripBefore was confirmed stripped on
+    // a previous night — start there instead of re-walking the entire
+    // sub-cutoff history every run. (On-demand refetches of old mail create
+    // body rows BEHIND the watermark; those are handled by the recent-rows
+    // sweep in _stripRecentRefetches, not by moving the watermark back.)
+    const startAt = afterReceivedAt ?? acc.bodyStripBefore ?? undefined;
     const rows = await ctx.db
       .query("emails")
       .withIndex("by_account_receivedAt", (q) => {
         const base = q.eq("accountId", acc._id);
         const withLower =
-          afterReceivedAt !== undefined
-            ? base.gt("receivedAt", afterReceivedAt)
-            : base;
+          startAt !== undefined ? base.gt("receivedAt", startAt) : base;
         return withLower.lt("receivedAt", cutoffMs);
       })
       .order("asc")
@@ -141,13 +155,124 @@ export const _stripBatch = internalMutation({
       if (deleted >= MAX_DELETES) break;
     }
 
+    const accountDone = scanned === rows.length && rows.length < SCAN_LIMIT;
+    if (accountDone) {
+      // Everything below tonight's cutoff is now confirmed stripped —
+      // remember it so tomorrow's walk only covers one new day of mail.
+      // (Once-nightly account write; no cache concern.)
+      if ((acc.bodyStripBefore ?? 0) < cutoffMs) {
+        await ctx.db.patch(acc._id, { bodyStripBefore: cutoffMs });
+      }
+    }
     return {
       done: false,
       deleted,
-      // Whole page consumed and it was short → this account's backlog is
-      // finished; move on. Broke early on MAX_DELETES → resume from cursor.
-      accountDone: scanned === rows.length && rows.length < SCAN_LIMIT,
+      accountDone,
       nextAfter: lastReceivedAt,
     };
+  },
+});
+
+// Phase B of the nightly walk: emailBodies rows CREATED recently (on-demand
+// refetches of old mail, body-on-arrival rows for mail that just aged past
+// the cutoff) sit behind the per-account watermark, so the main walk never
+// revisits them. This sweep covers them by creation time instead — the last
+// 48h of body-row inserts is a small, bounded set.
+export const _stripRecentRefetches = internalMutation({
+  args: { cursor: v.optional(v.number()) },
+  handler: async (ctx, { cursor }) => {
+    const cutoffMs = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const windowStart = cursor ?? Date.now() - 48 * 60 * 60 * 1000;
+    const rows = await ctx.db
+      .query("emailBodies")
+      .withIndex("by_creation_time", (q) => q.gt("_creationTime", windowStart))
+      .order("asc")
+      .take(MAX_DELETES);
+    let deleted = 0;
+    let reachedGrace = false;
+    // Grace period: leave bodies fetched in the last 24h alone — the user is
+    // probably still reading that thread; it gets stripped tomorrow night.
+    // Rows are creation-ordered, so everything past the boundary is fresher:
+    // stop instead of scanning (each row here is a full fat body read).
+    const graceBefore = Date.now() - 24 * 60 * 60 * 1000;
+    for (const body of rows) {
+      if (body._creationTime > graceBefore) {
+        reachedGrace = true;
+        break;
+      }
+      const email = await ctx.db.get(body.emailId);
+      if (email && email.receivedAt < cutoffMs) {
+        await upsertEmailSearchText(ctx, {
+          emailId: email._id,
+          accountId: email.accountId,
+          threadId: email.threadId,
+          receivedAt: email.receivedAt,
+          subject: email.subject,
+          bodyText: body.bodyText,
+          bodyHtml: body.bodyHtml,
+        });
+        await ctx.db.delete(body._id);
+        deleted++;
+      }
+    }
+    if (!reachedGrace && rows.length === MAX_DELETES) {
+      await ctx.scheduler.runAfter(
+        1_000,
+        internal.sync.bodyRetention._stripRecentRefetches,
+        { cursor: rows[rows.length - 1]._creationTime },
+      );
+    }
+    return { deleted };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Attachment-blob retention (same philosophy as bodies): bytes cached into
+// Convex storage on first view are a re-fetchable cache — Gmail/Outlook hold
+// the original. Free caches older than the window, but ONLY when
+// providerAttachmentId exists (without it, e.g. our own sent uploads, the
+// blob is the only copy — never delete those). Nightly batched walk of the
+// lean attachments table.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ATTACHMENT_RETENTION_DAYS = 90;
+const ATTACHMENT_BATCH = 50;
+
+export const stripOldAttachmentBlobs = internalMutation({
+  args: { cursor: v.optional(v.number()) },
+  handler: async (ctx, { cursor }) => {
+    const cutoffMs = Date.now() - ATTACHMENT_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    const rows = await ctx.db
+      .query("attachments")
+      .withIndex("by_creation_time", (q) =>
+        cursor !== undefined ? q.gt("_creationTime", cursor) : q,
+      )
+      .order("asc")
+      .take(ATTACHMENT_BATCH);
+    let freed = 0;
+    for (const att of rows) {
+      if (!att.storageId) continue;
+      if (!att.providerAttachmentId) continue; // not re-fetchable — keep
+      const cachedAt = att.storageCachedAt ?? att._creationTime;
+      if (cachedAt >= cutoffMs) continue;
+      try {
+        await ctx.storage.delete(att.storageId);
+      } catch {
+        /* already gone */
+      }
+      await ctx.db.patch(att._id, {
+        storageId: undefined,
+        storageCachedAt: undefined,
+      });
+      freed++;
+    }
+    if (rows.length === ATTACHMENT_BATCH) {
+      await ctx.scheduler.runAfter(
+        2_000,
+        internal.sync.bodyRetention.stripOldAttachmentBlobs,
+        { cursor: rows[rows.length - 1]._creationTime },
+      );
+    }
+    return { freed };
   },
 });

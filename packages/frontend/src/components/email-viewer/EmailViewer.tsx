@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, lazy, Suspense } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, lazy, Suspense, memo } from 'react';
 import {
   Archive,
   Forward,
@@ -473,6 +473,7 @@ function AttachmentPreview({ emailId, attachment, onClose }: {
   onClose: () => void;
 }) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const blobUrlRef = useRef<string | null>(null);
   const [textContent, setTextContent] = useState<string | null>(null);
   const [error, setError] = useState(false);
 
@@ -496,14 +497,24 @@ function AttachmentPreview({ emailId, attachment, onClose }: {
           });
         }
         return res.blob().then((blob) => {
-          if (!cancelled) setBlobUrl(URL.createObjectURL(blob));
+          if (!cancelled) {
+            const url = URL.createObjectURL(blob);
+            blobUrlRef.current = url;
+            setBlobUrl(url);
+          }
         });
       })
       .catch(() => { if (!cancelled) setError(true); });
 
     return () => {
       cancelled = true;
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      // Revoke via ref — the closure's `blobUrl` is the value from the
+      // render the effect ran in (always null), so the created object URL
+      // (potentially a multi-MB PDF) was never actually released.
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
     };
   }, [emailId, attachment.id]);
 
@@ -634,7 +645,13 @@ function BodyLoadingFallback({ emailId }: { emailId: string }) {
   );
 }
 
-function CollapsedEmailBody({
+// Stable identity for the no-attachments case — a fresh [] per render
+// invalidated CollapsedEmailBody's sanitize memo, re-running DOMPurify + the
+// full autoLinkify DOM walk on EVERY EmailViewer render (each keystroke in
+// the notes box, every reactive update).
+const EMPTY_ATTACHMENTS: any[] = [];
+
+const CollapsedEmailBody = memo(function CollapsedEmailBody({
   bodyHtml,
   bodyText,
   subject,
@@ -783,7 +800,7 @@ function CollapsedEmailBody({
       )}
     </div>
   );
-}
+})
 
 // ----------------------------------------------------------------------------
 // Iframe-based renderer (Spark / Gmail / Outlook parity)
@@ -2523,7 +2540,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                       preIsForwarded={email.isForwarded ?? null}
                       highlightText={highlightText}
                       emailId={email.id}
-                      attachments={email.attachments ?? []}
+                      attachments={email.attachments ?? EMPTY_ATTACHMENTS}
                       authToken={authToken}
                       onImageClick={(src, alt) => setLightboxImage({ src, alt })}
                       onImageDownload={downloadInlineImage}
