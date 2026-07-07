@@ -63,6 +63,7 @@ import { useIsMobile } from '../../hooks/useIsMobile';
 import { useMarkThreadNotificationsRead } from '../../hooks/useNotifications';
 import { haptic } from '../../lib/haptics';
 import { ImageLightbox } from './ImageLightbox';
+import { TrackingInfo } from './TrackingInfo';
 import { HandoffDialog } from '../handoff/HandoffDialog';
 import { HandoffBanner } from '../handoff/HandoffBanner';
 import { useHandoffs } from '../../hooks/useHandoffs';
@@ -2582,6 +2583,11 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                       onImageClick={(src, alt) => setLightboxImage({ src, alt })}
                       onImageDownload={downloadInlineImage}
                     />
+
+                    {/* Open/click tracking — own sent emails only */}
+                    {((accountsData ?? []) as any[]).some(
+                      (a: any) => a.email?.toLowerCase() === email.fromAddress?.toLowerCase(),
+                    ) && <TrackingInfo emailId={email.id} />}
 
                     {/* Attachments — hide inline/embedded images (CID or signature-like) */}
                     {email.attachments?.filter((att: any) => {

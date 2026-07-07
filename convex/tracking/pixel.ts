@@ -38,6 +38,10 @@ export const recordOpen = internalMutation({
       .withIndex("by_trackingId", (q) => q.eq("trackingId", trackingId))
       .unique();
     if (!tracking || !tracking.isEnabled) return;
+    // Sender-side noise guard: opens within 60s of send are almost always
+    // the sender's own client / provider image proxy prefetching the message
+    // — not the recipient reading it.
+    if (Date.now() - tracking._creationTime < 60_000) return;
 
     await ctx.db.insert("emailOpens", {
       trackingId,
@@ -83,4 +87,32 @@ export const pixelHandler = httpAction(async (ctx, req) => {
       Expires: "0",
     },
   });
+});
+
+// Create the tracking record for an outgoing email (called by
+// emails.actuallySend right before the provider send). Idempotent per email.
+export const _createTracking = internalMutation({
+  args: {
+    emailId: v.id("emails"),
+    trackingId: v.string(),
+    linkMap: v.any(),
+  },
+  handler: async (ctx, { emailId, trackingId, linkMap }) => {
+    const existing = await ctx.db
+      .query("emailTracking")
+      .withIndex("by_email", (q) => q.eq("emailId", emailId))
+      .unique();
+    if (existing) {
+      // Retry of the same send — refresh the link map, keep counters.
+      await ctx.db.patch(existing._id, { trackingId, linkMap });
+      return;
+    }
+    await ctx.db.insert("emailTracking", {
+      emailId,
+      trackingId,
+      isEnabled: true,
+      openCount: 0,
+      linkMap,
+    });
+  },
 });

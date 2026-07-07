@@ -60,6 +60,7 @@ import type * as lib_searchText from "../lib/searchText.js";
 import type * as lib_styleContext from "../lib/styleContext.js";
 import type * as lib_threadAccessCheck from "../lib/threadAccessCheck.js";
 import type * as lib_threadContext from "../lib/threadContext.js";
+import type * as lib_trackingInject from "../lib/trackingInject.js";
 import type * as mailAccounts from "../mailAccounts.js";
 import type * as meetings from "../meetings.js";
 import type * as needsResponse from "../needsResponse.js";
@@ -167,6 +168,7 @@ declare const fullApi: ApiFromModules<{
   "lib/styleContext": typeof lib_styleContext;
   "lib/threadAccessCheck": typeof lib_threadAccessCheck;
   "lib/threadContext": typeof lib_threadContext;
+  "lib/trackingInject": typeof lib_trackingInject;
   mailAccounts: typeof mailAccounts;
   meetings: typeof meetings;
   needsResponse: typeof needsResponse;

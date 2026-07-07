@@ -1,8 +1,9 @@
-// Tracking is read-only metadata for sent emails (open + click records).
-// Agent B owns convex/emails.ts and convex/tracking/* — at the time of
-// this rewrite, no public Convex query exposes tracking-by-email yet.
-// We keep the hook signature stable so consumers (e.g. TrackingInfo) stay
-// drop-in compatible; once a query lands, swap the body for a `useQuery`.
+// Open/click tracking metadata for sent emails. Backed by
+// emails.getEmailTracking — reactive, so new opens/clicks appear live while
+// the thread is on screen.
+import { useQuery } from 'convex/react';
+import { api as convexApi } from '../../../../convex/_generated/api';
+import type { Id } from '../../../../convex/_generated/dataModel';
 
 interface EmailOpen {
   id: string;
@@ -25,7 +26,6 @@ interface LinkClick {
 
 interface TrackingData {
   id: string;
-  emailId: string;
   trackingId: string;
   isEnabled: boolean;
   openCount: number;
@@ -34,13 +34,46 @@ interface TrackingData {
   clicks: LinkClick[];
 }
 
+const toIso = (ms: number | undefined | null): string | null =>
+  typeof ms === 'number' ? new Date(ms).toISOString() : null;
+
 export function useTracking(emailId: string | undefined) {
-  // Stable shape: undefined until a Convex query is added by Agent B.
-  // Consumers tolerate `data === undefined` already.
-  void emailId;
+  const result = useQuery(
+    convexApi.emails.getEmailTracking,
+    emailId ? { emailId: emailId as Id<'emails'> } : 'skip',
+  );
+
+  const raw = result?.data ?? null;
+  const data: TrackingData | undefined = raw
+    ? {
+        id: raw.id as string,
+        trackingId: raw.trackingId,
+        isEnabled: raw.isEnabled,
+        openCount: raw.openCount,
+        lastOpenedAt: toIso(raw.lastOpenedAt),
+        opens: (raw.opens ?? []).map((o: any) => ({
+          id: o.id as string,
+          openedAt: toIso(o.openedAt)!,
+          ipAddress: o.ipAddress ?? null,
+          userAgent: o.userAgent ?? null,
+          country: o.country ?? null,
+          city: o.city ?? null,
+        })),
+        clicks: (raw.clicks ?? []).map((c: any) => ({
+          id: c.id as string,
+          originalUrl: c.originalUrl,
+          clickedAt: toIso(c.clickedAt)!,
+          ipAddress: c.ipAddress ?? null,
+          userAgent: c.userAgent ?? null,
+          country: c.country ?? null,
+          city: c.city ?? null,
+        })),
+      }
+    : undefined;
+
   return {
-    data: undefined as TrackingData | undefined,
-    isLoading: false,
+    data,
+    isLoading: emailId !== undefined && result === undefined,
     isError: false,
   };
 }

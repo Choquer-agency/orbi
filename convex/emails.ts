@@ -10,6 +10,7 @@ import {
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import { promisedFollowUpText } from "./lib/promiseDetector";
+import { injectTracking } from "./lib/trackingInject";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
 
@@ -973,6 +974,31 @@ export const actuallySend = internalAction({
       ? rawProviderThreadId.split("::")[0]
       : rawProviderThreadId;
 
+    // Open/click tracking: inject the pixel + rewrite links on the OUTGOING
+    // copy only (the local emailBodies copy stays clean, so viewing your own
+    // sent mail never fires the tracker). Skips text-only messages and the
+    // system emails that have no HTML.
+    let outgoingHtml = email.bodyHtml ?? "";
+    if (outgoingHtml) {
+      try {
+        const siteUrl = process.env.CONVEX_SITE_URL;
+        if (siteUrl) {
+          const trackingId = crypto.randomUUID().replace(/-/g, "");
+          const injected = injectTracking(outgoingHtml, trackingId, siteUrl);
+          await ctx.runMutation(internal.tracking.pixel._createTracking, {
+            emailId,
+            trackingId,
+            linkMap: injected.linkMap,
+          });
+          outgoingHtml = injected.html;
+        }
+      } catch (err) {
+        // Tracking must never block a send — fall back to the clean HTML.
+        console.error("[tracking] injection failed, sending untracked:", err);
+        outgoingHtml = email.bodyHtml ?? "";
+      }
+    }
+
     try {
       let providerMessageId: string | undefined;
       let internetMessageId: string | undefined;
@@ -991,7 +1017,7 @@ export const actuallySend = internalAction({
               cc: email.ccAddresses ?? [],
               bcc: email.bccAddresses ?? [],
               subject: email.subject,
-              bodyHtml: email.bodyHtml ?? "",
+              bodyHtml: outgoingHtml,
               bodyText: email.bodyText ?? "",
               inReplyTo: cleanInReplyTo,
               references: referencesChain,
@@ -1012,7 +1038,7 @@ export const actuallySend = internalAction({
               cc: email.ccAddresses ?? [],
               bcc: email.bccAddresses ?? [],
               subject: email.subject,
-              bodyHtml: email.bodyHtml ?? "",
+              bodyHtml: outgoingHtml,
               bodyText: email.bodyText ?? "",
               inReplyTo: cleanInReplyTo,
               references: referencesChain,
