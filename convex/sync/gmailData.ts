@@ -30,7 +30,56 @@ export const _listActiveAccounts = internalQuery({
         _id: a._id,
         userId: a.userId,
         email: a.email,
+        watchExpiration: a.watchExpiration,
       }));
+  },
+});
+
+// Record the outcome of a users.watch registration.
+export const _setWatchState = internalMutation({
+  args: {
+    accountId: v.id("mailAccounts"),
+    watchExpiration: v.optional(v.number()),
+  },
+  handler: async (ctx, { accountId, watchExpiration }) => {
+    const existing = await ctx.db.get(accountId);
+    if (!existing) return;
+    if (existing.watchExpiration === watchExpiration) return;
+    await ctx.db.patch(accountId, { watchExpiration });
+  },
+});
+
+// Pub/Sub push handler entry: a Gmail notification names only the mailbox
+// email address — find every active GMAIL account bound to it (multiple Orbi
+// users can connect the same address) and kick an incremental sync for each.
+export const _schedulePushSync = internalMutation({
+  args: { email: v.string() },
+  handler: async (ctx, { email }) => {
+    let matches = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_provider_email", (q) =>
+        q.eq("provider", "GMAIL").eq("email", email),
+      )
+      .collect();
+    if (matches.length === 0) {
+      // Case-insensitive fallback — the table is tiny (~1 row per connected
+      // mailbox), so a scan is fine when the exact-case lookup misses.
+      const all = await ctx.db.query("mailAccounts").collect();
+      matches = all.filter(
+        (a) => a.provider === "GMAIL" && a.email.toLowerCase() === email,
+      );
+    }
+    let scheduled = 0;
+    for (const a of matches) {
+      if (!a.isActive) continue;
+      await ctx.scheduler.runAfter(0, internal.sync.gmail._continueSync, {
+        accountId: a._id,
+        pageToken: undefined,
+        mode: "auto",
+      });
+      scheduled++;
+    }
+    return { scheduled };
   },
 });
 

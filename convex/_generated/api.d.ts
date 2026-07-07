@@ -87,6 +87,7 @@ import type * as sync_cleanup from "../sync/cleanup.js";
 import type * as sync_gmail from "../sync/gmail.js";
 import type * as sync_gmailData from "../sync/gmailData.js";
 import type * as sync_gmailHistorical from "../sync/gmailHistorical.js";
+import type * as sync_gmailPush from "../sync/gmailPush.js";
 import type * as sync_microsoft from "../sync/microsoft.js";
 import type * as sync_microsoftData from "../sync/microsoftData.js";
 import type * as sync_microsoftHistorical from "../sync/microsoftHistorical.js";
@@ -192,6 +193,7 @@ declare const fullApi: ApiFromModules<{
   "sync/gmail": typeof sync_gmail;
   "sync/gmailData": typeof sync_gmailData;
   "sync/gmailHistorical": typeof sync_gmailHistorical;
+  "sync/gmailPush": typeof sync_gmailPush;
   "sync/microsoft": typeof sync_microsoft;
   "sync/microsoftData": typeof sync_microsoftData;
   "sync/microsoftHistorical": typeof sync_microsoftHistorical;

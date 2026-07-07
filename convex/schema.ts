@@ -152,6 +152,11 @@ export default defineSchema({
     tokenExpiry: v.optional(v.number()),
     scopes: v.array(v.string()),
     isActive: v.boolean(),
+    // Gmail push (users.watch → Pub/Sub → /gmail/push webhook): expiry of the
+    // current watch registration (~7 days, renewed hourly-cron when <24h
+    // left). Accounts with a live watch are skipped by the 1-min poll cron —
+    // pushes are the primary signal, a 10-min fallback poll catches losses.
+    watchExpiration: v.optional(v.number()),
     // Set when token refresh fails hard (revoked / expired refresh token).
     // Surfaced in the UI as a "reconnect this account" prompt — without it,
     // a dead account just silently stops syncing. Cleared on successful

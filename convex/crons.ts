@@ -26,6 +26,26 @@ crons.interval(
   {},
 );
 
+// ── Gmail real-time push ────────────────────────────────────────────────────
+// Accounts with a live users.watch registration get mail via Pub/Sub →
+// /gmail/push in seconds and are SKIPPED by the 1-min poll above. The 10-min
+// fallback here re-polls watched accounts in case a Pub/Sub message was
+// dropped; the hourly renewal keeps watches alive (~7-day expiry, renewed
+// when <24h left). No GMAIL_PUSH_TOPIC env → renewal no-ops and every
+// account simply polls like before.
+crons.interval(
+  "gmail-watched-fallback-sync",
+  { minutes: 10 },
+  internal.sync.gmail.syncAllActiveAccounts,
+  { watchedOnly: true },
+);
+crons.interval(
+  "gmail-watch-renewal",
+  { hours: 1 },
+  internal.sync.gmailPush.renewWatches,
+  {},
+);
+
 // ── Scheduled-send dispatch ─────────────────────────────────────────────────
 // Picks up scheduledEmails with status="SCHEDULED" and sendAt <= now.
 crons.interval(

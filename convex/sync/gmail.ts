@@ -646,20 +646,34 @@ export const syncIncremental = action({
 // active Gmail accounts and schedules a sync for each.
 // ─────────────────────────────────────────────────────────────────────────────
 export const syncAllActiveAccounts = internalAction({
-  args: {},
-  handler: async (ctx) => {
-    const accounts: Array<{ _id: Id<"mailAccounts"> }> = await ctx.runQuery(
-      internal.sync.gmailData._listActiveAccounts,
-      {},
-    );
+  args: {
+    // Split by push-watch status so watched accounts stop paying the 1-min
+    // poll: default (undefined/false) syncs only accounts WITHOUT a live
+    // watch; true syncs ONLY watched accounts (the 10-min fallback that
+    // catches dropped Pub/Sub messages).
+    watchedOnly: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { watchedOnly }) => {
+    const accounts: Array<{
+      _id: Id<"mailAccounts">;
+      watchExpiration?: number;
+    }> = await ctx.runQuery(internal.sync.gmailData._listActiveAccounts, {});
+    // A watch within 5 min of expiry is treated as dead — the poll resumes
+    // before pushes can silently stop.
+    const watchCutoff = Date.now() + 5 * 60_000;
+    let scheduled = 0;
     for (const a of accounts) {
+      const hasLiveWatch =
+        a.watchExpiration !== undefined && a.watchExpiration > watchCutoff;
+      if (watchedOnly ? !hasLiveWatch : hasLiveWatch) continue;
       await ctx.scheduler.runAfter(0, internal.sync.gmail._continueSync, {
         accountId: a._id,
         pageToken: undefined,
         mode: "auto",
       });
+      scheduled++;
     }
-    return { scheduled: accounts.length };
+    return { scheduled };
   },
 });
 
