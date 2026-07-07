@@ -6,6 +6,9 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
+import { materializeScheduledEmail } from "./emails";
+import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Scheduled emails — ported from packages/backend/src/routes/scheduled-emails
@@ -284,52 +287,54 @@ export const cancel = mutation({
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Dispatch a single scheduled email row. Marks SENDING and hands off to
- * Agent B's `internal.emails.actuallySend`. Skips cancelled / non-scheduled
- * rows so re-runs are safe.
+ * Turn one due scheduledEmails row into a real outbound email and hand it to
+ * `internal.emails.actuallySend({ emailId, scheduledEmailId })`. The
+ * SCHEDULED→SENDING patch is transactional with the materialization, so the
+ * per-row scheduler job and the cron safety net can never double-dispatch.
+ * Validation failures (account deleted, no recipients) mark the row FAILED
+ * with a reason the UI can show, instead of wedging it in SENDING.
+ *
+ * History note: the previous version scheduled `actuallySend` with a payload
+ * of recipient fields, but actuallySend takes `{ emailId }` — argument
+ * validation failed on every dispatch and the row stayed SENDING forever, so
+ * no scheduled email ever sent. An `(internal as any)` cast had defeated the
+ * type check that would have caught it.
  */
+async function dispatchRow(
+  ctx: MutationCtx,
+  row: Doc<"scheduledEmails">,
+): Promise<boolean> {
+  if (row.status !== "SCHEDULED") return false;
+  try {
+    const emailId = await materializeScheduledEmail(ctx, row);
+    await ctx.db.patch(row._id, {
+      status: "SENDING",
+      sentEmailId: String(emailId),
+    });
+    await ctx.scheduler.runAfter(0, internal.emails.actuallySend, {
+      emailId,
+      scheduledEmailId: row._id,
+    });
+    return true;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    await ctx.db.patch(row._id, { status: "FAILED", failureReason: reason });
+    return false;
+  }
+}
+
 export const dispatchOne = internalMutation({
   args: { scheduledEmailId: v.id("scheduledEmails") },
   handler: async (ctx, { scheduledEmailId }) => {
     const row = await ctx.db.get(scheduledEmailId);
     if (!row) return;
-    if (row.status !== "SCHEDULED") return;
-
-    await ctx.db.patch(scheduledEmailId, { status: "SENDING" });
-
-    // Cross-agent: Agent B owns convex/emails.ts. Expected name:
-    // `internal.emails.actuallySend`. If Agent B uses a different name,
-    // this reference will fail to type-check and we'll switch to fallback.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const target = (internal as any).emails?.actuallySend
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ?? (internal as any).emails?.send;
-
-    if (!target) {
-      // Agent B not yet committed — leave row in SENDING; cron will retry.
-      return;
-    }
-
-    await ctx.scheduler.runAfter(0, target, {
-      scheduledEmailId,
-      accountId: row.accountId,
-      threadId: row.threadId ?? null,
-      parentEmailId: row.parentEmailId ?? null,
-      mode: row.mode,
-      toAddresses: row.toAddresses,
-      ccAddresses: row.ccAddresses ?? null,
-      bccAddresses: row.bccAddresses ?? null,
-      subject: row.subject,
-      bodyHtml: row.bodyHtml,
-      bodyText: row.bodyText,
-    });
+    await dispatchRow(ctx, row);
   },
 });
 
 /**
- * Cron-driven safety net. Picks up any SCHEDULED rows whose sendAt has
- * already passed (e.g., scheduler missed them) and dispatches them.
- * Phase 4 will register this on a 1-minute cron.
+ * Cron-driven safety net (1-min): picks up SCHEDULED rows whose sendAt has
+ * passed but whose per-row scheduler job was lost.
  */
 export const processDueScheduledEmails = internalMutation({
   args: {},
@@ -344,27 +349,54 @@ export const processDueScheduledEmails = internalMutation({
 
     let dispatched = 0;
     for (const row of due) {
-      await ctx.db.patch(row._id, { status: "SENDING" });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const target = (internal as any).emails?.actuallySend
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        ?? (internal as any).emails?.send;
-      if (!target) continue;
-      await ctx.scheduler.runAfter(0, target, {
-        scheduledEmailId: row._id,
-        accountId: row.accountId,
-        threadId: row.threadId ?? null,
-        parentEmailId: row.parentEmailId ?? null,
-        mode: row.mode,
-        toAddresses: row.toAddresses,
-        ccAddresses: row.ccAddresses ?? null,
-        bccAddresses: row.bccAddresses ?? null,
-        subject: row.subject,
-        bodyHtml: row.bodyHtml,
-        bodyText: row.bodyText,
-      });
-      dispatched += 1;
+      if (await dispatchRow(ctx, row)) dispatched += 1;
     }
     return { dispatched };
+  },
+});
+
+/**
+ * "Send now" on a scheduled email: optionally saves the latest edits, then
+ * dispatches immediately through the same transactional path. The original
+ * scheduler job no-ops later because the row is no longer SCHEDULED.
+ */
+export const sendScheduledNow = mutation({
+  args: {
+    id: v.id("scheduledEmails"),
+    subject: v.optional(v.string()),
+    bodyHtml: v.optional(v.string()),
+    bodyText: v.optional(v.string()),
+    to: v.optional(v.array(addressShape)),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
+    const row = await ctx.db.get(args.id);
+    if (!row || row.userId !== userId) {
+      throw new Error("Scheduled email not found");
+    }
+    if (row.status !== "SCHEDULED") {
+      throw new Error("Can only send emails with SCHEDULED status");
+    }
+    const patch: Record<string, unknown> = {};
+    if (args.subject !== undefined) patch.subject = args.subject;
+    if (args.bodyHtml !== undefined) patch.bodyHtml = args.bodyHtml;
+    if (args.bodyText !== undefined) patch.bodyText = args.bodyText;
+    if (args.to !== undefined && args.to.length > 0) patch.toAddresses = args.to;
+    if (Object.keys(patch).length > 0) await ctx.db.patch(args.id, patch);
+
+    const fresh = (await ctx.db.get(args.id)) as Doc<"scheduledEmails">;
+    const ok = await dispatchRow(ctx, fresh);
+    if (!ok) {
+      const after = await ctx.db.get(args.id);
+      throw new Error(after?.failureReason ?? "Send failed");
+    }
+    const after = await ctx.db.get(args.id);
+    return {
+      data: {
+        id: args.id,
+        emailId: after?.sentEmailId ?? null,
+        threadId: row.threadId ?? null,
+      },
+    };
   },
 });

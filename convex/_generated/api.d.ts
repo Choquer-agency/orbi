@@ -73,7 +73,6 @@ import type * as oauth_attachments from "../oauth/attachments.js";
 import type * as oauth_gmail from "../oauth/gmail.js";
 import type * as oauth_http from "../oauth/http.js";
 import type * as oauth_microsoft from "../oauth/microsoft.js";
-import type * as oauth_send from "../oauth/send.js";
 import type * as oauth_tokenManager from "../oauth/tokenManager.js";
 import type * as oauth_tokenStore from "../oauth/tokenStore.js";
 import type * as ooo from "../ooo.js";
@@ -184,7 +183,6 @@ declare const fullApi: ApiFromModules<{
   "oauth/gmail": typeof oauth_gmail;
   "oauth/http": typeof oauth_http;
   "oauth/microsoft": typeof oauth_microsoft;
-  "oauth/send": typeof oauth_send;
   "oauth/tokenManager": typeof oauth_tokenManager;
   "oauth/tokenStore": typeof oauth_tokenStore;
   ooo: typeof ooo;

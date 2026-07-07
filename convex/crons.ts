@@ -35,6 +35,19 @@ crons.interval(
   {},
 );
 
+// ── Stuck-send sweeper ──────────────────────────────────────────────────────
+// Sends must never be silently lost. Every 10 min: emails stuck in SENDING
+// past the stale window are marked FAILED (user sees the error and can
+// retry); PENDING_SEND rows whose undo-window job was lost are re-dispatched
+// (safe — actuallySend's atomic claim dedupes); scheduledEmails rows in
+// SENDING are reconciled with their linked email.
+crons.interval(
+  "sweep-stuck-sends",
+  { minutes: 10 },
+  internal.emails.sweepStuckSends,
+  {},
+);
+
 // ── Follow-up scan ──────────────────────────────────────────────────────────
 // Hourly scan of followUpWatches: detect replies, advance steps, draft
 // follow-ups via Claude when needed.

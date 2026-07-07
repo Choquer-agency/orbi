@@ -11,6 +11,7 @@ import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import { promisedFollowUpText } from "./lib/promiseDetector";
 import type { Doc, Id } from "./_generated/dataModel";
+import type { MutationCtx } from "./_generated/server";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -833,10 +834,12 @@ export const sendNow = mutation({
     if (owned.email.sendStatus !== "PENDING_SEND") {
       throw new Error("Email is not pending — cannot send now");
     }
-    await ctx.db.patch(emailId, {
-      sendStatus: "SENDING",
-      undoDeadlineAt: undefined,
-    });
+    // Leave the row PENDING_SEND — actuallySend's atomic claim performs the
+    // PENDING_SEND→SENDING transition. Clearing the undo deadline here just
+    // stops the undo UI; the claim is what actually closes the race with the
+    // original undo-window job (whichever invocation claims first sends,
+    // the other no-ops).
+    await ctx.db.patch(emailId, { undoDeadlineAt: undefined });
     await ctx.scheduler.runAfter(0, internal.emails.actuallySend, { emailId });
     return { data: { success: true } };
   },
@@ -887,9 +890,10 @@ export const retrySend = mutation({
       );
     }
     await ctx.db.patch(emailId, {
-      sendStatus: "SENDING",
+      sendStatus: "PENDING_SEND",
       sendError: undefined,
       sendAttempts: 0,
+      sendingStartedAt: undefined,
     });
     await ctx.scheduler.runAfter(0, internal.emails.actuallySend, { emailId });
     return { data: { message: "Retry queued" } };
@@ -902,8 +906,24 @@ export const retrySend = mutation({
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const actuallySend = internalAction({
-  args: { emailId: v.id("emails") },
-  handler: async (ctx, { emailId }) => {
+  args: {
+    emailId: v.id("emails"),
+    // Present when this send came from a scheduledEmails row — lets the
+    // sent/failed marks reconcile that row too.
+    scheduledEmailId: v.optional(v.id("scheduledEmails")),
+  },
+  handler: async (ctx, { emailId, scheduledEmailId }) => {
+    // Atomically claim the email BEFORE touching the provider. Actions are
+    // at-most-once, and several paths can schedule a send for the same email
+    // (undo-window job, send-now, cron safety nets) — the claim guarantees
+    // only one of them talks to Gmail/Outlook, and closes the undo race:
+    // once claimed, undoSend throws instead of "undoing" a delivered email.
+    const claim: { ok: boolean } = await ctx.runMutation(
+      internal.emails._claimForSend,
+      { emailId },
+    );
+    if (!claim.ok) return;
+
     // Action context: load email through internal query.
     const data = await ctx.runQuery(internal.emails._loadForSend, { emailId });
     if (!data) return;
@@ -939,17 +959,17 @@ export const actuallySend = internalAction({
       ? rawProviderThreadId.split("::")[0]
       : rawProviderThreadId;
 
-    if (email.sendStatus !== "PENDING_SEND" && email.sendStatus !== "SENDING") {
-      // UNDONE / SENT / FAILED — skip.
-      return;
-    }
-
     try {
       let providerMessageId: string | undefined;
       let internetMessageId: string | undefined;
+      // These are the FULL senders (convex/oauth/gmail.ts / microsoft.ts):
+      // they attach uploaded files from Convex storage, set a From header,
+      // and (Gmail) generate a real Message-ID. The stripped-down duplicates
+      // in oauth/send.ts that used to be called here silently dropped every
+      // attachment — that module is deleted.
       if (account.provider === "GMAIL") {
         const result = await ctx.runAction(
-          internal.oauth.send.sendGmail,
+          internal.oauth.gmail.send,
           {
             accountId: account._id,
             message: {
@@ -967,10 +987,10 @@ export const actuallySend = internalAction({
           },
         );
         providerMessageId = result?.providerMessageId;
-        internetMessageId = (result as { internetMessageId?: string } | undefined)?.internetMessageId;
+        internetMessageId = result?.internetMessageId;
       } else if (account.provider === "MICROSOFT") {
         const result = await ctx.runAction(
-          internal.oauth.send.sendMicrosoft,
+          internal.oauth.microsoft.send,
           {
             accountId: account._id,
             message: {
@@ -982,13 +1002,11 @@ export const actuallySend = internalAction({
               bodyText: email.bodyText ?? "",
               inReplyTo: cleanInReplyTo,
               references: referencesChain,
-              providerThreadId,
               emailId: email._id,
             },
           },
         );
         providerMessageId = result?.providerMessageId;
-        internetMessageId = (result as { internetMessageId?: string } | undefined)?.internetMessageId;
       } else {
         throw new Error(`Unsupported provider: ${account.provider}`);
       }
@@ -997,6 +1015,7 @@ export const actuallySend = internalAction({
         emailId,
         providerMessageId,
         internetMessageId,
+        scheduledEmailId,
       });
 
       const contactEmail = firstRecipientEmail(email.toAddresses);
@@ -1013,9 +1032,44 @@ export const actuallySend = internalAction({
       await ctx.runMutation(internal.emails._markFailed, {
         emailId,
         error: message,
+        scheduledEmailId,
       });
       throw err;
     }
+  },
+});
+
+// Atomic PENDING_SEND/stale-SENDING → SENDING transition. All send entry
+// points funnel through this so exactly one invocation proceeds to the
+// provider; everything else no-ops. A SENDING claim younger than
+// IN_FLIGHT_MS is treated as live (another invocation is mid-call).
+const IN_FLIGHT_MS = 5 * 60_000;
+
+export const _claimForSend = internalMutation({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }): Promise<{ ok: boolean }> => {
+    const email = await ctx.db.get(emailId);
+    if (!email) return { ok: false };
+    const now = Date.now();
+    if (email.sendStatus === "PENDING_SEND") {
+      await ctx.db.patch(emailId, {
+        sendStatus: "SENDING",
+        sendingStartedAt: now,
+        undoDeadlineAt: undefined,
+      });
+      return { ok: true };
+    }
+    if (email.sendStatus === "SENDING") {
+      const started = email.sendingStartedAt;
+      if (started !== undefined && now - started < IN_FLIGHT_MS) {
+        return { ok: false }; // live in-flight send owns this email
+      }
+      // Stale claim (owning action died) or legacy SENDING row — take over.
+      await ctx.db.patch(emailId, { sendingStartedAt: now });
+      return { ok: true };
+    }
+    // UNDONE / SENT / FAILED / NONE — nothing to do.
+    return { ok: false };
   },
 });
 
@@ -1026,10 +1080,26 @@ export const actuallySend = internalAction({
 export const _loadForSend = internalQuery({
   args: { emailId: v.id("emails") },
   handler: async (ctx, { emailId }) => {
-    const email = await ctx.db.get(emailId);
+    let email = await ctx.db.get(emailId);
     if (!email) return null;
     const account = await ctx.db.get(email.accountId);
     if (!account) return null;
+    // Provider-synced drafts keep their body in `emailBodies`, not on the
+    // row — without this fallback, sending such a draft delivers an empty
+    // message.
+    if (!email.bodyHtml && !email.bodyText) {
+      const bodyRow = await ctx.db
+        .query("emailBodies")
+        .withIndex("by_email", (q) => q.eq("emailId", emailId))
+        .unique();
+      if (bodyRow) {
+        email = {
+          ...email,
+          bodyHtml: bodyRow.bodyHtml,
+          bodyText: bodyRow.bodyText,
+        };
+      }
+    }
     const thread = await ctx.db.get(email.threadId);
     // Try to locate the parent email (the one we're replying to) so we can
     // build a correct References chain. Match by internetMessageId against
@@ -1094,10 +1164,11 @@ export const _markSent = internalMutation({
     emailId: v.id("emails"),
     providerMessageId: v.optional(v.string()),
     internetMessageId: v.optional(v.string()),
+    scheduledEmailId: v.optional(v.id("scheduledEmails")),
   },
   handler: async (
     ctx,
-    { emailId, providerMessageId, internetMessageId },
+    { emailId, providerMessageId, internetMessageId, scheduledEmailId },
   ) => {
     const email = await ctx.db.get(emailId);
     if (!email) return;
@@ -1106,6 +1177,7 @@ export const _markSent = internalMutation({
       sendStatus: "SENT",
       sentAt: Date.now(),
       undoDeadlineAt: undefined,
+      sendingStartedAt: undefined,
     };
     if (providerMessageId) {
       patch.providerMessageId = providerMessageId;
@@ -1114,18 +1186,268 @@ export const _markSent = internalMutation({
       patch.internetMessageId = internetMessageId;
     }
     await ctx.db.patch(emailId, patch);
+    if (scheduledEmailId) {
+      const row = await ctx.db.get(scheduledEmailId);
+      if (row && row.status === "SENDING") {
+        await ctx.db.patch(scheduledEmailId, { status: "SENT" });
+      }
+    }
   },
 });
 
 export const _markFailed = internalMutation({
-  args: { emailId: v.id("emails"), error: v.string() },
-  handler: async (ctx, { emailId, error }) => {
+  args: {
+    emailId: v.id("emails"),
+    error: v.string(),
+    scheduledEmailId: v.optional(v.id("scheduledEmails")),
+  },
+  handler: async (ctx, { emailId, error, scheduledEmailId }) => {
     const email = await ctx.db.get(emailId);
     if (!email) return;
     await ctx.db.patch(emailId, {
       sendStatus: "FAILED",
       sendError: error,
       sendAttempts: (email.sendAttempts ?? 0) + 1,
+      sendingStartedAt: undefined,
     });
+    if (scheduledEmailId) {
+      const row = await ctx.db.get(scheduledEmailId);
+      if (row && row.status === "SENDING") {
+        await ctx.db.patch(scheduledEmailId, {
+          status: "FAILED",
+          failureReason: error,
+        });
+      }
+    }
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scheduled-send materialization. A scheduledEmails row is just a saved
+// intent — when it comes due, this turns it into a real `emails` row (the
+// thing actuallySend knows how to deliver), mirroring what the send/reply
+// mutations do at compose time. Called by scheduledEmails.dispatchOne inside
+// its mutation transaction. Validates BEFORE inserting anything so a throw
+// leaves no partial rows behind.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function asAddressList(
+  value: unknown,
+): Array<{ email: string; name?: string }> {
+  if (!Array.isArray(value)) return [];
+  return (value as Array<{ email?: string; name?: string }>)
+    .filter((a): a is { email: string; name?: string } => !!a?.email && a.email.trim().length > 0);
+}
+
+export async function materializeScheduledEmail(
+  ctx: MutationCtx,
+  row: Doc<"scheduledEmails">,
+): Promise<Id<"emails">> {
+  const account = await ctx.db.get(row.accountId);
+  if (!account) throw new Error("Mail account no longer exists");
+
+  // Resolve the reply parent when there is one. parentEmailId is stored as a
+  // plain string; normalizeId rejects garbage without throwing.
+  let parent: Doc<"emails"> | null = null;
+  if (row.parentEmailId) {
+    const pid = ctx.db.normalizeId("emails", row.parentEmailId);
+    if (pid) parent = await ctx.db.get(pid);
+  }
+
+  // Recipients: what the user saved, falling back (for replies) to the
+  // parent's sender — the same default the live reply mutation applies.
+  let toAddresses = asAddressList(row.toAddresses);
+  if (toAddresses.length === 0 && parent) {
+    toAddresses = [{ email: parent.fromAddress, name: parent.fromName }];
+  }
+  if (toAddresses.length === 0) {
+    throw new Error("Scheduled email has no recipients");
+  }
+  const ccAddresses = asAddressList(row.ccAddresses);
+  const bccAddresses = asAddressList(row.bccAddresses);
+
+  const now = Date.now();
+  const isReply = !!parent && row.mode === "reply";
+
+  // Threading headers for replies — same rules as the reply mutation: only
+  // real RFC-5322 message ids (never "local-…" placeholders).
+  let inReplyTo: string | undefined;
+  let references: string[] = [];
+  if (isReply && parent) {
+    inReplyTo = parent.internetMessageId;
+    references = Array.from(
+      new Set(
+        [
+          ...(parent.references ?? []).filter((r) => !r.startsWith("local-")),
+          inReplyTo,
+        ].filter(Boolean) as string[],
+      ),
+    );
+  }
+
+  // Thread: replies join the parent's thread; otherwise use the saved
+  // threadId (forward) or open a fresh thread (compose).
+  let threadId: Id<"threads">;
+  if (isReply && parent) {
+    threadId = parent.threadId;
+  } else if (row.threadId) {
+    const t = await ctx.db.get(row.threadId);
+    if (!t) throw new Error("Thread no longer exists");
+    threadId = row.threadId;
+  } else {
+    threadId = await ctx.db.insert("threads", {
+      accountId: account._id,
+      providerThreadId: newLocalProviderThreadId(),
+      subject: row.subject,
+      snippet: (row.bodyText || "").slice(0, 200),
+      isRead: true,
+      isStarred: false,
+      isArchived: false,
+      isTrashed: false,
+      labels: ["SENT"],
+      participantEmails: [account.email, ...toAddresses.map((a) => a.email)],
+      messageCount: 1,
+      lastMessageAt: now,
+    });
+  }
+
+  const emailId = await ctx.db.insert("emails", {
+    accountId: account._id,
+    threadId,
+    providerMessageId: newLocalProviderMessageId(),
+    inReplyTo,
+    references,
+    fromAddress: account.email,
+    fromName: account.displayName || account.email.split("@")[0],
+    toAddresses,
+    ccAddresses,
+    bccAddresses,
+    subject: row.subject,
+    bodyText: row.bodyText,
+    bodyHtml: row.bodyHtml,
+    snippet: (row.bodyText || "").slice(0, 200),
+    isRead: true,
+    isStarred: false,
+    isDraft: false,
+    labels: ["SENT"],
+    hasAttachments: false,
+    receivedAt: now,
+    sentAt: now,
+    sendStatus: "PENDING_SEND",
+    sendAttempts: 0,
+  });
+
+  if (isReply && parent) {
+    await ctx.db.patch(threadId, {
+      snippet: (row.bodyText || "").slice(0, 200),
+      lastMessageAt: now,
+    });
+    await ctx.scheduler.runAfter(
+      0,
+      internal.ai.needsResponseData._dismissOpenSignalsForThread,
+      { threadId, kind: "replied" },
+    );
+  }
+
+  await dispatchOutboundContactExtraction(
+    ctx,
+    account,
+    [...toAddresses, ...ccAddresses, ...bccAddresses],
+    now,
+  );
+
+  return emailId;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Stuck-send sweeper (cron, every 10 min). Sends must never be silently
+// lost: a SENDING row whose claim went stale means the action died mid-call
+// — surface it as FAILED (the message may or may not have reached the
+// provider, so the error says to check before retrying rather than
+// auto-retrying and risking a double-send). A PENDING_SEND row whose
+// undo-window job evidently never fired gets its send re-scheduled — safe,
+// because actuallySend's claim makes re-dispatch idempotent.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const SEND_STALE_MS = 10 * 60_000;
+
+export const sweepStuckSends = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    let failed = 0;
+    let redispatched = 0;
+
+    const sending = await ctx.db
+      .query("emails")
+      .withIndex("by_sendStatus_undoDeadline", (q) =>
+        q.eq("sendStatus", "SENDING"),
+      )
+      .take(100);
+    for (const e of sending) {
+      const started = e.sendingStartedAt ?? e._creationTime;
+      if (now - started > SEND_STALE_MS) {
+        await ctx.db.patch(e._id, {
+          sendStatus: "FAILED",
+          sendError:
+            "Send timed out — it may or may not have been delivered. Check the conversation before retrying.",
+          sendAttempts: (e.sendAttempts ?? 0) + 1,
+          sendingStartedAt: undefined,
+        });
+        failed++;
+      }
+    }
+
+    const pending = await ctx.db
+      .query("emails")
+      .withIndex("by_sendStatus_undoDeadline", (q) =>
+        q.eq("sendStatus", "PENDING_SEND"),
+      )
+      .take(100);
+    for (const e of pending) {
+      // The send job fires at undoDeadlineAt (or immediately for send-now,
+      // which clears the deadline). Well past that with the row still
+      // pending ⇒ the scheduled job was lost — re-dispatch.
+      const dueAt = e.undoDeadlineAt ?? e._creationTime + UNDO_WINDOW_MS;
+      if (now - dueAt > SEND_STALE_MS) {
+        await ctx.scheduler.runAfter(0, internal.emails.actuallySend, {
+          emailId: e._id,
+        });
+        redispatched++;
+      }
+    }
+
+    // Reconcile scheduledEmails rows stuck in SENDING with their linked
+    // email (or fail them if dispatch never produced one).
+    const stuckScheduled = await ctx.db
+      .query("scheduledEmails")
+      .withIndex("by_status_sendAt", (q) =>
+        q.eq("status", "SENDING").lte("sendAt", now - SEND_STALE_MS),
+      )
+      .take(50);
+    for (const row of stuckScheduled) {
+      const emailId = row.sentEmailId
+        ? ctx.db.normalizeId("emails", row.sentEmailId)
+        : null;
+      const email = emailId ? await ctx.db.get(emailId) : null;
+      if (!email) {
+        await ctx.db.patch(row._id, {
+          status: "FAILED",
+          failureReason: "Dispatch failed before a send could start.",
+        });
+        failed++;
+      } else if (email.sendStatus === "SENT") {
+        await ctx.db.patch(row._id, { status: "SENT" });
+      } else if (email.sendStatus === "FAILED") {
+        await ctx.db.patch(row._id, {
+          status: "FAILED",
+          failureReason: email.sendError ?? "Send failed",
+        });
+      }
+      // PENDING_SEND / SENDING → the email sweeps above handle it; this
+      // reconciler catches it on a later pass.
+    }
+
+    return { failed, redispatched };
   },
 });

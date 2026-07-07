@@ -341,6 +341,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   const forwardEmailMutation = useMutation(convexApi.emails.forward);
   const updateDraftMutation = useMutation(convexApi.drafts.update);
   const updateScheduledMutation = useMutation(convexApi.scheduledEmails.update);
+  const sendScheduledNowMutation = useMutation(convexApi.scheduledEmails.sendScheduledNow);
   const recordEditAction = useAction(convexApi.ai.learn.recordEdit);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -594,9 +595,15 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
 
       // If a schedule date is set, schedule instead of sending
       if (scheduledAt) {
+        // Reply recipients live in the `recipients` chip list, not the `to`
+        // string — storing [] here used to make every scheduled reply send
+        // to nobody.
         const toAddresses = mode === 'reply'
-          ? []
-          : to.split(',').map((e) => ({ email: e.trim() }));
+          ? recipients.map((r) => ({ email: r.email, name: r.name }))
+          : to.split(',').map((e) => ({ email: e.trim() })).filter((a) => a.email);
+        if (toAddresses.length === 0 && mode !== 'reply') {
+          throw new Error('Please add at least one recipient');
+        }
 
         await createScheduledEmail({
           accountId: (sendingAccountId || accountId) as Id<'mailAccounts'>,
@@ -612,6 +619,10 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           sendAt: scheduledAt.getTime(),
         });
 
+        // Retire the autosaved draft, same as the immediate-send path —
+        // otherwise it lingers and reopens pre-filled, one Cmd+Enter from a
+        // duplicate send.
+        markSent();
         onClose();
         return;
       }
@@ -741,43 +752,26 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     setSending(true);
     try {
       const bodyHtml = editor?.getHTML() || '';
-      await updateScheduledMutation({
+      // One backend call: saves the latest edits AND dispatches through the
+      // scheduled-send pipeline (which knows how to derive reply recipients
+      // and threading from the parent email). The old version fired a
+      // separate emails.send here while leaving the row SCHEDULED — a recipe
+      // for a double-send and replies that broke out of their thread.
+      const toAddresses = mode === 'reply'
+        ? recipients.map((r) => ({ email: r.email, name: r.name }))
+        : to.split(',').map((e) => ({ email: e.trim() })).filter((a) => a.email);
+      await sendScheduledNowMutation({
         id: editingScheduledId as Id<'scheduledEmails'>,
         bodyHtml,
         bodyText: body,
         subject: subject || '(no subject)',
-        ...(mode !== 'reply' ? { to: to.split(',').map((e) => ({ email: e.trim() })) } : {}),
+        ...(toAddresses.length > 0 ? { to: toAddresses } : {}),
       });
-      // For "send now" on a scheduled email, dispatch via the regular send
-      // mutation (the scheduled-emails worker handles the rest).
-      const res = await sendEmailMutation({
-        accountId: accountId as Id<'mailAccounts'>,
-        to: to.split(',').map((e) => ({ email: e.trim() })),
-        subject: subject || '(no subject)',
-        bodyHtml,
-        bodyText: body,
-      }) as { data: any };
-
-      if (res.data?.undoDeadlineAt) {
-        addPendingEmail({
-          id: res.data.id,
-          threadId: res.data.threadId,
-          body,
-          to,
-          subject,
-          undoDeadlineAt: res.data.undoDeadlineAt,
-        });
-      }
-
-      queryClient.invalidateQueries({ queryKey: ['scheduled-emails'] });
-      queryClient.invalidateQueries({ queryKey: ['threads'] });
-      if (threadId) {
-        queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
-      }
       setEditingScheduledId(null);
       onClose();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Send now failed:', err);
+      toast.error(err?.message || 'Failed to send scheduled email');
     } finally {
       setSending(false);
     }

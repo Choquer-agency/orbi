@@ -212,6 +212,7 @@ export const send = internalAction({
       bodyHtml: v.string(),
       bodyText: v.string(),
       inReplyTo: v.optional(v.string()),
+      references: v.optional(v.array(v.string())),
       emailId: v.id("emails"),
     }),
   },
@@ -246,12 +247,16 @@ export const send = internalAction({
     }
 
     const internetMessageHeaders: Array<{ name: string; value: string }> = [];
-    if (message.inReplyTo) {
-      const ref = message.inReplyTo.startsWith("<")
-        ? message.inReplyTo
-        : `<${message.inReplyTo}>`;
+    if (message.inReplyTo && message.inReplyTo.includes("@")) {
+      const wrap = (s: string) => (s.startsWith("<") ? s : `<${s}>`);
+      const ref = wrap(message.inReplyTo);
       internetMessageHeaders.push({ name: "In-Reply-To", value: ref });
-      internetMessageHeaders.push({ name: "References", value: ref });
+      // Full References chain so recipients' clients thread correctly.
+      const chain = (message.references ?? [])
+        .filter((r) => r.includes("@"))
+        .map(wrap);
+      if (!chain.includes(ref)) chain.push(ref);
+      internetMessageHeaders.push({ name: "References", value: chain.join(" ") });
     }
 
     const graphMessage: Record<string, unknown> = {

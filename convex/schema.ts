@@ -275,6 +275,10 @@ export default defineSchema({
     undoneAt: v.optional(v.number()),
     sendError: v.optional(v.string()),
     sendAttempts: v.number(),
+    // Stamped by the atomic claim (_claimForSend) when a send actually starts
+    // talking to the provider. Lets the stuck-send sweeper distinguish a live
+    // in-flight send from one whose action died mid-call.
+    sendingStartedAt: v.optional(v.number()),
   })
     .index("by_providerMessageId", ["providerMessageId"])
     .index("by_thread_receivedAt", ["threadId", "receivedAt"])

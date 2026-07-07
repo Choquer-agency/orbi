@@ -263,6 +263,7 @@ async function buildRawMessage(opts: {
   bodyText: string;
   bodyHtml: string;
   inReplyTo?: string;
+  references?: string[];
   messageId: string;
   attachments: Array<{ filename: string; mimeType: string; bytes: Uint8Array }>;
 }): Promise<string> {
@@ -283,11 +284,16 @@ async function buildRawMessage(opts: {
   headers.push(`Subject: ${encodeHeaderWord(opts.subject || "")}`);
   headers.push(`Message-ID: ${opts.messageId}`);
   if (isUsableMessageId(opts.inReplyTo)) {
-    const ref = opts.inReplyTo!.startsWith("<")
-      ? opts.inReplyTo!
-      : `<${opts.inReplyTo!}>`;
+    const wrap = (s: string) => (s.startsWith("<") ? s : `<${s}>`);
+    const ref = wrap(opts.inReplyTo!);
     headers.push(`In-Reply-To: ${ref}`);
-    headers.push(`References: ${ref}`);
+    // Full RFC-5322 References chain (every ancestor + immediate parent) so
+    // other mail clients thread correctly; fall back to just the parent.
+    const chain = (opts.references ?? [])
+      .filter(isUsableMessageId)
+      .map(wrap);
+    if (!chain.includes(ref)) chain.push(ref);
+    headers.push(`References: ${chain.join(" ")}`);
   }
   headers.push("MIME-Version: 1.0");
 
@@ -355,6 +361,11 @@ export const send = internalAction({
       bodyHtml: v.string(),
       bodyText: v.string(),
       inReplyTo: v.optional(v.string()),
+      references: v.optional(v.array(v.string())),
+      // Pre-cleaned Gmail thread id from the caller (local-/draft- prefixes
+      // and "::N" sub-thread suffixes already stripped). When absent we fall
+      // back to deriving it from the thread row below.
+      providerThreadId: v.optional(v.string()),
       emailId: v.id("emails"),
     }),
   },
@@ -382,12 +393,13 @@ export const send = internalAction({
     // a brand-new email the thread starts with `local-thread-…` — we skip
     // passing threadId in that case (Gmail will create a new thread on its
     // side, which is correct for a brand-new conversation).
-    const gmailThreadId =
+    const derivedThreadId =
       thread &&
       !thread.providerThreadId.startsWith("local-thread-") &&
       !thread.providerThreadId.startsWith("draft-thread-")
-        ? thread.providerThreadId
+        ? thread.providerThreadId.split("::")[0]
         : undefined;
+    const gmailThreadId = message.providerThreadId ?? derivedThreadId;
 
     // Pull attachment bytes from Convex storage.
     const attachmentMeta = await ctx.runQuery(
@@ -423,6 +435,7 @@ export const send = internalAction({
       bodyHtml: message.bodyHtml,
       bodyText: message.bodyText,
       inReplyTo: message.inReplyTo,
+      references: message.references,
       messageId,
       attachments,
     });
