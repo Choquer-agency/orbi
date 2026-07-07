@@ -157,6 +157,9 @@ async function fetchAndPersistGmailBody(
     accountId: Id<"mailAccounts">;
     providerMessageId: string;
     subject: string;
+    // textOnly: store only the searchable text (historical backfill), not the
+    // display HTML — old mail becomes searchable without re-inflating storage.
+    textOnly?: boolean;
   },
 ) {
   const msg = await withRefreshOn401(ctx, args.accountId, async (token) =>
@@ -169,6 +172,19 @@ async function fetchAndPersistGmailBody(
   );
 
   const body = msg.payload ? getBody(msg.payload) : { text: "", html: "" };
+
+  if (args.textOnly) {
+    await ctx.runMutation(
+      internal.sync.onDemandBodyData._persistSearchTextOnly,
+      {
+        emailId: args.emailId,
+        bodyText: body.text || undefined,
+        bodyHtml: body.html || undefined,
+      },
+    );
+    return;
+  }
+
   const attachments = msg.payload ? getAttachments(msg.payload) : [];
   const pre = preprocessEmailBody(
     body.html || undefined,
@@ -180,8 +196,6 @@ async function fetchAndPersistGmailBody(
     emailId: args.emailId,
     bodyText: body.text || undefined,
     bodyHtml: body.html || undefined,
-    bodyHtmlClean: pre.bodyHtmlClean,
-    bodyHtmlTrimmed: pre.bodyHtmlTrimmed,
     hasQuotedHistory: pre.hasQuotedHistory,
     isForwarded: pre.isForwarded,
     hasAttachments: attachments.length > 0,
@@ -217,6 +231,7 @@ async function fetchAndPersistMicrosoftBody(
     accountId: Id<"mailAccounts">;
     providerMessageId: string;
     subject: string;
+    textOnly?: boolean;
   },
 ) {
   const detail = await withRefreshOn401(ctx, args.accountId, async (token) =>
@@ -234,6 +249,14 @@ async function fetchAndPersistMicrosoftBody(
     detail.body?.contentType?.toLowerCase() === "text"
       ? detail.body.content
       : undefined;
+
+  if (args.textOnly) {
+    await ctx.runMutation(
+      internal.sync.onDemandBodyData._persistSearchTextOnly,
+      { emailId: args.emailId, bodyText, bodyHtml },
+    );
+    return;
+  }
 
   const pre = preprocessEmailBody(bodyHtml, bodyText, args.subject);
 
@@ -267,8 +290,6 @@ async function fetchAndPersistMicrosoftBody(
     emailId: args.emailId,
     bodyText,
     bodyHtml,
-    bodyHtmlClean: pre.bodyHtmlClean,
-    bodyHtmlTrimmed: pre.bodyHtmlTrimmed,
     hasQuotedHistory: pre.hasQuotedHistory,
     isForwarded: pre.isForwarded,
     hasAttachments: !!detail.hasAttachments,
@@ -380,6 +401,86 @@ export const backfillRecentBodies = internalAction({
         5_000,
         internal.sync.onDemandBody.backfillRecentBodies,
         { sinceDays, accountIdx: accountIdx + 1 },
+      );
+    }
+    return { account: account._id, scheduled: page.ids.length };
+  },
+});
+
+// Text-only sibling of fetchBodyForNewEmail, used by the historical search
+// backfill: pulls the message from the provider and stores ONLY its search
+// text (no display HTML, no attachments). Idempotent.
+export const fetchSearchTextForEmail = internalAction({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }) => {
+    const lookup = await ctx.runQuery(
+      internal.sync.onDemandBodyData._lookupForBodyFetch,
+      { emailId },
+    );
+    if (!lookup) return;
+    const common = {
+      emailId,
+      accountId: lookup.email.accountId,
+      providerMessageId: lookup.email.providerMessageId,
+      subject: lookup.email.subject,
+      textOnly: true,
+    };
+    if (lookup.account.provider === "GMAIL") {
+      await fetchAndPersistGmailBody(ctx, common);
+    } else if (lookup.account.provider === "MICROSOFT") {
+      await fetchAndPersistMicrosoftBody(ctx, common);
+    }
+  },
+});
+
+// One-time historical backfill: make EVERY email in the mailbox searchable
+// word-for-word by fetching text for messages that have no emailSearchText
+// row. Run storageSweep first (it covers everything with a locally-stored
+// body for free); this handles the rest via throttled provider fetches.
+// ~50k messages at 300ms stagger ≈ a few hours, well under provider quotas.
+// Kick off with:
+//   npx convex run sync/onDemandBody:backfillSearchText '{}'
+export const backfillSearchText = internalAction({
+  args: {
+    accountIdx: v.optional(v.number()),
+    beforeReceivedAt: v.optional(v.number()),
+  },
+  handler: async (ctx, { accountIdx = 0, beforeReceivedAt }) => {
+    const accounts = (await ctx.runQuery(
+      internal.sync.onDemandBodyData._listActiveAccountIds,
+      {},
+    )) as Array<{ _id: Id<"mailAccounts"> }>;
+    if (accountIdx >= accounts.length) return { done: true };
+
+    const account = accounts[accountIdx];
+    const page = (await ctx.runQuery(
+      internal.sync.onDemandBodyData._searchlessEmailIdsPage,
+      {
+        accountId: account._id,
+        beforeReceivedAt,
+        limit: BACKFILL_PAGE,
+      },
+    )) as { ids: Id<"emails">[]; lastReceivedAt?: number; full: boolean };
+
+    for (let i = 0; i < page.ids.length; i++) {
+      await ctx.scheduler.runAfter(
+        i * BACKFILL_STAGGER_MS,
+        internal.sync.onDemandBody.fetchSearchTextForEmail,
+        { emailId: page.ids[i] },
+      );
+    }
+
+    if (page.full && page.lastReceivedAt !== undefined) {
+      await ctx.scheduler.runAfter(
+        BACKFILL_PAGE * BACKFILL_STAGGER_MS + 2_000,
+        internal.sync.onDemandBody.backfillSearchText,
+        { accountIdx, beforeReceivedAt: page.lastReceivedAt },
+      );
+    } else {
+      await ctx.scheduler.runAfter(
+        5_000,
+        internal.sync.onDemandBody.backfillSearchText,
+        { accountIdx: accountIdx + 1 },
       );
     }
     return { account: account._id, scheduled: page.ids.length };

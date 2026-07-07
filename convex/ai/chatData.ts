@@ -282,8 +282,13 @@ export const _searchEmails = internalQuery({
     const accountIds = new Set(accounts.map((a) => a._id));
     const userEmails = accounts.map((a) => a.email.toLowerCase());
 
-    // Pull recent emails per account, then filter in JS. Convex doesn't have a
-    // SQL-like "contains" filter on indexes, so we scan a bounded window.
+    // Two candidate sources:
+    //  1. The `emailSearchText` search index — covers EVERY email in the
+    //     mailbox, every word, regardless of age. Hits arrive pre-matched by
+    //     BM25 so they skip the fuzzy re-check below.
+    //  2. A bounded recent-window scan — catches typo'd queries (the fuzzy
+    //     matcher tolerates edit distance; BM25 doesn't) and brand-new mail
+    //     whose search text hasn't landed yet (~seconds after sync).
     const candidates: Array<{
       _id: Id<"emails">;
       threadId: Id<"threads">;
@@ -297,7 +302,28 @@ export const _searchEmails = internalQuery({
       snippet?: string;
       receivedAt: number;
       hasAttachments: boolean;
+      searchText?: string;
+      fromSearchIndex?: boolean;
     }> = [];
+    const seenIds = new Set<string>();
+    if (query) {
+      const AI_SEARCH_HITS_PER_ACCOUNT = 30;
+      for (const acc of accounts) {
+        const hits = await ctx.db
+          .query("emailSearchText")
+          .withSearchIndex("search_text", (q) =>
+            q.search("text", query).eq("accountId", acc._id),
+          )
+          .take(AI_SEARCH_HITS_PER_ACCOUNT);
+        for (const hit of hits) {
+          const e = await ctx.db.get(hit.emailId);
+          if (e && !seenIds.has(e._id)) {
+            seenIds.add(e._id);
+            candidates.push({ ...e, searchText: hit.text, fromSearchIndex: true });
+          }
+        }
+      }
+    }
     const perAccountTake = includeNoise ? Math.min(500, limit * 25) : 500;
     for (const acc of accounts) {
       const rows = await ctx.db
@@ -305,7 +331,12 @@ export const _searchEmails = internalQuery({
         .withIndex("by_account_receivedAt", (q) => q.eq("accountId", acc._id))
         .order("desc")
         .take(perAccountTake);
-      candidates.push(...rows);
+      for (const e of rows) {
+        if (!seenIds.has(e._id)) {
+          seenIds.add(e._id);
+          candidates.push(e);
+        }
+      }
     }
 
     const addressMatches = (value: unknown, needle: string) =>
@@ -321,12 +352,12 @@ export const _searchEmails = internalQuery({
 
     const matched = [];
     for (const e of candidates) {
-      // Text search across body, subject, snippet, fromName
-      if (query) {
+      // Text match. Search-index hits are already ranked matches; only the
+      // recent-window candidates need the fuzzy check (subject/snippet/from —
+      // their full text lives in emailSearchText, which round 1 covered).
+      if (query && !e.fromSearchIndex) {
         const q = query.toLowerCase();
         const hit =
-          fuzzyIncludes(e.bodyText, q) ||
-          fuzzyIncludes(e.bodyHtml, q) ||
           fuzzyIncludes(e.subject, q) ||
           fuzzyIncludes(e.snippet, q) ||
           fuzzyIncludes(e.fromName, q) ||
@@ -383,6 +414,26 @@ export const _searchEmails = internalQuery({
     matched.sort((a, b) => b.receivedAt - a.receivedAt);
     const top = matched.slice(0, limit);
 
+    // Snippet the text AROUND the first query-token hit so the answer the
+    // user is looking for ("what's the tracking number?") is actually in the
+    // snippet, not buried past a marketing header.
+    const queryTokens = query
+      ? query.toLowerCase().split(/\s+/).filter((t) => t.length >= 2)
+      : [];
+    const snippetFor = (e: (typeof candidates)[number]): string => {
+      if (e.searchText) {
+        const lower = e.searchText.toLowerCase();
+        for (const tok of queryTokens) {
+          const idx = lower.indexOf(tok);
+          if (idx >= 0) {
+            return e.searchText.slice(Math.max(0, idx - 100), idx + 400);
+          }
+        }
+        return e.searchText.slice(0, 500);
+      }
+      return (e.bodyText || e.snippet || "").slice(0, 500);
+    };
+
     const results: SearchResult[] = [];
     for (const e of top) {
       const thread = await ctx.db.get(e.threadId);
@@ -402,7 +453,7 @@ export const _searchEmails = internalQuery({
           year: "numeric",
         }),
         subject: e.subject,
-        snippet: (e.bodyText || e.snippet || "").slice(0, 500),
+        snippet: snippetFor(e),
         category: cls?.category,
         urgency: cls?.urgency,
       });

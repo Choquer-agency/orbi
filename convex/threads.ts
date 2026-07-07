@@ -576,13 +576,12 @@ export const list = query({
     // emails.bodyText, then load the matching thread rows.
     let candidates: Doc<"threads">[];
     if (useSearchIndex) {
-      // Email search hits load *whole* email docs (full HTML body) just so we
-      // can read .threadId off them. With long histories that's tens of MB
-      // and trips the 16MB read limit. Subject hits are thread docs, cheap.
-      // We use a tighter cap on body hits since ranked-top-50 from BM25 is
-      // already deep enough for a real result set; the user can scroll.
+      // Body search runs against `emailSearchText` — lean capped-text rows
+      // (≤40k chars) that exist for EVERY email regardless of the emailBodies
+      // retention window, and carry threadId directly so a hit costs no extra
+      // doc loads. Subject hits are thread docs, also cheap.
       const SUBJECT_HITS_PER_ACCOUNT = 200;
-      const BODY_HITS_PER_ACCOUNT = 50;
+      const BODY_HITS_PER_ACCOUNT = 25;
       const subjectHitsArrays = await Promise.all(
         accountIds.map((aid) =>
           ctx.db
@@ -596,9 +595,9 @@ export const list = query({
       const bodyHitsArrays = await Promise.all(
         accountIds.map((aid) =>
           ctx.db
-            .query("emails")
-            .withSearchIndex("search_body", (q) =>
-              q.search("bodyText", freeText).eq("accountId", aid),
+            .query("emailSearchText")
+            .withSearchIndex("search_text", (q) =>
+              q.search("text", freeText).eq("accountId", aid),
             )
             .take(BODY_HITS_PER_ACCOUNT),
         ),
@@ -636,14 +635,10 @@ export const list = query({
           threadIdSet.add(t._id);
         }
       }
-      for (const e of bodyHitsArrays.flat()) {
-        if (
-          allTokensIn(e.subject) ||
-          allTokensIn(e.bodyText) ||
-          allTokensIn(e.fromAddress) ||
-          allTokensIn(e.fromName)
-        ) {
-          threadIdSet.add(e.threadId);
+      for (const hit of bodyHitsArrays.flat()) {
+        // hit.text is "subject\nbody text", so one check covers both.
+        if (allTokensIn(hit.text)) {
+          threadIdSet.add(hit.threadId);
         }
       }
       const merged = await Promise.all(
@@ -1066,10 +1061,12 @@ export const get = query({
         // wanted raw bodyHtml is now serviced by `emails.getRawBody` per
         // email on demand.
         const { bodyHtml: _rawHtml, bodyText: _rawText, ...rest } = e;
-        // Prefer the preprocessed copies. Fall back to raw bodyHtml only
-        // when preprocess has nothing to show; cap the fallback so a single
-        // huge raw body can't blow the response budget.
-        const RAW_FALLBACK_CAP = 200_000;
+        // Prefer the preprocessed copies where legacy rows still have them.
+        // New rows deliberately don't (the derived copies tripled storage) —
+        // the viewer sanitizes raw bodyHtml client-side. Cap the raw payload
+        // so a single huge body can't blow the response budget; beyond the
+        // cap, ship the plain text instead of nothing.
+        const RAW_FALLBACK_CAP = 1_000_000;
         const cleanFromBody = body?.bodyHtmlClean ?? e.bodyHtmlClean;
         const trimmedFromBody = body?.bodyHtmlTrimmed ?? e.bodyHtmlTrimmed;
         const rawHtml = body?.bodyHtml ?? e.bodyHtml;
@@ -1078,7 +1075,9 @@ export const get = query({
             ? rawHtml
             : undefined;
         const fallbackText =
-          !cleanFromBody && !rawHtml ? body?.bodyText ?? e.bodyText : undefined;
+          !cleanFromBody && !fallbackHtml
+            ? body?.bodyText ?? e.bodyText
+            : undefined;
         return {
           ...rest,
           // Ship the raw body only when there's nothing better. This keeps the

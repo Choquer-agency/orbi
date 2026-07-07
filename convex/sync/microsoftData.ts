@@ -10,6 +10,7 @@ import { internalMutation, internalQuery } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { v } from "convex/values";
 import { promisedFollowUpText } from "../lib/promiseDetector";
+import { upsertEmailSearchText } from "../lib/searchText";
 import type { Doc, Id } from "../_generated/dataModel";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -465,14 +466,23 @@ export const _upsertEmail = internalMutation({
       sendAttempts: 0,
     });
     if (args.bodyHtml || args.bodyText || args.bodyHtmlClean) {
+      // bodyHtmlClean/bodyHtmlTrimmed intentionally not persisted — the
+      // viewer sanitizes client-side when the server copies are absent.
       await ctx.db.insert("emailBodies", {
         emailId,
         bodyText: args.bodyText,
         bodyHtml: args.bodyHtml,
-        bodyHtmlClean: args.bodyHtmlClean,
-        bodyHtmlTrimmed: args.bodyHtmlTrimmed,
         hasQuotedHistory: args.hasQuotedHistory,
         isForwarded: args.isForwarded,
+      });
+      await upsertEmailSearchText(ctx, {
+        emailId,
+        accountId: args.accountId,
+        threadId: args.threadId,
+        receivedAt: args.receivedAt,
+        subject: args.subject,
+        bodyText: args.bodyText,
+        bodyHtml: args.bodyHtml,
       });
     }
     return { emailId, isNew: true };

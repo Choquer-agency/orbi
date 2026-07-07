@@ -8,6 +8,7 @@
 
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "../_generated/server";
+import { upsertEmailSearchText } from "../lib/searchText";
 
 // Look up everything the action needs in one round trip: email row, sibling
 // account, and whether the body has already been fetched.
@@ -90,8 +91,6 @@ export const _persistBody = internalMutation({
     emailId: v.id("emails"),
     bodyText: v.optional(v.string()),
     bodyHtml: v.optional(v.string()),
-    bodyHtmlClean: v.optional(v.string()),
-    bodyHtmlTrimmed: v.optional(v.string()),
     hasQuotedHistory: v.boolean(),
     isForwarded: v.boolean(),
     hasAttachments: v.boolean(),
@@ -105,8 +104,9 @@ export const _persistBody = internalMutation({
       await ctx.db.patch(existing._id, {
         bodyText: args.bodyText,
         bodyHtml: args.bodyHtml,
-        bodyHtmlClean: args.bodyHtmlClean,
-        bodyHtmlTrimmed: args.bodyHtmlTrimmed,
+        // Clear any legacy derived copies so a re-fetch shrinks old rows.
+        bodyHtmlClean: undefined,
+        bodyHtmlTrimmed: undefined,
         hasQuotedHistory: args.hasQuotedHistory,
         isForwarded: args.isForwarded,
       });
@@ -115,8 +115,6 @@ export const _persistBody = internalMutation({
         emailId: args.emailId,
         bodyText: args.bodyText,
         bodyHtml: args.bodyHtml,
-        bodyHtmlClean: args.bodyHtmlClean,
-        bodyHtmlTrimmed: args.bodyHtmlTrimmed,
         hasQuotedHistory: args.hasQuotedHistory,
         isForwarded: args.isForwarded,
       });
@@ -128,6 +126,85 @@ export const _persistBody = internalMutation({
       hasQuotedHistory: args.hasQuotedHistory,
       isForwarded: args.isForwarded,
     });
+    // Every fetched body also lands in the permanent search-text store.
+    const email = await ctx.db.get(args.emailId);
+    if (email) {
+      await upsertEmailSearchText(ctx, {
+        emailId: email._id,
+        accountId: email.accountId,
+        threadId: email.threadId,
+        receivedAt: email.receivedAt,
+        subject: email.subject,
+        bodyText: args.bodyText,
+        bodyHtml: args.bodyHtml,
+      });
+    }
+  },
+});
+
+// Text-only persist for the historical search backfill: writes the search
+// text WITHOUT storing display HTML, so backfilling 50k+ old emails makes
+// them searchable word-for-word without re-inflating storage. Display HTML
+// still fetches on first open via ensureEmailBody.
+export const _persistSearchTextOnly = internalMutation({
+  args: {
+    emailId: v.id("emails"),
+    bodyText: v.optional(v.string()),
+    bodyHtml: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const email = await ctx.db.get(args.emailId);
+    if (!email) return;
+    await upsertEmailSearchText(ctx, {
+      emailId: email._id,
+      accountId: email.accountId,
+      threadId: email.threadId,
+      receivedAt: email.receivedAt,
+      subject: email.subject,
+      bodyText: args.bodyText,
+      bodyHtml: args.bodyHtml,
+    });
+  },
+});
+
+// A page of email ids that have NO search text yet, newest-first per account.
+// Used by backfillSearchText. Run storageSweep FIRST — it builds search text
+// from locally-stored bodies without provider calls, so by the time this
+// runs, anything still missing text genuinely needs a provider fetch.
+// (We deliberately do NOT peek at emailBodies here: existence-checking that
+// table loads whole multi-hundred-KB docs and would blow the 16MB read cap.)
+export const _searchlessEmailIdsPage = internalQuery({
+  args: {
+    accountId: v.id("mailAccounts"),
+    beforeReceivedAt: v.optional(v.number()),
+    limit: v.number(),
+  },
+  handler: async (ctx, { accountId, beforeReceivedAt, limit }) => {
+    const rows = await ctx.db
+      .query("emails")
+      .withIndex("by_account_receivedAt", (q) => {
+        const base = q.eq("accountId", accountId);
+        return beforeReceivedAt !== undefined
+          ? base.lt("receivedAt", beforeReceivedAt)
+          : base;
+      })
+      .order("desc")
+      .take(limit);
+    const ids: typeof rows[number]["_id"][] = [];
+    for (const e of rows) {
+      const st = await ctx.db
+        .query("emailSearchText")
+        .withIndex("by_email", (q) => q.eq("emailId", e._id))
+        .unique();
+      if (st) continue;
+      ids.push(e._id);
+    }
+    return {
+      ids,
+      lastReceivedAt:
+        rows.length > 0 ? rows[rows.length - 1].receivedAt : undefined,
+      full: rows.length === limit,
+    };
   },
 });
 

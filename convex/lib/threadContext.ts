@@ -64,38 +64,63 @@ export async function buildThreadContext(
   const total = emails.length;
   const displayedEmails = compactThreadEmails(emails);
   const omittedCount = total - displayedEmails.length;
-  const emailTexts = displayedEmails
-    .map((e, i) => {
-      const dateMs = e.sentAt ?? e.receivedAt;
-      const date = formatDate(dateMs);
-      const from = e.fromName ? `${e.fromName} <${e.fromAddress}>` : e.fromAddress;
-      const to = formatRecipients(e.toAddresses);
-      const cc = e.ccAddresses ? formatRecipients(e.ccAddresses) : null;
+  const emailBlocks: string[] = [];
+  for (let i = 0; i < displayedEmails.length; i++) {
+    const e = displayedEmails[i];
+    const dateMs = e.sentAt ?? e.receivedAt;
+    const date = formatDate(dateMs);
+    const from = e.fromName ? `${e.fromName} <${e.fromAddress}>` : e.fromAddress;
+    const to = formatRecipients(e.toAddresses);
+    const cc = e.ccAddresses ? formatRecipients(e.ccAddresses) : null;
 
-      // Use bodyText, falling back to stripped HTML if bodyText is missing or too short.
-      let body = e.bodyText || "";
-      if (body.length < 100 && e.bodyHtml) {
-        body = stripHtmlToText(e.bodyHtml);
+    // Body resolution order:
+    //  1. emailSearchText — lean capped plain text, exists for every email
+    //     once backfilled, regardless of the emailBodies retention window.
+    //  2. emailBodies — the display cache (recent mail).
+    //  3. Legacy in-row fields on the email doc (pre-migration rows).
+    // The old code read ONLY the in-row fields, which new ingest leaves
+    // empty — so the AI was drafting replies from snippets without anyone
+    // noticing.
+    let body = "";
+    const searchRow = await ctx.db
+      .query("emailSearchText")
+      .withIndex("by_email", (q) => q.eq("emailId", e._id))
+      .unique();
+    if (searchRow) {
+      // Search text is stored as "subject\nbody" — drop the subject line.
+      body = searchRow.text.startsWith(e.subject)
+        ? searchRow.text.slice(e.subject.length).trim()
+        : searchRow.text;
+    } else {
+      const bodyRow = await ctx.db
+        .query("emailBodies")
+        .withIndex("by_email", (q) => q.eq("emailId", e._id))
+        .unique();
+      body = bodyRow?.bodyText || e.bodyText || "";
+      const html = bodyRow?.bodyHtml || e.bodyHtml;
+      if (body.length < 100 && html) {
+        body = stripHtmlToText(html);
       }
-      if (!body) body = "(no text content)";
-      // Strip quoted reply chains (lines starting with >)
-      body = body
-        .split("\n")
-        .filter((line) => !line.startsWith(">"))
-        .join("\n")
-        .trim();
-      // Truncate each email and rely on compactThreadEmails to cap message count.
-      if (body.length > 1500) {
-        body = body.slice(0, 1500) + "\n... [truncated]";
-      }
+    }
+    if (!body) body = e.snippet || "(no text content)";
+    // Strip quoted reply chains (lines starting with >)
+    body = body
+      .split("\n")
+      .filter((line) => !line.startsWith(">"))
+      .join("\n")
+      .trim();
+    // Truncate each email and rely on compactThreadEmails to cap message count.
+    if (body.length > 1500) {
+      body = body.slice(0, 1500) + "\n... [truncated]";
+    }
 
-      let header = `--- Email ${i + 1} of ${displayedEmails.length} (${total} total) ---\nFrom: ${from}\nDate: ${date}\nTo: ${to}`;
-      if (cc) header += `\nCc: ${cc}`;
-      if (e.hasAttachments) header += `\n[Has attachments]`;
+    let header = `--- Email ${i + 1} of ${displayedEmails.length} (${total} total) ---\nFrom: ${from}\nDate: ${date}\nTo: ${to}`;
+    if (cc) header += `\nCc: ${cc}`;
+    if (e.hasAttachments) header += `\n[Has attachments]`;
 
-      return `${header}\n\n${body}`;
-    })
-    .join("\n\n");
+    emailBlocks.push(`${header}\n\n${body}`);
+  }
+  const emailTexts = emailBlocks.join("\n\n");
 
   const omissionNote = omittedCount > 0
     ? `\n\n[${omittedCount} earlier middle email(s) omitted to control AI cost. Ask to inspect the full thread if needed.]`

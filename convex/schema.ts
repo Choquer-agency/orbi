@@ -285,14 +285,11 @@ export default defineSchema({
     .index("by_account_sendStatus_receivedAt", ["accountId", "sendStatus", "receivedAt"])
     .index("by_sendStatus_undoDeadline", ["sendStatus", "undoDeadlineAt"])
     .index("by_account_fromAddress", ["accountId", "fromAddress"])
-    .index("by_account_fromName", ["accountId", "fromName"])
-    // Server-side full-text search over message bodies. Pairs with the
-    // threads.search_subject index so search covers both subjects and body
-    // text across the entire mailbox.
-    .searchIndex("search_body", {
-      searchField: "bodyText",
-      filterFields: ["accountId"],
-    }),
+    .index("by_account_fromName", ["accountId", "fromName"]),
+    // NOTE: the old `search_body` search index on this table is gone. It
+    // indexed `bodyText`, which new ingest leaves undefined (bodies live in
+    // `emailBodies`), so it silently only covered pre-migration rows. Body
+    // search now lives on `emailSearchText.search_text` below.
 
   // ───────────────────────────────────────────────────────────────────────────
   // Email bodies — split off the `emails` row so metadata reads stay tiny.
@@ -303,11 +300,35 @@ export default defineSchema({
     emailId: v.id("emails"),
     bodyText: v.optional(v.string()),
     bodyHtml: v.optional(v.string()),
+    // DEPRECATED: derived copies of bodyHtml that used to be stored alongside
+    // it, tripling row size. New writes leave them undefined (the viewer
+    // sanitizes client-side); storageSweep clears them from existing rows.
     bodyHtmlClean: v.optional(v.string()),
     bodyHtmlTrimmed: v.optional(v.string()),
     hasQuotedHistory: v.optional(v.boolean()),
     isForwarded: v.optional(v.boolean()),
   }).index("by_email", ["emailId"]),
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Email search text — capped plain text (subject + body) for EVERY email,
+  // kept forever. This is what makes "search every word of every email" true
+  // regardless of the emailBodies retention window: HTML is a short-lived
+  // display cache, this table is the permanent searchable record. Rows are
+  // lean (≤40k chars) so search hits never blow the per-function read limit.
+  // ───────────────────────────────────────────────────────────────────────────
+  emailSearchText: defineTable({
+    emailId: v.id("emails"),
+    accountId: v.id("mailAccounts"),
+    threadId: v.id("threads"),
+    receivedAt: v.number(),
+    text: v.string(),
+  })
+    .index("by_email", ["emailId"])
+    .index("by_account_receivedAt", ["accountId", "receivedAt"])
+    .searchIndex("search_text", {
+      searchField: "text",
+      filterFields: ["accountId"],
+    }),
 
   // ───────────────────────────────────────────────────────────────────────────
   // Attachments — Bytes dropped; binary lives in Convex `_storage`.
