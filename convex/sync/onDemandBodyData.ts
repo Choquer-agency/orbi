@@ -9,21 +9,43 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "../_generated/server";
 import { upsertEmailSearchText } from "../lib/searchText";
+import { canAccessThread } from "../lib/threadAccessCheck";
 
 // Look up everything the action needs in one round trip: email row, sibling
 // account, and whether the body has already been fetched.
 export const _lookupForBodyFetch = internalQuery({
-  args: { emailId: v.id("emails") },
-  handler: async (ctx, { emailId }) => {
+  args: {
+    emailId: v.id("emails"),
+    // When set, also compute whether this user may trigger the fetch:
+    // mailbox owner OR anyone with a threadAccess grant (handoff/@mention).
+    // The provider call runs server-side with the OWNER's stored token —
+    // shared users never see credentials, and the grant already authorizes
+    // reading the whole thread, so refetching its display HTML exposes
+    // nothing new.
+    forUserId: v.optional(v.id("users")),
+  },
+  handler: async (ctx, { emailId, forUserId }) => {
     const email = await ctx.db.get(emailId);
     if (!email) return null;
     const account = await ctx.db.get(email.accountId);
     if (!account) return null;
+    let authorized = false;
+    if (forUserId) {
+      if (account.userId === forUserId) {
+        authorized = true;
+      } else {
+        const thread = await ctx.db.get(email.threadId);
+        authorized = thread
+          ? await canAccessThread(ctx, forUserId, thread)
+          : false;
+      }
+    }
     const existingBody = await ctx.db
       .query("emailBodies")
       .withIndex("by_email", (q) => q.eq("emailId", emailId))
       .unique();
     return {
+      authorized,
       email: {
         _id: email._id,
         accountId: email.accountId,

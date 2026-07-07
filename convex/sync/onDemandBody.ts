@@ -496,10 +496,12 @@ export const ensureEmailBody = action({
     const userId = await requireUser(ctx);
     const lookup = await ctx.runQuery(
       internal.sync.onDemandBodyData._lookupForBodyFetch,
-      { emailId },
+      { emailId, forUserId: userId },
     );
     if (!lookup) throw new Error("Email not found");
-    if (lookup.account.userId !== userId) {
+    // Owner OR shared-access grantee (handoff / @mention) — the fetch uses
+    // the owner's token server-side either way.
+    if (!lookup.authorized) {
       throw new Error("Email not found");
     }
     if (lookup.hasBody) {

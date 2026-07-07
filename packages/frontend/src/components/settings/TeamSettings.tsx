@@ -25,6 +25,9 @@ export function TeamSettings() {
   const inviteMutation = useMutation(convexApi.team.invite);
   const revokeMutation = useMutation(convexApi.team.revokeInvite);
   const setRoleMutation = useMutation(convexApi.team.setRole);
+  const removeMutation = useMutation(convexApi.team.removeMember);
+  // Two-click confirm: first click arms, second click removes.
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
 
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<'ADMIN' | 'MANAGER' | 'AGENT'>('AGENT');
@@ -59,6 +62,21 @@ export function TeamSettings() {
       toast.success('Role updated');
     } catch (err: any) {
       toast.error(err?.message || 'Failed to update role');
+    }
+  };
+
+  const handleRemove = async (userId: string, label: string) => {
+    if (confirmRemoveId !== userId) {
+      setConfirmRemoveId(userId);
+      setTimeout(() => setConfirmRemoveId((c) => (c === userId ? null : c)), 4000);
+      return;
+    }
+    setConfirmRemoveId(null);
+    try {
+      await removeMutation({ userId: userId as Id<'users'> });
+      toast.success(`${label} removed from the team`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to remove member');
     }
   };
 
@@ -175,15 +193,32 @@ export function TeamSettings() {
               )}
             </div>
             {isAdmin && m.id !== team?.viewerId ? (
-              <select
-                value={m.role}
-                onChange={(e) => handleRoleChange(m.id, e.target.value)}
-                className="rounded-lg border border-border bg-white px-2 py-1 text-[11px] text-text-primary focus:border-primary focus:outline-none"
-              >
-                <option value="AGENT">Standard</option>
-                <option value="MANAGER">Manager</option>
-                <option value="ADMIN">Admin</option>
-              </select>
+              <>
+                <select
+                  value={m.role}
+                  onChange={(e) => handleRoleChange(m.id, e.target.value)}
+                  className="rounded-lg border border-border bg-white px-2 py-1 text-[11px] text-text-primary focus:border-primary focus:outline-none"
+                >
+                  <option value="AGENT">Standard</option>
+                  <option value="MANAGER">Manager</option>
+                  <option value="ADMIN">Admin</option>
+                </select>
+                <button
+                  onClick={() => handleRemove(m.id, m.name ?? m.email ?? 'Member')}
+                  className={
+                    confirmRemoveId === m.id
+                      ? 'rounded-lg bg-red-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-red-700'
+                      : 'rounded p-1 text-text-tertiary hover:bg-red-50 hover:text-red-600'
+                  }
+                  title={
+                    confirmRemoveId === m.id
+                      ? 'Click again to confirm removal'
+                      : 'Remove from team (revokes login; keeps their data)'
+                  }
+                >
+                  {confirmRemoveId === m.id ? 'Confirm?' : <Trash2 className="h-3.5 w-3.5" />}
+                </button>
+              </>
             ) : (
               <span className="flex items-center gap-1 rounded-full bg-surface px-2 py-0.5 text-[10px] font-medium text-text-secondary">
                 {m.role === 'ADMIN' && <ShieldCheck className="h-3 w-3" />}

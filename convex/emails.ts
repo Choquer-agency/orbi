@@ -349,7 +349,15 @@ export const downloadAttachment = action({
     } | null;
 
     if (!ctxData) throw new Error("Attachment not found");
-    if (ctxData.account.userId !== userId) throw new Error("Not authorized");
+    if (ctxData.account.userId !== userId) {
+      // Shared-access grantees (handoff / @mention) may view attachments —
+      // the grant already covers the whole thread's content.
+      const shared: boolean = await ctx.runQuery(
+        internal.emails._userHasThreadAccessForEmail,
+        { emailId: ctxData.email._id, userId },
+      );
+      if (!shared) throw new Error("Not authorized");
+    }
 
     // Already in Convex storage — just return the URL
     if (ctxData.attachment.storageId) {
@@ -1137,6 +1145,22 @@ export const _loadForSend = internalQuery({
   },
 });
 
+// Shared-access check for attachment/body reads by non-owners.
+export const _userHasThreadAccessForEmail = internalQuery({
+  args: { emailId: v.id("emails"), userId: v.id("users") },
+  handler: async (ctx, { emailId, userId }): Promise<boolean> => {
+    const email = await ctx.db.get(emailId);
+    if (!email) return false;
+    const access = await ctx.db
+      .query("threadAccess")
+      .withIndex("by_thread_user", (q) =>
+        q.eq("threadId", email.threadId).eq("userId", userId),
+      )
+      .unique();
+    return !!access;
+  },
+});
+
 export const _getAttachmentForHttp = internalQuery({
   args: { userId: v.id("users"), attachmentId: v.id("attachments") },
   handler: async (ctx, { userId, attachmentId }) => {
@@ -1145,7 +1169,16 @@ export const _getAttachmentForHttp = internalQuery({
     const email = await ctx.db.get(attachment.emailId);
     if (!email) return null;
     const account = await ctx.db.get(email.accountId);
-    if (!account || account.userId !== userId) return null;
+    if (!account) return null;
+    if (account.userId !== userId) {
+      const access = await ctx.db
+        .query("threadAccess")
+        .withIndex("by_thread_user", (q) =>
+          q.eq("threadId", email.threadId).eq("userId", userId),
+        )
+        .unique();
+      if (!access) return null;
+    }
     return {
       attachment: {
         _id: attachment._id,

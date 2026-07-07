@@ -217,3 +217,66 @@ export const _bootstrapAdmin = internalMutation({
     return { ok: true };
   },
 });
+
+// Remove a member: revokes their login (sessions, credentials, refresh
+// tokens), stops their mailbox syncs (accounts deactivated — DATA IS KEPT so
+// nothing about past collaboration or their synced mail is destroyed), and
+// clears their shared-thread access. Admins must be demoted before removal,
+// and you can't remove yourself.
+export const removeMember = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, { userId: targetId }) => {
+    const adminId = await requireAdmin(ctx);
+    if (targetId === adminId) {
+      throw new Error("You can't remove yourself");
+    }
+    const target = await ctx.db.get(targetId);
+    if (!target) throw new Error("User not found");
+    if (target.role === "ADMIN") {
+      throw new Error("Demote this admin to Standard before removing them");
+    }
+
+    // Kill login: refresh tokens → sessions → credential accounts.
+    const sessions = await ctx.db
+      .query("authSessions")
+      .withIndex("userId", (q) => q.eq("userId", targetId))
+      .collect();
+    for (const s of sessions) {
+      const tokens = await ctx.db
+        .query("authRefreshTokens")
+        .withIndex("sessionId", (q) => q.eq("sessionId", s._id))
+        .collect();
+      for (const t of tokens) await ctx.db.delete(t._id);
+      await ctx.db.delete(s._id);
+    }
+    const authAccounts = await ctx.db
+      .query("authAccounts")
+      .withIndex("userIdAndProvider", (q) => q.eq("userId", targetId))
+      .collect();
+    for (const a of authAccounts) await ctx.db.delete(a._id);
+
+    // Stop mailbox syncing (keep the data).
+    const mailAccts = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", targetId))
+      .collect();
+    for (const m of mailAccts) {
+      if (m.isActive) {
+        await ctx.db.patch(m._id, {
+          isActive: false,
+          watchExpiration: undefined,
+        });
+      }
+    }
+
+    // Revoke shared-thread access.
+    const access = await ctx.db
+      .query("threadAccess")
+      .withIndex("by_user", (q) => q.eq("userId", targetId))
+      .collect();
+    for (const a of access) await ctx.db.delete(a._id);
+
+    await ctx.db.delete(targetId);
+    return { ok: true };
+  },
+});
