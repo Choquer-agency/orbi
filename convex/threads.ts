@@ -327,11 +327,10 @@ export const list = query({
       };
     }
 
-    // Shared With Me = threads where a teammate @-mentioned me in an internal
-    // comment. Source of truth is `threadMentions`, not `threadAccess` (which
-    // also catches handoffs / ad-hoc grants the user doesn't want surfaced
-    // here). Self-mentions are excluded so authoring your own comment can't
-    // drag the thread into this view.
+    // Shared With Me = threads a teammate pulled me into: @-mentions in
+    // internal comments PLUS explicit access grants (handoffs, collaborator
+    // grants) via threadAccess. Self-mentions are excluded so authoring your
+    // own comment can't drag the thread into this view.
     if (folder === "shared" && !searchTerm && !fromEmail) {
       const mentionRows = await ctx.db
         .query("threadMentions")
@@ -345,6 +344,12 @@ export const list = query({
           threadIds.add(m.threadId);
         }
       }
+
+      const accessRows = await ctx.db
+        .query("threadAccess")
+        .withIndex("by_user", (q) => q.eq("userId", userId))
+        .collect();
+      for (const a of accessRows) threadIds.add(a.threadId);
 
       const sharedThreads = (
         await Promise.all(Array.from(threadIds).map((id) => ctx.db.get(id)))

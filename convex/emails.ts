@@ -1479,3 +1479,70 @@ export const sweepStuckSends = internalMutation({
     return { failed, redispatched };
   },
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// System-authored outbound email (team invites, future digests). Creates the
+// thread + email rows exactly like the send mutation would and dispatches
+// immediately — no undo window, no user session (callers must do their own
+// authorization). Delivery flows through the same actuallySend pipeline as
+// everything else (claim, attachments, failure marking).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function insertSystemOutboundEmail(
+  ctx: MutationCtx,
+  args: {
+    accountId: Id<"mailAccounts">;
+    to: Array<{ email: string; name?: string }>;
+    subject: string;
+    bodyHtml: string;
+    bodyText: string;
+  },
+): Promise<Id<"emails">> {
+  const account = await ctx.db.get(args.accountId);
+  if (!account) throw new Error("Mail account not found");
+  const now = Date.now();
+
+  const threadId = await ctx.db.insert("threads", {
+    accountId: account._id,
+    providerThreadId: newLocalProviderThreadId(),
+    subject: args.subject,
+    snippet: (args.bodyText || "").slice(0, 200),
+    isRead: true,
+    isStarred: false,
+    isArchived: false,
+    isTrashed: false,
+    labels: ["SENT"],
+    participantEmails: [account.email, ...args.to.map((a) => a.email)],
+    messageCount: 1,
+    lastMessageAt: now,
+    hasSentMail: true,
+  });
+
+  const emailId = await ctx.db.insert("emails", {
+    accountId: account._id,
+    threadId,
+    providerMessageId: newLocalProviderMessageId(),
+    references: [],
+    fromAddress: account.email,
+    fromName: account.displayName || account.email.split("@")[0],
+    toAddresses: args.to,
+    ccAddresses: [],
+    bccAddresses: [],
+    subject: args.subject,
+    bodyText: args.bodyText,
+    bodyHtml: args.bodyHtml,
+    snippet: (args.bodyText || "").slice(0, 200),
+    isRead: true,
+    isStarred: false,
+    isDraft: false,
+    labels: ["SENT"],
+    hasAttachments: false,
+    receivedAt: now,
+    sentAt: now,
+    sendStatus: "PENDING_SEND",
+    sendAttempts: 0,
+  });
+
+  await ctx.scheduler.runAfter(0, internal.emails.actuallySend, { emailId });
+  return emailId;
+}

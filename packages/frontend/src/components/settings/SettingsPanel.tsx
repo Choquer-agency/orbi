@@ -1,4 +1,4 @@
-import { X, FolderInput, Pen, Bell, Filter, Columns3, ShieldBan, Plane, TextQuote, UserCircle, Shield, Mail, Trash2, Inbox } from 'lucide-react';
+import { X, FolderInput, Pen, Bell, Filter, Columns3, ShieldBan, Plane, TextQuote, UserCircle, Shield, Mail, Trash2, Inbox, Users } from 'lucide-react';
 import { SignatureIcon } from '../icons/SignatureIcon';
 import { useUiStore } from '../../stores/uiStore';
 import { WritingPreferences } from './WritingPreferences';
@@ -12,6 +12,7 @@ import { AiFilterSettings } from './AiFilterSettings';
 import { VacationResponderSettings } from './VacationResponderSettings';
 import { SnippetSettings } from './SnippetSettings';
 import { AccountsSettings } from './AccountsSettings';
+import { TeamSettings } from './TeamSettings';
 import { ProfileSettings } from './ProfileSettings';
 import { RetentionSettings } from './RetentionSettings';
 import { NeedsResponseSettings } from './NeedsResponseSettings';
@@ -24,6 +25,7 @@ interface SettingsPanelProps {
 const SECTIONS = [
   { id: 'profile', label: 'Profile', icon: UserCircle },
   { id: 'accounts', label: 'Accounts', icon: Mail },
+  { id: 'team', label: 'Team', icon: Users },
   { id: 'general', label: 'General', icon: FolderInput },
   { id: 'writing', label: 'Writing Style', icon: Pen },
   { id: 'signatures', label: 'Signatures', icon: SignatureIcon },
@@ -48,6 +50,8 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         return <ProfileSettings />;
       case 'accounts':
         return <AccountsSettings />;
+      case 'team':
+        return <TeamSettings />;
       case 'general':
         return <GeneralSettings />;
       case 'writing':

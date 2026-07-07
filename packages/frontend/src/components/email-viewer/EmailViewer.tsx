@@ -30,8 +30,7 @@ import {
   MailOpen,
   Eye,
   ChevronDown,
-  Ban,
-} from 'lucide-react';
+  Ban,, ArrowRightLeft } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as ScrollArea from '@radix-ui/react-scroll-area';
@@ -62,6 +61,9 @@ import { useIsMobile } from '../../hooks/useIsMobile';
 import { useMarkThreadNotificationsRead } from '../../hooks/useNotifications';
 import { haptic } from '../../lib/haptics';
 import { ImageLightbox } from './ImageLightbox';
+import { HandoffDialog } from '../handoff/HandoffDialog';
+import { HandoffBanner } from '../handoff/HandoffBanner';
+import { useHandoffs } from '../../hooks/useHandoffs';
 import DOMPurify from 'dompurify';
 import { useMutation as useConvexMutation, useQuery as useConvexQuery } from 'convex/react';
 import { useAuthToken } from '@convex-dev/auth/react';
@@ -1311,14 +1313,11 @@ function parseAddressString(value: string | undefined): Array<{ email: string }>
     .map((email) => ({ email }));
 }
 
-// Mock team members for comment tagging
-const TEAM_MEMBERS = [
-  { id: '1', name: 'Sarah Chen', email: 'sarah@orbi.agency' },
-  { id: '2', name: 'Mike Johnson', email: 'mike@orbi.agency' },
-  { id: '3', name: 'Sophie Kim', email: 'sophie@orbi.agency' },
-  { id: '4', name: 'Alex Rivera', email: 'alex@orbi.agency' },
-  { id: '5', name: 'Jordan Lee', email: 'jordan@orbi.agency' },
-];
+// Team members for @-mentions and handoffs. This used to be a hardcoded
+// mock list — the mention UI looked functional but tagged nobody real, and
+// no mention IDs reached the backend, so the access-grant + notification
+// pipeline never fired.
+type TeamMember = { id: string; name: string; email: string };
 
 /** Stop words to ignore when building keyword search */
 const STOP_WORDS = new Set([
@@ -1480,7 +1479,21 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const [showNoteInput, setShowNoteInput] = useState(false);
   const [showTagMenu, setShowTagMenu] = useState(false);
   const [tagSearch, setTagSearch] = useState('');
-  const [taggedMembers, setTaggedMembers] = useState<typeof TEAM_MEMBERS>([]);
+  const [taggedMembers, setTaggedMembers] = useState<TeamMember[]>([]);
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const teamData = useConvexQuery(convexApi.team.listMembers, {});
+  const teamMembers: TeamMember[] = useMemo(
+    () =>
+      (teamData?.members ?? [])
+        .filter((m) => m.id !== teamData?.viewerId)
+        .map((m) => ({
+          id: m.id as string,
+          name: m.name ?? m.email ?? 'Teammate',
+          email: m.email ?? '',
+        })),
+    [teamData],
+  );
+  const myPendingHandoffs = useHandoffs('PENDING');
   const [contactCardEmail, setContactCardEmail] = useState<string | null>(null);
   const [contactCardAnchor, setContactCardAnchor] = useState<DOMRect | null>(null);
   const contactLookup = useContactAutocomplete(contactCardEmail || '');
@@ -1776,7 +1789,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     return items;
   }, [data, scheduledEmails]);
 
-  const filteredMembers = TEAM_MEMBERS.filter(
+  const filteredMembers = teamMembers.filter(
     (m) =>
       !taggedMembers.find((t) => t.id === m.id) &&
       (m.name.toLowerCase().includes(tagSearch.toLowerCase()) ||
@@ -1788,14 +1801,22 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     if (!newComment.trim() || !selectedThreadId) return;
     const mentions = taggedMembers.map((m) => `@${m.name}`).join(' ');
     const fullText = mentions ? `${mentions} ${newComment}` : newComment;
-    const escapedText = fullText
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+    const esc = (str: string) =>
+      str
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    // data-mention-id is what the backend's extractMentionIds parses — it
+    // drives the threadAccess grant + notification for each tagged teammate.
+    const mentionHtml = taggedMembers
+      .map((m) => `<span data-mention-id="${esc(m.id)}">@${esc(m.name)}</span>`)
+      .join(' ');
+    const bodyHtml = `<p>${mentionHtml}${mentionHtml ? ' ' : ''}${esc(newComment)}</p>`;
     try {
       await addComment.mutateAsync({
         threadId: selectedThreadId,
-        bodyHtml: `<p>${escapedText}</p>`,
+        bodyHtml,
         bodyText: fullText,
       });
       setNewComment('');
@@ -1813,7 +1834,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     }
   };
 
-  const addTag = (member: (typeof TEAM_MEMBERS)[0]) => {
+  const addTag = (member: TeamMember) => {
     setTaggedMembers([...taggedMembers, member]);
     setShowTagMenu(false);
     setTagSearch('');
@@ -2028,6 +2049,15 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               aria-label="Mark as unread"
             >
               <MailOpen className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+          <Tooltip content="Hand off to teammate">
+            <button
+              onClick={() => setHandoffOpen(true)}
+              className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary"
+              aria-label="Hand off to teammate"
+            >
+              <ArrowRightLeft className="h-3.5 w-3.5" />
             </button>
           </Tooltip>
           <Tooltip content="Archive">
@@ -2394,6 +2424,11 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       <ScrollArea.Root className="min-h-0 flex-1">
         <ScrollArea.Viewport ref={scrollViewportRef} className="h-full w-full">
           <div className="bg-surface p-3">
+            {(myPendingHandoffs.data ?? [])
+              .filter((h: any) => h.threadId === selectedThreadId)
+              .map((h: any) => (
+                <HandoffBanner key={h.id} handoff={h} />
+              ))}
             {timeline.length === 0 && data?.data && (
               <BlankThreadAutoFix threadId={selectedThreadId as Id<'threads'>} />
             )}
@@ -3105,6 +3140,16 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           emailId={previewAttachment.emailId}
           attachment={previewAttachment.attachment}
           onClose={() => setPreviewAttachment(null)}
+        />
+      )}
+
+      {/* Hand off this thread to a teammate */}
+      {selectedThreadId && (
+        <HandoffDialog
+          threadId={selectedThreadId}
+          open={handoffOpen}
+          onOpenChange={setHandoffOpen}
+          teamMembers={teamMembers}
         />
       )}
 

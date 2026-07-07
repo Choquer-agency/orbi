@@ -200,6 +200,26 @@ export default defineSchema({
     .index("by_provider_email", ["provider", "email"]),
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Team invites — sign-up is invite-only (enforced in auth.ts's
+  // createOrUpdateUser callback). An admin invites an email + role; the
+  // invitee gets a real email (sent from the inviter's mailbox) and signing
+  // up with that address consumes the invite and applies the role.
+  // ───────────────────────────────────────────────────────────────────────────
+  teamInvites: defineTable({
+    email: v.string(), // lowercased
+    role: userRole,
+    invitedByUserId: v.id("users"),
+    status: v.union(
+      v.literal("PENDING"),
+      v.literal("ACCEPTED"),
+      v.literal("REVOKED"),
+    ),
+    acceptedAt: v.optional(v.number()),
+  })
+    .index("by_email", ["email"])
+    .index("by_status", ["status"]),
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Threads
   // ───────────────────────────────────────────────────────────────────────────
   threads: defineTable({
