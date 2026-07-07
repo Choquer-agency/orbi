@@ -41,9 +41,13 @@ http.route({
           atob(dataB64.replace(/-/g, "+").replace(/_/g, "/")),
         ) as { emailAddress?: string };
         if (decoded.emailAddress) {
-          await ctx.runMutation(internal.sync.gmailData._schedulePushSync, {
-            email: decoded.emailAddress.toLowerCase(),
-          });
+          const res: { scheduled: number } = await ctx.runMutation(
+            internal.sync.gmailData._schedulePushSync,
+            { email: decoded.emailAddress.toLowerCase() },
+          );
+          console.log(
+            `[gmail-push] ${decoded.emailAddress}: scheduled ${res.scheduled} sync(s)`,
+          );
         }
       }
     } catch (err) {
