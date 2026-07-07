@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { AlertTriangle, RefreshCw, Trash2, X } from 'lucide-react';
 import { useQuery, useMutation } from 'convex/react';
+import { useUiStore } from '../../stores/uiStore';
 import { api as convexApi } from '../../../../../convex/_generated/api';
 import type { Id } from '../../../../../convex/_generated/dataModel';
 import toast from 'react-hot-toast';
@@ -16,6 +17,7 @@ export function FailedSendsBanner() {
   const result = useQuery(convexApi.emails.listFailed, {});
   const retrySend = useMutation(convexApi.emails.retrySend);
   const discardSend = useMutation(convexApi.emails.discardFailedSend);
+  const setSelectedThread = useUiStore((s) => s.setSelectedThread);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
@@ -82,7 +84,14 @@ export function FailedSendsBanner() {
             const isBusy = busy.has(e.id);
             return (
               <li key={e.id} className="flex items-center gap-3 px-4 py-2.5">
-                <div className="min-w-0 flex-1">
+                {/* Click to open the thread so the failed email's content can
+                    be reviewed (and edited via reply) before retrying. */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedThread(e.threadId as string)}
+                  className="min-w-0 flex-1 rounded-md px-1 py-0.5 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+                  title="Open this conversation"
+                >
                   <div className="truncate text-sm text-zinc-800 dark:text-zinc-200">
                     {e.subject || '(no subject)'}
                     {to && <span className="text-zinc-400"> → {to}</span>}
@@ -92,7 +101,7 @@ export function FailedSendsBanner() {
                       {e.sendError}
                     </div>
                   )}
-                </div>
+                </button>
                 <Tooltip content="Retry send">
                   <button
                     type="button"
