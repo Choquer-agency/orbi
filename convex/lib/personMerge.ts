@@ -21,7 +21,7 @@ export function normalizeName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function emailPrefix(email: string): string {
+export function emailPrefix(email: string): string {
   const local = email.split("@")[0] ?? "";
   return local.replace(/[.\-_+0-9]/g, "").toLowerCase();
 }
@@ -65,20 +65,27 @@ export async function findMatchingPerson(
   // linked to a Person. Do not merge shared/brand/newsletter addresses by
   // display name; many companies send from generic aliases and stale ESP names
   // can otherwise leak across unrelated senders.
+  //
+  // Both strategies are indexed point-lookups on derived fields
+  // (normalizedName / normalizedLocalPart). They used to collect the ENTIRE
+  // contacts table — twice — per new contact, which went quadratic during
+  // the recipient backfill (~millions of row reads on a few-thousand-contact
+  // account). Legacy rows get their derived fields via
+  // contacts.backfillSearchFields; until that runs they simply don't match.
   const sharedOrBrand = isLikelySharedOrBrandAddress(contact.email);
   if (!sharedOrBrand && contact.name && contact.name.trim().length > 0) {
     const normalized = normalizeName(contact.name);
     const candidates = await ctx.db
       .query("contacts")
-      .withIndex("by_user_email", (q) => q.eq("userId", userId))
-      .collect();
+      .withIndex("by_user_normalizedName", (q) =>
+        q.eq("userId", userId).eq("normalizedName", normalized),
+      )
+      .take(20);
     for (const c of candidates) {
       if (!c.personId) continue;
       if (c.email === contact.email) continue;
-      if (c.name && normalizeName(c.name) === normalized) {
-        const p = await ctx.db.get(c.personId);
-        if (p) return p;
-      }
+      const p = await ctx.db.get(c.personId);
+      if (p) return p;
     }
   }
 
@@ -88,18 +95,15 @@ export async function findMatchingPerson(
   if (!sharedOrBrand && prefix.length >= 6 && !GENERIC_DOMAINS.has(domain)) {
     const candidates = await ctx.db
       .query("contacts")
-      .withIndex("by_user_email", (q) => q.eq("userId", userId))
-      .collect();
+      .withIndex("by_user_normalizedLocalPart", (q) =>
+        q.eq("userId", userId).eq("normalizedLocalPart", prefix),
+      )
+      .take(20);
     for (const c of candidates) {
       if (!c.personId) continue;
       if (c.email === contact.email) continue;
-      const otherPrefix = emailPrefix(c.email);
       const otherDomain = emailDomain(c.email);
-      if (
-        otherPrefix.length >= 6 &&
-        !GENERIC_DOMAINS.has(otherDomain) &&
-        prefix === otherPrefix
-      ) {
+      if (!GENERIC_DOMAINS.has(otherDomain)) {
         const p = await ctx.db.get(c.personId);
         if (p) return p;
       }

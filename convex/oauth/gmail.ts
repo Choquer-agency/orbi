@@ -171,10 +171,18 @@ export const refreshToken = internalAction({
     });
     if (!res.ok) {
       const txt = await res.text();
+      // invalid_grant = refresh token revoked/expired — only a reconnect
+      // fixes it; flag the account so the UI says so.
+      if (res.status === 400 && /invalid_grant/i.test(txt)) {
+        await ctx.runMutation(internal.oauth.tokenStore.markNeedsReauth, {
+          accountId,
+        });
+      }
       throw new Error(`Gmail token refresh failed (${res.status}): ${txt}`);
     }
     const json = (await res.json()) as {
       access_token: string;
+      refresh_token?: string;
       expires_in?: number;
     };
 
@@ -188,6 +196,9 @@ export const refreshToken = internalAction({
       accountId,
       encryptedAccessToken: await encrypt(newAccessToken),
       tokenExpiry,
+      encryptedRefreshToken: json.refresh_token
+        ? await encrypt(json.refresh_token)
+        : undefined,
     });
 
     return newAccessToken;

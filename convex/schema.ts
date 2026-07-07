@@ -152,6 +152,11 @@ export default defineSchema({
     tokenExpiry: v.optional(v.number()),
     scopes: v.array(v.string()),
     isActive: v.boolean(),
+    // Set when token refresh fails hard (revoked / expired refresh token).
+    // Surfaced in the UI as a "reconnect this account" prompt — without it,
+    // a dead account just silently stops syncing. Cleared on successful
+    // refresh or OAuth reconnect.
+    needsReauth: v.optional(v.boolean()),
     // UI accent color for this account.
     color: v.optional(v.string()),
     // Discovered "send as" aliases (Gmail), refreshed periodically.
@@ -760,12 +765,28 @@ export default defineSchema({
     emailCount: v.number(),
     isAutoLearned: v.boolean(),
     personId: v.optional(v.id("persons")),
+    // Derived lookup keys so person-matching (findMatchingPerson) is two
+    // indexed point-reads instead of two full-table scans per new contact —
+    // the scans were O(N²) row reads during the recipient backfill.
+    // normalizedName = normalizeName(name); normalizedLocalPart =
+    // emailPrefix(email). Maintained on every name/email write; legacy rows
+    // filled by contacts.backfillSearchFields.
+    normalizedName: v.optional(v.string()),
+    normalizedLocalPart: v.optional(v.string()),
   })
     .index("by_user_email", ["userId", "email"])
     .index("by_user_name", ["userId", "name"])
     .index("by_user_company", ["userId", "company"])
     .index("by_user_lastEmailed", ["userId", "lastEmailed"])
-    .index("by_person", ["personId"]),
+    .index("by_user_normalizedName", ["userId", "normalizedName"])
+    .index("by_user_normalizedLocalPart", ["userId", "normalizedLocalPart"])
+    .index("by_person", ["personId"])
+    // Compose-autocomplete matches names via search (prefix on last token)
+    // instead of collecting the whole table per keystroke.
+    .searchIndex("search_name", {
+      searchField: "name",
+      filterFields: ["userId"],
+    }),
 
   // ───────────────────────────────────────────────────────────────────────────
   // Smart triage

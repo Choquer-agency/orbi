@@ -5,7 +5,8 @@ import {
   useAddTrackingExclusion,
   useDeleteTrackingExclusion,
 } from '../../hooks/useTrackingExclusions';
-import { api } from '../../lib/api';
+import { useConvex } from 'convex/react';
+import { api as convexApi } from '../../../../../convex/_generated/api';
 
 const PUBLIC_DOMAINS = new Set([
   'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com',
@@ -21,6 +22,7 @@ interface Suggestion {
 }
 
 export function TrackingExclusions() {
+  const convex = useConvex();
   const { data: exclusions } = useTrackingExclusions();
   const addExclusion = useAddTrackingExclusion();
   const deleteExclusion = useDeleteTrackingExclusion();
@@ -56,9 +58,11 @@ export function TrackingExclusions() {
       return;
     }
     try {
-      const contacts = await api.get<{ id: string; email: string; name: string | null; company: string | null }[]>(
-        `/contacts/autocomplete?q=${encodeURIComponent(query)}`
-      );
+      // Was a dead REST-stub call (lib/api.ts throws on every method since
+      // the Convex migration) — this autocomplete never worked until now.
+      const contacts = await convex.query(convexApi.contacts.autocomplete, {
+        q: query,
+      });
       const items: Suggestion[] = [];
       const seenDomains = new Set<string>();
 
@@ -89,7 +93,7 @@ export function TrackingExclusions() {
       setSuggestions([]);
       setShowDropdown(false);
     }
-  }, []);
+  }, [convex]);
 
   const handleInputChange = (value: string) => {
     setEmail(value);

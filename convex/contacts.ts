@@ -22,7 +22,11 @@ import { v } from "convex/values";
 import type { Doc, Id } from "./_generated/dataModel";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
-import { assignOrCreatePerson } from "./lib/personMerge";
+import {
+  assignOrCreatePerson,
+  normalizeName,
+  emailPrefix,
+} from "./lib/personMerge";
 import {
   extractNameFromBody,
   looksLikeEmailLocalPart,
@@ -131,7 +135,10 @@ export const update = mutation({
       throw new Error("Contact not found");
     }
     const updates: Partial<Doc<"contacts">> = {};
-    if (args.name !== undefined) updates.name = args.name ?? undefined;
+    if (args.name !== undefined) {
+      updates.name = args.name ?? undefined;
+      updates.normalizedName = args.name ? normalizeName(args.name) : undefined;
+    }
     if (args.company !== undefined) updates.company = args.company ?? undefined;
     if (args.title !== undefined) updates.title = args.title ?? undefined;
     if (args.phone !== undefined) updates.phone = args.phone ?? undefined;
@@ -188,18 +195,35 @@ export const autocomplete = query({
     const userId = await requireUser(ctx);
     const term = q.trim();
     if (!term) return [];
+    const termLower = term.toLowerCase();
 
-    const all = await ctx.db
+    // Indexed lookups instead of collecting the whole contacts table per
+    // keystroke (~1-2MB × keystrokes × concurrent composers):
+    //  - email prefix via the by_user_email index range
+    //  - name via the search index (prefix-matches the final token)
+    const emailHits = await ctx.db
       .query("contacts")
-      .withIndex("by_user_email", (q2) => q2.eq("userId", userId))
-      .collect();
+      .withIndex("by_user_email", (q2) =>
+        q2
+          .eq("userId", userId)
+          .gte("email", termLower)
+          .lt("email", `${termLower}￿`),
+      )
+      .take(15);
+    const nameHits = await ctx.db
+      .query("contacts")
+      .withSearchIndex("search_name", (q2) =>
+        q2.search("name", term).eq("userId", userId),
+      )
+      .take(15);
 
-    const matching = all.filter(
-      (c) =>
-        ciIncludes(c.name, term) ||
-        ciIncludes(c.email, term) ||
-        ciIncludes(c.company, term),
-    );
+    const seen = new Set<string>();
+    const matching: typeof emailHits = [];
+    for (const c of [...emailHits, ...nameHits]) {
+      if (seen.has(c._id)) continue;
+      seen.add(c._id);
+      matching.push(c);
+    }
     matching.sort((a, b) => b.emailCount - a.emailCount);
     return matching.slice(0, 10).map((c) => ({
       id: c._id,
@@ -337,7 +361,17 @@ export const upsertFromEmail = internalMutation({
       const patch: Partial<Doc<"contacts">> = {};
 
       if (args.isOutbound) patch.emailCount = existing.emailCount + 1;
-      if (!existing.lastEmailed || args.receivedAt > existing.lastEmailed) {
+      // Throttle lastEmailed to daily granularity. This runs for EVERY new
+      // email; patching the row each time invalidated the query cache for
+      // nameMap/autocomplete/contacts.list — which every open client then
+      // re-read in full (the same write-amplification shape that caused two
+      // prior cost incidents). Recency ranking doesn't need sub-day
+      // precision.
+      const LAST_EMAILED_GRANULARITY_MS = 24 * 60 * 60 * 1000;
+      if (
+        args.receivedAt >
+        (existing.lastEmailed ?? 0) + LAST_EMAILED_GRANULARITY_MS
+      ) {
         patch.lastEmailed = args.receivedAt;
       }
       if (!existing.name && participantName) patch.name = participantName;
@@ -349,6 +383,13 @@ export const upsertFromEmail = internalMutation({
         !looksLikeEmailLocalPart(participantName)
       ) {
         patch.name = participantName;
+      }
+      // Keep the derived person-matching keys in sync (see schema comment).
+      if (typeof patch.name === "string") {
+        patch.normalizedName = normalizeName(patch.name);
+      }
+      if (existing.normalizedLocalPart === undefined) {
+        patch.normalizedLocalPart = emailPrefix(email);
       }
       if (existing.isAutoLearned && args.isSender) {
         if (!existing.company && args.sigCompany) patch.company = args.sigCompany;
@@ -369,6 +410,10 @@ export const upsertFromEmail = internalMutation({
         lastEmailed: args.receivedAt,
         emailCount: args.isOutbound ? 1 : 0,
         isAutoLearned: true,
+        normalizedName: participantName
+          ? normalizeName(participantName)
+          : undefined,
+        normalizedLocalPart: emailPrefix(email),
       });
     }
 
@@ -533,5 +578,48 @@ export const _backfillRecipientsChunk = internalMutation({
       contactBackfillCount: count,
       contactBackfillCompletedAt: Date.now(),
     });
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One-shot backfill of the derived person-matching keys (normalizedName /
+// normalizedLocalPart) on legacy contact rows. Batched cursor walk;
+// self-reschedules until done. Kick off with:
+//   npx convex run contacts:backfillSearchFields '{}'
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const backfillSearchFields = internalMutation({
+  args: { cursor: v.optional(v.number()) },
+  handler: async (ctx, { cursor }) => {
+    const rows = await ctx.db
+      .query("contacts")
+      .withIndex("by_creation_time", (q) =>
+        cursor !== undefined ? q.gt("_creationTime", cursor) : q,
+      )
+      .order("asc")
+      .take(200);
+    let patched = 0;
+    for (const c of rows) {
+      const patch: Partial<Doc<"contacts">> = {};
+      if (c.normalizedName === undefined && c.name) {
+        patch.normalizedName = normalizeName(c.name);
+      }
+      if (c.normalizedLocalPart === undefined) {
+        patch.normalizedLocalPart = emailPrefix(c.email);
+      }
+      if (Object.keys(patch).length > 0) {
+        await ctx.db.patch(c._id, patch);
+        patched++;
+      }
+    }
+    if (rows.length > 0) {
+      await ctx.scheduler.runAfter(
+        1_000,
+        internal.contacts.backfillSearchFields,
+        { cursor: rows[rows.length - 1]._creationTime },
+      );
+      return { patched, status: "continuing" };
+    }
+    return { patched, status: "done" };
   },
 });

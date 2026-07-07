@@ -158,10 +158,19 @@ export const refreshToken = internalAction({
     });
     if (!res.ok) {
       const txt = await res.text();
+      // invalid_grant = the refresh token itself is dead (revoked, expired,
+      // password changed). No retry can fix that — flag the account so the
+      // UI prompts a reconnect instead of failing silently every minute.
+      if (res.status === 400 && /invalid_grant/i.test(txt)) {
+        await ctx.runMutation(internal.oauth.tokenStore.markNeedsReauth, {
+          accountId,
+        });
+      }
       throw new Error(`Microsoft token refresh failed (${res.status}): ${txt}`);
     }
     const json = (await res.json()) as {
       access_token: string;
+      refresh_token?: string;
       expires_in?: number;
     };
 
@@ -175,6 +184,11 @@ export const refreshToken = internalAction({
       accountId,
       encryptedAccessToken: await encrypt(newAccessToken),
       tokenExpiry,
+      // Microsoft ROTATES the refresh token — persist the new one or the
+      // stored token ages out and the account silently stops syncing.
+      encryptedRefreshToken: json.refresh_token
+        ? await encrypt(json.refresh_token)
+        : undefined,
     });
 
     return newAccessToken;

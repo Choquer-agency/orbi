@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { requireUser } from "./lib/auth";
+import { canAccessThread } from "./lib/threadAccessCheck";
 import type { Doc, Id } from "./_generated/dataModel";
 
 const handoffStatus = v.union(
@@ -31,6 +32,12 @@ export const create = mutation({
     const fromUserId = await requireUser(ctx);
     const thread = await ctx.db.get(args.threadId);
     if (!thread) throw new Error("Thread not found");
+    // You can only hand off a thread you can access. Without this check any
+    // authenticated user could grant themselves (or anyone) COLLABORATOR
+    // access to any thread in any teammate's mailbox.
+    if (!(await canAccessThread(ctx, fromUserId, thread))) {
+      throw new Error("Thread not found");
+    }
     const toUser = await ctx.db.get(args.toUserId);
     if (!toUser) throw new Error("Target user not found");
 

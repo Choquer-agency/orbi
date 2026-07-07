@@ -44,6 +44,7 @@ export const list = query({
         email: a.email,
         displayName: a.displayName ?? null,
         isActive: a.isActive,
+        needsReauth: a.needsReauth ?? false,
         lastSyncAt: a.lastSyncAt ?? null,
         color: a.color ?? null,
         aliases: a.aliases ?? [],
@@ -444,6 +445,9 @@ export const _upsertOAuthAccount = internalMutation({
         tokenExpiry: args.tokenExpiry,
         displayName: args.displayName,
         isActive: true,
+        // Reconnecting through OAuth is exactly the remedy needsReauth asks
+        // for — clear the flag.
+        needsReauth: undefined,
       });
       return existing._id;
     }

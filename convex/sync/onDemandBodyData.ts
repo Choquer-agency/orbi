@@ -83,9 +83,7 @@ export const _recentEmailIdsPage = internalQuery({
 });
 
 // Persist a fetched body. Idempotent — patches the existing emailBodies row
-// if one is present, otherwise inserts. Mirrors the legacy `_migrateOne`
-// helper in emailBodyMigrateData.ts but lives here so the on-demand path
-// doesn't reach into a "migration" namespace.
+// if one is present, otherwise inserts.
 export const _persistBody = internalMutation({
   args: {
     emailId: v.id("emails"),

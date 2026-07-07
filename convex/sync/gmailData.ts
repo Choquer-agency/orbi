@@ -684,12 +684,15 @@ export const _onNewEmailInserted = internalMutation({
         internal.ai.needsResponse.scoreEmail,
         { emailId, userId: account.userId },
       );
-    } else {
+    } else if (isOutbound) {
       // Outbound: user just replied to a thread, so any open
       // needs-response signal on that thread is resolved. If the in-app
       // send-flow already dismissed it (kind="replied"), this is a no-op;
       // otherwise the user replied from another mailbox/client and we tag
       // it as auto-other-acc.
+      // (A bare `else` here also caught old INBOUND backfill mail — wrongly
+      // dismissing open signals and burning a scheduler job per email; the
+      // Microsoft twin always had the isOutbound guard.)
       await ctx.scheduler.runAfter(
         0,
         internal.ai.needsResponseData._dismissOpenSignalsForThread,

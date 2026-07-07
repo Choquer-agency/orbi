@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { requireUser } from "./lib/auth";
+import { canAccessThread } from "./lib/threadAccessCheck";
 import type { Doc, Id } from "./_generated/dataModel";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -53,21 +54,39 @@ async function bumpReactionCount(
 export const list = query({
   args: { threadId: v.id("threads") },
   handler: async (ctx, { threadId }) => {
-    await requireUser(ctx);
+    const userId = await requireUser(ctx);
+    const thread = await ctx.db.get(threadId);
+    if (!thread) throw new Error("Thread not found");
+    // Internal comments are private to the mailbox owner + explicit
+    // collaborators — requireUser alone let any teammate read them by id.
+    if (!(await canAccessThread(ctx, userId, thread))) {
+      throw new Error("Thread not found");
+    }
     const comments = await ctx.db
       .query("threadComments")
       .withIndex("by_thread", (q) => q.eq("threadId", threadId))
       .order("asc")
       .collect();
 
-    // Hydrate mentions + reactions per comment. Author info is denormalized.
+    // Hydrate mentions once for the whole thread and group by comment — the
+    // old per-comment `.filter()` re-read every mention row for every
+    // comment (N comments × M mentions doc reads on each reactive re-run).
+    const allMentions = await ctx.db
+      .query("threadMentions")
+      .withIndex("by_thread", (q) => q.eq("threadId", threadId))
+      .collect();
+    const mentionsByComment = new Map<string, typeof allMentions>();
+    for (const m of allMentions) {
+      const key = String(m.commentId);
+      const bucket = mentionsByComment.get(key);
+      if (bucket) bucket.push(m);
+      else mentionsByComment.set(key, [m]);
+    }
+
+    // Hydrate reactions per comment. Author info is denormalized.
     const data = await Promise.all(
       comments.map(async (c) => {
-        const mentions = await ctx.db
-          .query("threadMentions")
-          .withIndex("by_thread", (q) => q.eq("threadId", threadId))
-          .filter((q) => q.eq(q.field("commentId"), c._id))
-          .collect();
+        const mentions = mentionsByComment.get(String(c._id)) ?? [];
         const mentionsHydrated = await Promise.all(
           mentions.map(async (m) => {
             const u = (await ctx.db.get(m.mentionedUserId)) as Doc<"users"> | null;
@@ -131,9 +150,13 @@ export const add = mutation({
   handler: async (ctx, { threadId, bodyHtml, bodyText }) => {
     const userId = await requireUser(ctx);
 
-    // Verify thread exists
     const thread = await ctx.db.get(threadId);
     if (!thread) throw new Error("Thread not found");
+    // Writing comments (and @mention access grants) requires access to the
+    // thread — existence alone let any user comment on anyone's mail.
+    if (!(await canAccessThread(ctx, userId, thread))) {
+      throw new Error("Thread not found");
+    }
 
     const author = await lookupAuthor(ctx, userId);
 

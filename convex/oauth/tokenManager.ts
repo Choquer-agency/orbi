@@ -79,15 +79,22 @@ export async function decrypt(encryptedText: string): Promise<string> {
 export async function getValidAccessToken(
   ctx: ActionCtx,
   accountId: Id<"mailAccounts">,
+  opts?: { forceRefresh?: boolean },
 ): Promise<string> {
   const account = await ctx.runQuery(internal.mailAccounts._getAccountForToken, {
     accountId,
   });
   if (!account) throw new Error(`Account not found: ${accountId}`);
 
-  // 5-minute buffer matches backend behavior.
+  // 5-minute buffer matches backend behavior. forceRefresh bypasses the
+  // cached-token path — used after a 401, where the token is provably dead
+  // no matter what tokenExpiry claims (revocation, password change).
   const now = Date.now();
-  if (account.tokenExpiry && account.tokenExpiry > now + 5 * 60 * 1000) {
+  if (
+    !opts?.forceRefresh &&
+    account.tokenExpiry &&
+    account.tokenExpiry > now + 5 * 60 * 1000
+  ) {
     return await decrypt(account.accessToken);
   }
 
@@ -131,8 +138,11 @@ export async function withRefreshOn401<T>(
       (err as { status?: number }).status === 401;
     if (!isUnauthorized) throw err;
 
-    // Force a refresh by clearing the cached expiry path: just re-fetch.
-    token = await getValidAccessToken(ctx, accountId);
+    // The 401 proves the cached token is dead regardless of its recorded
+    // expiry — actually force the provider refresh. (The old "just
+    // re-fetch" returned the same cached token whenever tokenExpiry still
+    // looked valid, so the retry 401'd identically for up to an hour.)
+    token = await getValidAccessToken(ctx, accountId, { forceRefresh: true });
     return await fn(token);
   }
 }

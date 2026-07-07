@@ -8,7 +8,6 @@
  * @module
  */
 
-import type * as _debug from "../_debug.js";
 import type * as admin_backfillNeedsResponse from "../admin/backfillNeedsResponse.js";
 import type * as admin_refresh3Months from "../admin/refresh3Months.js";
 import type * as admin_rescoreAllOpen from "../admin/rescoreAllOpen.js";
@@ -46,10 +45,6 @@ import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
 import type * as devices from "../devices.js";
 import type * as drafts from "../drafts.js";
-import type * as emailBodyMigrate from "../emailBodyMigrate.js";
-import type * as emailBodyMigrateData from "../emailBodyMigrateData.js";
-import type * as emailBodyReprocess from "../emailBodyReprocess.js";
-import type * as emailBodyReprocessData from "../emailBodyReprocessData.js";
 import type * as emails from "../emails.js";
 import type * as followUps from "../followUps.js";
 import type * as handoffs from "../handoffs.js";
@@ -63,6 +58,7 @@ import type * as lib_promiseDetector from "../lib/promiseDetector.js";
 import type * as lib_safeScan from "../lib/safeScan.js";
 import type * as lib_searchText from "../lib/searchText.js";
 import type * as lib_styleContext from "../lib/styleContext.js";
+import type * as lib_threadAccessCheck from "../lib/threadAccessCheck.js";
 import type * as lib_threadContext from "../lib/threadContext.js";
 import type * as mailAccounts from "../mailAccounts.js";
 import type * as meetings from "../meetings.js";
@@ -82,7 +78,6 @@ import type * as push_deliverData from "../push/deliverData.js";
 import type * as push_onNotification from "../push/onNotification.js";
 import type * as retention from "../retention.js";
 import type * as scheduledEmails from "../scheduledEmails.js";
-import type * as search from "../search.js";
 import type * as searchProvider from "../searchProvider.js";
 import type * as searchProviderData from "../searchProviderData.js";
 import type * as signatures from "../signatures.js";
@@ -118,7 +113,6 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
-  _debug: typeof _debug;
   "admin/backfillNeedsResponse": typeof admin_backfillNeedsResponse;
   "admin/refresh3Months": typeof admin_refresh3Months;
   "admin/rescoreAllOpen": typeof admin_rescoreAllOpen;
@@ -156,10 +150,6 @@ declare const fullApi: ApiFromModules<{
   dashboard: typeof dashboard;
   devices: typeof devices;
   drafts: typeof drafts;
-  emailBodyMigrate: typeof emailBodyMigrate;
-  emailBodyMigrateData: typeof emailBodyMigrateData;
-  emailBodyReprocess: typeof emailBodyReprocess;
-  emailBodyReprocessData: typeof emailBodyReprocessData;
   emails: typeof emails;
   followUps: typeof followUps;
   handoffs: typeof handoffs;
@@ -173,6 +163,7 @@ declare const fullApi: ApiFromModules<{
   "lib/safeScan": typeof lib_safeScan;
   "lib/searchText": typeof lib_searchText;
   "lib/styleContext": typeof lib_styleContext;
+  "lib/threadAccessCheck": typeof lib_threadAccessCheck;
   "lib/threadContext": typeof lib_threadContext;
   mailAccounts: typeof mailAccounts;
   meetings: typeof meetings;
@@ -192,7 +183,6 @@ declare const fullApi: ApiFromModules<{
   "push/onNotification": typeof push_onNotification;
   retention: typeof retention;
   scheduledEmails: typeof scheduledEmails;
-  search: typeof search;
   searchProvider: typeof searchProvider;
   searchProviderData: typeof searchProviderData;
   signatures: typeof signatures;

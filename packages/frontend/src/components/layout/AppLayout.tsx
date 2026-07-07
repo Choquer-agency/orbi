@@ -15,6 +15,7 @@ import { FailedSendsBanner } from '../compose/FailedSendsBanner';
 import { BiometricLockOverlay } from '../ui/BiometricLockOverlay';
 
 import { OfflineBanner } from '../ui/OfflineBanner';
+import { ReauthBanner } from '../ui/ReauthBanner';
 
 const AiChatPanel = lazy(() =>
   import('../ai-chat/AiChatPanel').then((module) => ({ default: module.AiChatPanel })),
@@ -150,6 +151,7 @@ export function AppLayout() {
       {/* Offline indicator — fixed below titlebar */}
       <div className={`absolute inset-x-0 z-30 ${isCompact ? 'top-0' : 'top-[38px]'}`}>
         <OfflineBanner />
+        <ReauthBanner />
       </div>
 
       {/* Undo Send overlay */}
