@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
+import { reportMutationError } from '../lib/mutationErrors';
 
 interface SyncStatusData {
   historicalSyncStatus: 'IDLE' | 'IN_PROGRESS' | 'COMPLETED' | 'FAILED';
@@ -121,7 +122,7 @@ export function useStartContactBackfill() {
   const mutate = (accountId: string, options?: MutateOptions) => {
     mutateAsync(accountId).then(
       (res) => options?.onSuccess?.(res),
-      (err) => options?.onError?.(err),
+      (err) => reportMutationError(err, options?.onError),
     );
   };
   return { mutate, mutateAsync, isPending };
@@ -141,7 +142,7 @@ export function useStartHistoricalSync() {
   const mutate = (accountId: string, options?: MutateOptions) => {
     mutateAsync(accountId).then(
       (res) => options?.onSuccess?.(res),
-      (err) => options?.onError?.(err),
+      (err) => reportMutationError(err, options?.onError),
     );
   };
   return { mutate, mutateAsync, isPending };

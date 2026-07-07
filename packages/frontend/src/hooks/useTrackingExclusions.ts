@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation, useConvexAuth } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
+import { reportMutationError } from '../lib/mutationErrors';
 
 type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
 
@@ -52,7 +53,7 @@ export function useAddTrackingExclusion() {
   const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
     mutateAsync(arg).then(
       (res) => options?.onSuccess?.(res),
-      (err) => options?.onError?.(err),
+      (err) => reportMutationError(err, options?.onError),
     );
   };
   return { mutate, mutateAsync, isPending };
@@ -80,7 +81,7 @@ export function useDeleteTrackingExclusion() {
   const mutate = (arg: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
     mutateAsync(arg).then(
       (res) => options?.onSuccess?.(res),
-      (err) => options?.onError?.(err),
+      (err) => reportMutationError(err, options?.onError),
     );
   };
   return { mutate, mutateAsync, isPending };

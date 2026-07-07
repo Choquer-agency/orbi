@@ -1775,13 +1775,18 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;');
-    await addComment.mutateAsync({
-      threadId: selectedThreadId,
-      bodyHtml: `<p>${escapedText}</p>`,
-      bodyText: fullText,
-    });
-    setNewComment('');
-    setTaggedMembers([]);
+    try {
+      await addComment.mutateAsync({
+        threadId: selectedThreadId,
+        bodyHtml: `<p>${escapedText}</p>`,
+        bodyText: fullText,
+      });
+      setNewComment('');
+      setTaggedMembers([]);
+    } catch (err: any) {
+      console.error('Comment failed:', err);
+      toast.error(err?.message || 'Failed to post note');
+    }
   };
 
   const handleCommentKeyDown = (e: React.KeyboardEvent) => {

@@ -11,6 +11,7 @@ import { usePushNotifications } from '../../hooks/usePushNotifications';
 import { useBiometricLock } from '../../hooks/useBiometricLock';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { UndoSendToast } from '../compose/UndoSendToast';
+import { FailedSendsBanner } from '../compose/FailedSendsBanner';
 import { BiometricLockOverlay } from '../ui/BiometricLockOverlay';
 
 import { OfflineBanner } from '../ui/OfflineBanner';
@@ -153,6 +154,9 @@ export function AppLayout() {
 
       {/* Undo Send overlay */}
       <UndoSendToast />
+
+      {/* Failed sends — persistent until retried/discarded/dismissed */}
+      <FailedSendsBanner />
 
       {/* Settings modal */}
       {settingsOpen && (

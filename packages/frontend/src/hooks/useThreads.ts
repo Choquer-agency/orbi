@@ -8,6 +8,7 @@ import {
   saveCachedPage,
 } from '../lib/threadListCache';
 import {
+import { reportMutationError } from '../lib/mutationErrors';
   getCachedThreadSync,
   loadCachedThread,
   saveCachedThread,
@@ -457,7 +458,7 @@ export function useUpdateThread() {
     mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
       mutateAsync(args).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
@@ -493,7 +494,7 @@ export function useSnoozeThread() {
     mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
       mutateAsync(args).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
@@ -519,7 +520,7 @@ export function useUnsnoozeThread() {
     mutate: (id: Id<'threads'> | string, options?: MutateOptions) => {
       mutateAsync(id).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,

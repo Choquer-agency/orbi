@@ -745,8 +745,9 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       });
       setEditingScheduledId(null);
       onClose();
-    } catch (err) {
+    } catch (err: any) {
       console.error('Save failed:', err);
+      toast.error(err?.message || 'Failed to save scheduled email');
     } finally {
       setSending(false);
     }

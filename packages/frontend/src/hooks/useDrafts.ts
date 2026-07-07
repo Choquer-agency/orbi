@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
+import { reportMutationError } from '../lib/mutationErrors';
 
 type MutateOptions = { onSuccess?: (data: any) => void; onError?: (err: any) => void };
 
@@ -63,7 +64,7 @@ export function useSaveDraft() {
     mutate: (params: SaveDraftParams, options?: MutateOptions) => {
       mutateAsync(params).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
@@ -89,7 +90,7 @@ export function useDeleteDraft() {
     mutate: (draftId: Id<'emails'> | string, options?: MutateOptions) => {
       mutateAsync(draftId).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
@@ -121,7 +122,7 @@ export function useSendDraft() {
     mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
       mutateAsync(args).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,

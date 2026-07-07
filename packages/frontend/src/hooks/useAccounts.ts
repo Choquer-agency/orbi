@@ -3,6 +3,7 @@ import { useQuery, useMutation, useAction } from 'convex/react';
 import { api } from '../../../../convex/_generated/api';
 import type { Id } from '../../../../convex/_generated/dataModel';
 import { isNative } from '../lib/platform';
+import { reportMutationError } from '../lib/mutationErrors';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Drop-in TanStack Query → Convex replacement (mailAccounts CRUD).
@@ -46,7 +47,7 @@ export function useDeleteAccount() {
     mutate: (id: Id<'mailAccounts'> | string, options?: MutateOptions) => {
       mutateAsync(id).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
@@ -97,7 +98,7 @@ export function useStartOAuth() {
     mutate: (provider: 'gmail' | 'microsoft', options?: MutateOptions) => {
       mutateAsync(provider).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
@@ -129,7 +130,7 @@ export function useUpdateAccount() {
     mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
       mutateAsync(args).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
@@ -159,7 +160,7 @@ export function useSetAccountColor() {
     mutate: (args: Parameters<typeof mutateAsync>[0], options?: MutateOptions) => {
       mutateAsync(args).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
@@ -184,7 +185,7 @@ export function useSyncAccount() {
     mutate: (id: Id<'mailAccounts'> | string, options?: MutateOptions) => {
       mutateAsync(id).then(
         (res) => options?.onSuccess?.(res),
-        (err) => options?.onError?.(err),
+        (err) => reportMutationError(err, options?.onError),
       );
     },
     mutateAsync,
