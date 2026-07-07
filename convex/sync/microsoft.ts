@@ -552,10 +552,12 @@ export const syncIncremental = internalAction({
             err instanceof GraphHttpError &&
             (err.status === 410 || err.graphCode === "SyncStateNotFound")
           ) {
-            // Delta token expired → fall through to full re-seed.
+            // Delta token expired → actually clear the dead cursor (the
+            // plain `syncCursor: undefined` form was a silent no-op), then
+            // fall through to full re-seed.
             await ctx.runMutation(
               internal.sync.microsoftData._setSyncCursor,
-              { accountId, syncCursor: undefined },
+              { accountId, clear: true },
             );
           } else {
             throw err;
@@ -584,6 +586,7 @@ export const syncIncremental = internalAction({
         url = page["@odata.nextLink"]!;
       }
 
+      let failedConversations = 0;
       for (const [conversationId, msgs] of conversationGroups) {
         try {
           await syncConversationMessages(
@@ -594,11 +597,21 @@ export const syncIncremental = internalAction({
             cctx,
           );
         } catch (err: unknown) {
+          failedConversations++;
           console.error(
             `[microsoft-sync] Conversation ${conversationId} failed:`,
             err instanceof Error ? err.message : err,
           );
         }
+      }
+
+      // Don't snapshot a delta cursor past conversations that never landed —
+      // the next run redoes the full seed and retries them (upserts dedupe).
+      if (failedConversations > 0) {
+        console.error(
+          `[microsoft-sync] ${accountId}: ${failedConversations} conversation(s) failed during full sync — not snapshotting delta cursor`,
+        );
+        return;
       }
 
       // Capture a fresh deltaLink so the next run is incremental.
@@ -704,7 +717,12 @@ async function runDeltaPagination(
     }
   }
 
-  // Upsert remaining changes.
+  // Upsert remaining changes. Failures must not advance the cursor: a delta
+  // link persisted past a conversation that never landed means those
+  // messages are gone for good. Leaving the old cursor makes next minute's
+  // sync replay the same delta (Graph delta tokens are stable), and the
+  // fingerprint-idempotent upserts skip what already succeeded.
+  let failedConversations = 0;
   for (const [conversationId, msgs] of conversationGroups) {
     try {
       await syncConversationMessages(
@@ -715,11 +733,19 @@ async function runDeltaPagination(
         cctx,
       );
     } catch (err: unknown) {
+      failedConversations++;
       console.error(
         `[microsoft-sync] Delta conversation ${conversationId} failed:`,
         err instanceof Error ? err.message : err,
       );
     }
+  }
+
+  if (failedConversations > 0) {
+    console.error(
+      `[microsoft-sync] ${cctx.accountId}: ${failedConversations} conversation(s) failed — keeping old delta cursor; will retry next tick`,
+    );
+    return;
   }
 
   // Persist new cursor.

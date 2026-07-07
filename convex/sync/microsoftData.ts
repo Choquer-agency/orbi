@@ -83,10 +83,21 @@ export const _setSyncCursor = internalMutation({
     accountId: v.id("mailAccounts"),
     syncCursor: v.optional(v.string()),
     lastSyncAt: v.optional(v.number()),
+    // Explicitly wipe the cursor (delta token expired / 410). Without this
+    // flag, `syncCursor: undefined` is treated as "no change" by the
+    // cache-preserving guard below — so expired cursors could never actually
+    // be cleared and the account would re-hit the dead token every minute.
+    clear: v.optional(v.boolean()),
   },
-  handler: async (ctx, { accountId, syncCursor, lastSyncAt }) => {
+  handler: async (ctx, { accountId, syncCursor, lastSyncAt, clear }) => {
     const existing = await ctx.db.get(accountId);
     if (!existing) return;
+    if (clear) {
+      if (existing.syncCursor !== undefined) {
+        await ctx.db.patch(accountId, { syncCursor: undefined });
+      }
+      return;
+    }
     // Only write when the cursor advanced — writing mailAccounts every minute
     // (even on no-change syncs) invalidated the cache for every query that
     // reads accounts (thread list, unread, drafts), causing constant full

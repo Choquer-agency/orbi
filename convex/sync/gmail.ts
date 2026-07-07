@@ -683,8 +683,12 @@ export const _continueSync = internalAction({
       v.literal("history"),
       v.literal("initial"),
     ),
+    // True when an earlier page of this history pagination had thread
+    // fetches fail — carried forward so the final page knows not to advance
+    // the cursor past mail that was never persisted.
+    hadFailures: v.optional(v.boolean()),
   },
-  handler: async (ctx, { accountId, pageToken, mode }) => {
+  handler: async (ctx, { accountId, pageToken, mode, hadFailures }) => {
     const cursorInfo = await ctx.runQuery(
       internal.sync.gmailData._getSyncCursor,
       { accountId },
@@ -711,6 +715,7 @@ export const _continueSync = internalAction({
           pageToken,
           startHistoryId: cursorInfo.syncCursor!,
           userEmails: account.userEmails,
+          hadFailures: hadFailures ?? false,
         });
       } else {
         await runInitialChunk(ctx, {
@@ -754,9 +759,11 @@ async function runHistoryChunk(
     pageToken: string | undefined;
     startHistoryId: string;
     userEmails: string[];
+    hadFailures: boolean;
   },
 ): Promise<void> {
-  const { accountId, pageToken, startHistoryId, userEmails } = args;
+  const { accountId, pageToken, startHistoryId, userEmails, hadFailures } =
+    args;
 
   const data: GmailHistoryResponse = await withRefreshOn401(
     ctx,
@@ -795,8 +802,11 @@ async function runHistoryChunk(
     }
   }
 
-  // Process this page's worth of thread IDs in one chunk. Each thread fetch
-  // is small enough; if it ever times out, raise THREADS_PER_CHUNK awareness.
+  // Process this page's worth of thread IDs. A failure on one thread must
+  // not stop the rest — but it also must NOT be forgotten: advancing the
+  // cursor past a failed thread means those messages are never fetched
+  // again (the old behavior — permanently lost mail on a transient 429/500).
+  let failedThreads = 0;
   const ids = [...changedThreadIds];
   for (let i = 0; i < ids.length; i += THREADS_PER_CHUNK) {
     const slice = ids.slice(i, i + THREADS_PER_CHUNK);
@@ -804,35 +814,66 @@ async function runHistoryChunk(
       try {
         await syncOneThread(ctx, accountId, tid, userEmails);
       } catch (err) {
-        // Swallow per-thread failures so the rest of the chunk continues.
-        // (Matches the Prisma worker behavior — failures land in logs.)
+        const status =
+          typeof err === "object" && err !== null && "status" in err
+            ? (err as { status?: number }).status
+            : undefined;
+        if (status === 404) {
+          // Thread deleted between history.list and our fetch — nothing to
+          // sync; safe to move past it.
+          continue;
+        }
+        failedThreads++;
         console.error(`[gmail-sync] thread ${tid} failed:`, err);
       }
     }
   }
+  const anyFailures = hadFailures || failedThreads > 0;
 
   if (data.nextPageToken) {
     await ctx.scheduler.runAfter(0, internal.sync.gmail._continueSync, {
       accountId,
       pageToken: data.nextPageToken,
       mode: "history",
+      hadFailures: anyFailures,
     });
     return;
   }
 
-  // No more pages — fetch profile to stamp the latest historyId.
-  const profile: GmailProfileResponse = await withRefreshOn401(
-    ctx,
-    accountId,
-    async (token) =>
-      await gmailFetch<GmailProfileResponse>(
-        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-        token,
-      ),
-  );
+  if (anyFailures) {
+    // Do NOT advance the cursor: next minute's sync re-lists from the same
+    // startHistoryId and retries the failed threads (upserts are
+    // fingerprint-idempotent, so re-processing the succeeded ones is a
+    // no-op). Transient provider errors clear themselves this way instead
+    // of costing mail.
+    console.error(
+      `[gmail-sync] ${accountId}: leaving cursor at ${startHistoryId} — thread fetches failed this pass; will retry next tick`,
+    );
+    return;
+  }
+
+  // No more pages — stamp the historyId reported by the history.list
+  // response itself. (Previously this fetched /profile and stamped ITS
+  // historyId, which is newer than the last processed change: any message
+  // arriving between the final history page and the profile call fell below
+  // the stamped cursor and was never synced — a per-minute lost-mail
+  // window.)
+  let cursorToStamp = data.historyId;
+  if (!cursorToStamp) {
+    const profile: GmailProfileResponse = await withRefreshOn401(
+      ctx,
+      accountId,
+      async (token) =>
+        await gmailFetch<GmailProfileResponse>(
+          "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+          token,
+        ),
+    );
+    cursorToStamp = profile.historyId;
+  }
   await ctx.runMutation(internal.sync.gmailData._setSyncCursor, {
     accountId,
-    syncCursor: profile.historyId,
+    syncCursor: cursorToStamp,
     lastSyncAt: Date.now(),
   });
 }
@@ -849,6 +890,28 @@ async function runInitialChunk(
   },
 ): Promise<void> {
   const { accountId, pageToken, userEmails } = args;
+
+  // FIRST chunk only: capture the mailbox's current historyId BEFORE we list
+  // anything, and stash it in the progress scratch. That's the cursor we
+  // stamp at the end — so mail arriving WHILE the initial pull runs is
+  // above the cursor and gets replayed by the first incremental sync.
+  // (Previously the cursor came from a profile call made AFTER processing,
+  // silently skipping anything that arrived in between.)
+  if (!pageToken) {
+    const profile: GmailProfileResponse = await withRefreshOn401(
+      ctx,
+      accountId,
+      async (token) =>
+        await gmailFetch<GmailProfileResponse>(
+          "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+          token,
+        ),
+    );
+    await ctx.runMutation(internal.sync.gmailData._setHistoricalProgress, {
+      accountId,
+      progress: { _initialFetched: 0, _initialStartHistoryId: profile.historyId },
+    });
+  }
 
   const list: GmailThreadListResponse = await withRefreshOn401(
     ctx,
@@ -869,7 +932,15 @@ async function runInitialChunk(
     try {
       await syncOneThread(ctx, accountId, tid, userEmails);
     } catch (err) {
-      console.error(`[gmail-sync] thread ${tid} failed:`, err);
+      // One inline retry; a still-failing thread is logged but doesn't block
+      // the initial sync (unlike incremental, this path must terminate — the
+      // pre-captured start historyId means an incremental replay will pick
+      // up anything recent that failed here anyway).
+      try {
+        await syncOneThread(ctx, accountId, tid, userEmails);
+      } catch (err2) {
+        console.error(`[gmail-sync] initial thread ${tid} failed twice:`, err2);
+      }
     }
   }
 
@@ -879,14 +950,21 @@ async function runInitialChunk(
     internal.sync.gmailData._getSyncCursor,
     { accountId },
   );
-  const fetchedSoFar =
-    (cursorInfo?.historicalSyncProgress as { _initialFetched?: number } | null)
-      ?._initialFetched ?? 0;
+  const progress =
+    (cursorInfo?.historicalSyncProgress as {
+      _initialFetched?: number;
+      _initialStartHistoryId?: string;
+    } | null) ?? null;
+  const fetchedSoFar = progress?._initialFetched ?? 0;
+  const startHistoryId = progress?._initialStartHistoryId;
   const newCount = fetchedSoFar + ids.length;
   if (list.nextPageToken && newCount < INITIAL_THREAD_COUNT) {
     await ctx.runMutation(internal.sync.gmailData._setHistoricalProgress, {
       accountId,
-      progress: { _initialFetched: newCount },
+      progress: {
+        _initialFetched: newCount,
+        _initialStartHistoryId: startHistoryId,
+      },
     });
     await ctx.scheduler.runAfter(0, internal.sync.gmail._continueSync, {
       accountId,
@@ -896,19 +974,24 @@ async function runInitialChunk(
     return;
   }
 
-  // Stamp historyId so next sync goes through the history API.
-  const profile: GmailProfileResponse = await withRefreshOn401(
-    ctx,
-    accountId,
-    async (token) =>
-      await gmailFetch<GmailProfileResponse>(
-        "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-        token,
-      ),
-  );
+  // Stamp the historyId captured BEFORE the pull (fallback: profile now,
+  // for in-flight syncs that started under the old code).
+  let cursorToStamp = startHistoryId;
+  if (!cursorToStamp) {
+    const profile: GmailProfileResponse = await withRefreshOn401(
+      ctx,
+      accountId,
+      async (token) =>
+        await gmailFetch<GmailProfileResponse>(
+          "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+          token,
+        ),
+    );
+    cursorToStamp = profile.historyId;
+  }
   await ctx.runMutation(internal.sync.gmailData._setSyncCursor, {
     accountId,
-    syncCursor: profile.historyId,
+    syncCursor: cursorToStamp,
     lastSyncAt: Date.now(),
   });
   // Clear scratch progress.
