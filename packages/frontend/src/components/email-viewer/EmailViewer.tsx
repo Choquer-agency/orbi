@@ -848,6 +848,13 @@ table { border-collapse: collapse; }
    the author shipped lose the cascade. Same set of height rules. */
 const EMAIL_IFRAME_OVERRIDE_CSS = `
 html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow-y: visible !important; overflow-x: hidden !important; }
+/* Reply-chain quotes: stop cumulative indentation. Deep chains (reply on a
+   reply on a reply…) each add blockquote margins until text renders one word
+   per line. Level 1 keeps a subtle rail for context; deeper levels flatten
+   completely. Content is never hidden — only the indentation is removed. */
+blockquote { margin: 0.5em 0 !important; padding: 0 0 0 0.75em !important; border-left: 2px solid rgba(0,0,0,0.15) !important; }
+blockquote blockquote { margin: 0.25em 0 !important; padding: 0 !important; border-left: none !important; }
+div.gmail_quote, div.gmail_extra { margin: 0 !important; padding: 0 !important; }
 #orbi-email-root { display: block !important; height: auto !important; min-height: 0 !important; transform-origin: top left !important; }
 img, video, canvas, svg { max-width: 100%; height: auto; }
 a, pre { overflow-wrap: anywhere; word-break: break-word; }
@@ -1662,9 +1669,11 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     return () => viewport.removeEventListener('scroll', onScroll);
   }, [selectedThreadId]);
 
-  // Scroll to bottom for multi-email threads, top for single emails.
-  // Email bodies resize after iframe/image load, so retry bottom positioning a
-  // few times on open unless the user has already started scrolling.
+  // On open, pin the NEWEST message's top to the top of the pane (single
+  // emails just scroll to top). Bodies above it resize as iframes/images
+  // load and shift the layout, so re-anchor a few times unless the user has
+  // already started scrolling. (Scrolling to the absolute bottom used to
+  // land the user mid-thread staring at the END of the last message.)
   useLayoutEffect(() => {
     if (!selectedThreadId || !data?.data) return;
     if (data.data.id !== selectedThreadId) return;
@@ -1678,12 +1687,23 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
 
     let cancelled = false;
     const delays = [0, 80, 220, 500, 1000];
-    const scrollBottom = () => {
+    const anchorNewest = () => {
       if (cancelled || userScrolledRef.current) return;
-      viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
+      const blocks = viewport.querySelectorAll('[data-email-block]');
+      const last = blocks[blocks.length - 1] as HTMLElement | undefined;
+      if (!last) {
+        viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
+        return;
+      }
+      const top =
+        last.getBoundingClientRect().top -
+        viewport.getBoundingClientRect().top +
+        viewport.scrollTop -
+        8;
+      viewport.scrollTo({ top: Math.max(0, top), behavior: 'instant' });
     };
-    scrollBottom();
-    const timers = delays.slice(1).map((delay) => setTimeout(scrollBottom, delay));
+    anchorNewest();
+    const timers = delays.slice(1).map((delay) => setTimeout(anchorNewest, delay));
     return () => {
       cancelled = true;
       timers.forEach(clearTimeout);
@@ -2445,6 +2465,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                 return (
                   <div
                     key={email.id}
+                    data-email-block={email.id}
                     className="relative mb-2 min-w-0 overflow-hidden rounded-xl bg-white px-5 py-4 shadow-sm"
                     style={accentColor ? { borderLeftWidth: '2px', borderLeftColor: accentColor + '60' } : undefined}
                   >
