@@ -1806,25 +1806,20 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   // ── Conversation collapse: default-show only the newest 2 messages (plus
   // anything unread); older ones stack behind a "Show N older messages"
   // pill, then render as compact one-line rows expandable per message.
-  const [olderStackOpen, setOlderStackOpen] = useState(false);
   const [expandedOlderIds, setExpandedOlderIds] = useState<Set<string>>(new Set());
   useEffect(() => {
-    setOlderStackOpen(false);
     setExpandedOlderIds(new Set());
   }, [selectedThreadId]);
   const collapsedEmailInfo = useMemo(() => {
     const emails = (data?.data?.emails ?? []) as any[];
     if (emails.length <= 3) {
-      return { collapsedIds: new Set<string>(), firstCollapsedId: null as string | null };
+      return { collapsedIds: new Set<string>() };
     }
     const keepOpen = new Set(emails.slice(-2).map((e) => e.id));
     const collapsed = emails.filter(
       (e) => !keepOpen.has(e.id) && e.isRead !== false,
     );
-    return {
-      collapsedIds: new Set<string>(collapsed.map((e) => e.id)),
-      firstCollapsedId: (collapsed[0]?.id as string) ?? null,
-    };
+    return { collapsedIds: new Set<string>(collapsed.map((e) => e.id)) };
   }, [data?.data?.emails]);
 
   const timeline = useMemo(() => {
@@ -2502,21 +2497,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                   collapsedEmailInfo.collapsedIds.has(email.id) &&
                   !expandedOlderIds.has(email.id)
                 ) {
-                  if (!olderStackOpen) {
-                    if (email.id !== collapsedEmailInfo.firstCollapsedId) return null;
-                    const hiddenCount = collapsedEmailInfo.collapsedIds.size;
-                    return (
-                      <button
-                        key="older-stack"
-                        type="button"
-                        onClick={() => setOlderStackOpen(true)}
-                        className="mb-2 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-white/60 px-5 py-2 text-[12px] font-medium text-text-secondary shadow-sm transition-colors hover:bg-white hover:text-text-primary"
-                      >
-                        <ChevronDown className="h-3.5 w-3.5" />
-                        Show {hiddenCount} older {hiddenCount === 1 ? 'message' : 'messages'}
-                      </button>
-                    );
-                  }
                   return (
                     <button
                       key={email.id}
