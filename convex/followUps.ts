@@ -430,3 +430,45 @@ export const _expireAllWatching = internalMutation({
     return { expired: watching.length };
   },
 });
+
+// Purge every artifact of the 2026-07-08 draft flood: followUpEvents rows
+// (draft bodies), the ~3.5k "Follow-up suggested" bell notifications, and
+// the draftBody/draftTone fields parked on watch rows. Batched +
+// self-rescheduling. Run: npx convex run --prod followUps:_purgeFollowUpArtifacts '{}'
+export const _purgeFollowUpArtifacts = internalMutation({
+  args: {},
+  handler: async (ctx): Promise<{ events: number; notifications: number; watchesCleared: number; done: boolean }> => {
+    const BATCH = 300;
+    let events = 0;
+    let notifs = 0;
+    let watchesCleared = 0;
+
+    const eventRows = await ctx.db.query("followUpEvents").take(BATCH);
+    for (const e of eventRows) {
+      await ctx.db.delete(e._id);
+      events++;
+    }
+
+    if (events < BATCH) {
+      const notifRows = await ctx.db.query("notifications").take(2000);
+      for (const n of notifRows) {
+        if (notifs >= BATCH) break;
+        if ((n.title ?? "").startsWith("Follow-up")) {
+          await ctx.db.delete(n._id);
+          notifs++;
+        }
+      }
+    }
+
+    // (Draft bodies live only on followUpEvents — watch rows never held them.)
+    const more = events >= BATCH || notifs >= BATCH || watchesCleared >= BATCH;
+    if (more) {
+      await ctx.scheduler.runAfter(
+        1_000,
+        (internal.followUps as any)._purgeFollowUpArtifacts,
+        {},
+      );
+    }
+    return { events, notifications: notifs, watchesCleared, done: !more };
+  },
+});
