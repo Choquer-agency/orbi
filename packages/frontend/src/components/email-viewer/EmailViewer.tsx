@@ -33,6 +33,7 @@ import {
   Ban,
   ArrowRightLeft,
   ChevronUp,
+  MoreHorizontal,
 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -332,6 +333,122 @@ export function stripQuotedContent(html: string): { body: string; hasQuoted: boo
 
 
 
+
+/**
+ * Mark quoted/forwarded history instead of stripping it.
+ *
+ * The old stripQuotedContent DELETED the quoted chain, and when the heuristic
+ * misfired (emphasis blockquotes, indented lists) real content silently
+ * disappeared — that's why auto-trimming was turned off. This variant only
+ * stamps `data-orbi-quoted` on the detected region; iframe CSS hides it and a
+ * Spark-style ••• toggle reveals it. A false positive costs one click, never
+ * lost content.
+ */
+export function markQuotedContent(html: string): { body: string; hasQuoted: boolean } {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+  const ATTR = 'data-orbi-quoted';
+  let hasQuoted = false;
+
+  const hide = (el: Element) => {
+    if (el.closest(`[${ATTR}]`)) return; // already inside a hidden region
+    el.setAttribute(ATTR, '1');
+    hasQuoted = true;
+  };
+
+  // ── Phase 1: well-known quote wrapper elements ───────────────
+  doc.querySelectorAll([
+    '.gmail_quote', '.gmail_extra', '.gmail_attr',        // Gmail
+    '#appendonsend', '#divRplyFwdMsg', '[name="divRplyFwdMsg"]', // Outlook desktop
+    '.yahoo_quoted',                                      // Yahoo
+    'blockquote[type="cite"]', 'blockquote.cite',         // Apple Mail
+  ].join(',')).forEach((el) => {
+    if ((el.textContent ?? '').trim().length > 0 || el.querySelector('img')) hide(el);
+  });
+
+  // ── Phase 2: scan for quote-start markers, hide from there down ──
+  const quoteStartPatterns = [
+    /On\s+.{5,120}\s+wrote:\s*$/,
+    /wrote:\s*$/,
+    /^-{3,}\s*(Forwarded|Original)\s*(message|Message)/i,
+    /^_{5,}/,
+    /^Begin forwarded message/i,
+  ];
+  const headerPattern = /^From:\s+.+/im;
+  const sentPattern = /^Sent:\s+.+/im;
+
+  let cutEl: Element | null = null;
+  for (const el of Array.from(doc.body.querySelectorAll('*'))) {
+    if (el.closest(`[${ATTR}]`)) continue;
+    const fullText = (el.textContent ?? '').trim();
+    if (fullText.length < 3) continue;
+
+    if (fullText.length < 500 && headerPattern.test(fullText) && sentPattern.test(fullText)) {
+      cutEl = el;
+      break;
+    }
+
+    const directText = Array.from(el.childNodes)
+      .filter((n) => n.nodeType === Node.TEXT_NODE)
+      .map((n) => n.textContent?.trim() ?? '')
+      .join(' ')
+      .trim();
+    if (directText.length < 3) continue;
+
+    if (quoteStartPatterns.some((p) => p.test(directText))) {
+      cutEl = el;
+      break;
+    }
+  }
+
+  if (cutEl) {
+    let target: Element = cutEl;
+    const bodyLen = doc.body.innerHTML.length;
+    while (target.parentElement && target.parentElement !== doc.body) {
+      if (target.parentElement.innerHTML.length > bodyLen * 0.85) break;
+      target = target.parentElement;
+    }
+    let next: Element | null = target;
+    while (next) {
+      hide(next);
+      next = next.nextElementSibling;
+    }
+  }
+
+  // ── Phase 3: trailing blockquotes ────────────────────────────
+  // Only blockquotes with nothing substantive AFTER them — a reply chain ends
+  // the message, while an emphasis blockquote mid-email has real text below it
+  // and is left visible.
+  doc.querySelectorAll('blockquote').forEach((bq) => {
+    if (bq.closest(`[${ATTR}]`)) return;
+    if ((bq.textContent ?? '').trim().length <= 20) return;
+    let after = '';
+    const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+    let n: Node | null;
+    while ((n = walker.nextNode()) && after.trim().length <= 60) {
+      if (bq.contains(n)) continue;
+      if (bq.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING) {
+        if (!(n.parentElement && n.parentElement.closest(`[${ATTR}]`))) after += n.textContent ?? '';
+      }
+    }
+    if (after.trim().length <= 60) hide(bq);
+  });
+
+  // ── Phase 4: <hr> immediately before a "From:" header block ──
+  doc.querySelectorAll('hr').forEach((hr) => {
+    if (hr.closest(`[${ATTR}]`)) return;
+    const nextText = hr.nextElementSibling?.textContent?.trim() ?? '';
+    if (/^(From|De|Von|Da):\s/i.test(nextText)) {
+      let el: Element | null = hr;
+      while (el) {
+        hide(el);
+        el = el.nextElementSibling;
+      }
+    }
+  });
+
+  return { body: hasQuoted ? doc.body.innerHTML : html, hasQuoted };
+}
 
 /**
  * Strip quoted content from plain text emails.
@@ -691,28 +808,38 @@ const CollapsedEmailBody = memo(function CollapsedEmailBody({
   const hasServerPreprocess = !!preBodyHtmlClean;
 
   const { trimmedHtml, trimmedText, hasQuoted, isForwarded } = useMemo(() => {
-    // IMPORTANT: we no longer auto-trim "quoted history". The heuristic was
-    // hiding REAL content — blockquotes/indented lists that senders use for
-    // emphasis got mistaken for a reply chain, so everything after them
-    // silently disappeared (a user missed time-sensitive info this way).
-    // Email correctness > tidiness: always render the complete body. The
-    // server-side `bodyHtmlClean` is sanitized but complete.
-    if (hasServerPreprocess) {
-      const subj = (subject ?? '').trim();
-      const subjectLooksForward = /^\s*(fwd?|fw|tr|wg|rv|enc):/i.test(subj);
-      return {
-        trimmedHtml: preBodyHtmlClean ?? null,
-        trimmedText: null,
-        hasQuoted: false,
-        isForwarded: !!preIsForwarded && subjectLooksForward,
-      };
-    }
-    const forwarded = isForwardedEmail(bodyHtml, bodyText, subject);
-    if (bodyHtml) {
-      return { trimmedHtml: bodyHtml, trimmedText: null, hasQuoted: false, isForwarded: forwarded };
+    // IMPORTANT: quoted history is HIDDEN, never deleted. markQuotedContent
+    // stamps the reply chain with data-orbi-quoted (iframe CSS hides it) and
+    // the ••• toggle below the body reveals the complete original. The old
+    // approach stripped the chain outright and heuristic misfires silently ate
+    // real content — a misfire now costs one click instead.
+    const subj = (subject ?? '').trim();
+    const subjectLooksForward = /^\s*(fwd?|fw|tr|wg|rv|enc):/i.test(subj);
+    const forwarded = hasServerPreprocess
+      ? !!preIsForwarded && subjectLooksForward
+      : isForwardedEmail(bodyHtml, bodyText, subject);
+    const baseHtml = hasServerPreprocess ? preBodyHtmlClean : bodyHtml;
+    if (baseHtml) {
+      try {
+        const marked = markQuotedContent(baseHtml);
+        return {
+          trimmedHtml: marked.body,
+          trimmedText: null,
+          hasQuoted: marked.hasQuoted,
+          isForwarded: forwarded,
+        };
+      } catch {
+        return { trimmedHtml: baseHtml, trimmedText: null, hasQuoted: false, isForwarded: forwarded };
+      }
     }
     if (bodyText) {
-      return { trimmedHtml: null, trimmedText: bodyText, hasQuoted: false, isForwarded: forwarded };
+      const t = stripQuotedText(bodyText);
+      return {
+        trimmedHtml: null,
+        trimmedText: t.hasQuoted ? t.body : bodyText,
+        hasQuoted: t.hasQuoted,
+        isForwarded: forwarded,
+      };
     }
     return { trimmedHtml: null, trimmedText: null, hasQuoted: false, isForwarded: false };
   }, [
@@ -745,7 +872,7 @@ const CollapsedEmailBody = memo(function CollapsedEmailBody({
       resolved = DOMPurify.sanitize(resolved, {
         FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'textarea', 'select', 'button'],
         ADD_TAGS: ['style', 'img'],
-        ADD_ATTR: ['src', 'alt', 'width', 'height', 'border', 'align', 'valign', 'bgcolor', 'background', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'data-cid-email', 'data-cid-attachment', 'referrerpolicy', 'target', 'rel'],
+        ADD_ATTR: ['src', 'alt', 'width', 'height', 'border', 'align', 'valign', 'bgcolor', 'background', 'cellpadding', 'cellspacing', 'colspan', 'rowspan', 'data-cid-email', 'data-cid-attachment', 'data-orbi-quoted', 'referrerpolicy', 'target', 'rel'],
         ADD_DATA_URI_TAGS: ['img'],
       });
       resolved = resolved.replace(/<img /gi, '<img referrerpolicy="no-referrer" ');
@@ -797,12 +924,15 @@ const CollapsedEmailBody = memo(function CollapsedEmailBody({
         <BodyLoadingFallback emailId={emailId} />
       )}
       {hasQuoted && !isForwarded && (
-        <button
-          onClick={() => setShowQuoted(!showQuoted)}
-          className="mt-3 rounded-md border border-border bg-white px-2.5 py-1 text-[11px] font-medium text-text-tertiary transition-colors hover:bg-surface hover:text-text-secondary"
-        >
-          {showQuoted ? 'Hide history' : 'View history'}
-        </button>
+        <Tooltip content={showQuoted ? 'Hide earlier messages' : 'Show earlier messages'}>
+          <button
+            onClick={() => setShowQuoted(!showQuoted)}
+            aria-label={showQuoted ? 'Hide earlier messages' : 'Show earlier messages'}
+            className="mt-3 flex items-center rounded-full bg-surface px-2.5 py-1 text-text-tertiary transition-colors hover:bg-border/60 hover:text-text-secondary"
+          >
+            <MoreHorizontal className="h-3.5 w-3.5" />
+          </button>
+        </Tooltip>
       )}
     </div>
   );
@@ -853,6 +983,9 @@ html, body { height: auto !important; min-height: 0 !important; max-height: none
    reply on a reply…) each add blockquote margins until text renders one word
    per line. Level 1 keeps a subtle rail for context; deeper levels flatten
    completely. Content is never hidden — only the indentation is removed. */
+/* Quoted history marked by markQuotedContent — hidden until the ••• toggle
+   swaps in the unmarked HTML. Hidden, not removed: the full body is intact. */
+[data-orbi-quoted] { display: none !important; }
 blockquote { margin: 0.5em 0 !important; padding: 0 0 0 0.75em !important; border-left: 2px solid rgba(0,0,0,0.15) !important; }
 blockquote blockquote { margin: 0.25em 0 !important; padding: 0 !important; border-left: none !important; }
 div.gmail_quote, div.gmail_extra { margin: 0 !important; padding: 0 !important; }
