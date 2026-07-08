@@ -69,14 +69,17 @@ crons.interval(
 );
 
 // ── Follow-up scan ──────────────────────────────────────────────────────────
-// Hourly scan of followUpWatches: detect replies, advance steps, draft
-// follow-ups via Claude when needed.
-crons.interval(
-  "follow-up-scan",
-  { hours: 1 },
-  (internal.followUps as any).processFollowUpScans,
-  {},
-);
+// DISABLED 2026-07-08: runaway token burn — the scan re-drafted follow-ups
+// continuously (~$0.005/draft, thousands of drafts within hours of the
+// Anthropic balance being topped up; it had been failing silently on the
+// empty balance before that). Re-enable only after the re-draft loop is
+// fixed and per-run spend is capped.
+// crons.interval(
+//   "follow-up-scan",
+//   { hours: 1 },
+//   (internal.followUps as any).processFollowUpScans,
+//   {},
+// );
 
 // ── AI cost alert ──────────────────────────────────────────────────────────
 // Every 15 minutes, check per-feature spend over the last hour. If any feature

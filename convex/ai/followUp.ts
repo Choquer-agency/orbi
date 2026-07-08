@@ -116,6 +116,18 @@ export const checkWatch = internalAction({
       return { status: "expired" };
     }
 
+    // Tripwire (2026-07-08 token-burn incident): a watch that's been sitting
+    // for 30+ days is history, not a follow-up opportunity — expire it
+    // instead of drafting. Prevents any future backlog (downtime, empty API
+    // balance) from turning into thousands of Sonnet calls on resume.
+    const WATCH_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+    if (Date.now() - watch._creationTime > WATCH_MAX_AGE_MS) {
+      await ctx.runMutation(internal.ai.followUpData._markWatchExpired, {
+        watchId,
+      });
+      return { status: "expired" };
+    }
+
     // Draft the follow-up
     const step = Math.min(watch.currentStep, 2);
     const tone = TONE_LABELS[step];

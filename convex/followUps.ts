@@ -362,18 +362,11 @@ export const processFollowUpScans = internalAction({
       processed += 1;
     }
 
-    // If we filled the batch the queue may still have more due watches
-    // (e.g. after downtime). Schedule another tick in 30s so the backlog
-    // drains instead of waiting another hour.
-    if (due.length >= FOLLOW_UP_SCAN_BATCH_LIMIT) {
-      await ctx.scheduler.runAfter(
-        30_000,
-        (internal.followUps as any).processFollowUpScans,
-        {},
-      );
-    }
-
-    return { processed, scheduledFollowUpTick: due.length >= FOLLOW_UP_SCAN_BATCH_LIMIT };
+    // NOTE: the old "drain the backlog every 30s" re-tick is deliberately
+    // gone — it's what turned an accumulated backlog into a ~$20 Sonnet
+    // firehose (2026-07-08). One capped batch per hourly tick; stale watches
+    // now auto-expire in checkWatch instead of drafting.
+    return { processed, scheduledFollowUpTick: false };
   },
 });
 
@@ -411,5 +404,29 @@ export const _notifyDraftReady = internalMutation({
       data: { watchId, eventId: latestDraft._id, threadId: watch.threadId, accountId: thread.accountId },
       isRead: false,
     });
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One-off cleanup (2026-07-08 token-burn incident): the promise detector had
+// auto-created 1,600+ watches (sync backfills included), and the hourly scan
+// drafted follow-ups for every overdue step — 4,053 Sonnet drafts (~$20)
+// within hours of the Anthropic balance being topped up, for a feature with
+// no UI surface. Expire everything; the feature restarts fresh (opt-in, with
+// an actual UI) when rebuilt. Run:
+//   npx convex run --prod followUps:_expireAllWatching '{}'
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const _expireAllWatching = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const watching = await ctx.db
+      .query("followUpWatches")
+      .filter((q) => q.eq(q.field("status"), "WATCHING"))
+      .collect();
+    for (const w of watching) {
+      await ctx.db.patch(w._id, { status: "EXPIRED" });
+    }
+    return { expired: watching.length };
   },
 });
