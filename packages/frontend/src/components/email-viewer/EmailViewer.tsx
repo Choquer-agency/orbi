@@ -833,8 +833,8 @@ html, body {
    "html, body { height: 100% }" which, inside our 60px-seed iframe,
    collapse the body to viewport size and trap scrollHeight at 60px.
    Force auto height so our measurement wrapper can grow freely. */
-html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow: visible !important; }
-body { padding: 0 2px; max-width: 100%; overflow-x: hidden !important; }
+html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow: hidden !important; }
+body { padding: 0 2px; max-width: 100%; }
 img, video, canvas, svg { border: 0; max-width: 100%; height: auto; }
 a { color: #1a73e8; text-decoration: underline; overflow-wrap: anywhere; word-break: break-word; }
 pre { white-space: pre-wrap; }
@@ -847,7 +847,7 @@ table { border-collapse: collapse; }
 /* Override CSS appended AFTER the email body so any inline <style> blocks
    the author shipped lose the cascade. Same set of height rules. */
 const EMAIL_IFRAME_OVERRIDE_CSS = `
-html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow-y: visible !important; overflow-x: hidden !important; }
+html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow: hidden !important; }
 /* Reply-chain quotes: stop cumulative indentation. Deep chains (reply on a
    reply on a reply…) each add blockquote margins until text renders one word
    per line. Level 1 keeps a subtle rail for context; deeper levels flatten
