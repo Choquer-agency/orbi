@@ -43,7 +43,7 @@ const MODEL = "claude-sonnet-4-6";
 // 3 rounds is required because the system prompt instructs the model to
 // chain `search_emails -> get_thread_detail -> answer`. Two rounds drops the
 // final answer.
-const MAX_TOOL_ROUNDS = 3;
+const MAX_TOOL_ROUNDS = 6; // see convex/ai/chat.ts rationale
 const CHAT_MAX_TOKENS = 1536;
 // Shared budget key with the non-streaming chat path.
 const CHAT_FEATURE_KEY = "chat";
@@ -215,6 +215,8 @@ const streamChat = httpAction(async (ctx, req) => {
           system: cachedSystem,
           messages,
           tools: cachedTools,
+          // Last round: no more tools — force the written answer.
+          ...(isLastRound ? { tool_choice: { type: "none" as const } } : {}),
           // Tag for cost attribution in Anthropic Console.
           metadata: { user_id: String(userId) },
         });

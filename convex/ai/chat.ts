@@ -26,7 +26,13 @@ const MODEL = "claude-sonnet-4-6";
 // 3 rounds is required because the system prompt instructs the model to
 // chain `search_emails -> get_thread_detail -> answer`. Two rounds drops the
 // final answer for that flow (the round-2 tool result never gets returned).
-const MAX_TOOL_ROUNDS = 3;
+// 6 rounds: real requests legitimately chain lookup_contact →
+// search_emails → get_thread_detail → (more reads) before answering; at 3
+// the model ran out of budget BEFORE it was allowed to write and the user
+// got the useless "couldn't fully process" fallback. Prompt caching keeps
+// extra rounds cheap. The final round forces tool_choice:none so the model
+// must answer from what it has gathered.
+const MAX_TOOL_ROUNDS = 6;
 const CHAT_MAX_TOKENS = 1536;
 const TOOL_RESULT_MAX_CHARS = 6000;
 const TOOL_RESULT_MAX_ITEMS = 8;
@@ -762,12 +768,15 @@ export const chat = action({
     );
 
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+      const isLastRound = round === MAX_TOOL_ROUNDS - 1;
       const response = await client.messages.create({
         model: MODEL,
         max_tokens: CHAT_MAX_TOKENS,
         system: cachedSystem,
         messages,
         tools: cachedTools,
+        // Last round: no more searching — write the answer.
+        ...(isLastRound ? { tool_choice: { type: "none" as const } } : {}),
         // Tag every Anthropic call with our internal user id so the Anthropic
         // Console line items can be traced back to a row in `aiUsageLogs`.
         metadata: { user_id: String(userId) },
