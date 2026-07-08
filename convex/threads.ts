@@ -909,10 +909,15 @@ export const list = query({
       }
     }
 
-    // Sort by latest thread activity. The inbox should stay conversation-like:
-    // if you send the latest reply, that thread still belongs near the top
-    // instead of being ranked by the older last inbound message.
-    const sortBy = "lastMessageAt" as "lastMessageAt" | "lastReceivedAt";
+    // Sort: the inbox ranks by when THEY last wrote (lastReceivedAt) — your
+    // own reply keeps the thread in place; only an incoming message bumps it
+    // to the top (Bryce 2026-07-08: "Primary is for latest FROM emails").
+    // Sent/Drafts rank by your own activity, so they keep lastMessageAt.
+    // (Date group headers in the UI use the same lastReceivedAt-first key.)
+    const sortBy: "lastMessageAt" | "lastReceivedAt" =
+      folder === "sent" || folder === "drafts"
+        ? "lastMessageAt"
+        : "lastReceivedAt";
     filtered.sort((a, b) => {
       const aV =
         sortBy === "lastReceivedAt"
