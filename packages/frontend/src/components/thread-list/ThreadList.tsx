@@ -249,7 +249,19 @@ export function ThreadList() {
   }, [threads, threadListFilter]);
   threads = filteredThreads;
 
-  const dateGroups = useMemo(() => groupByDate(threads), [threads]);
+  const dateGroups = useMemo(
+    () =>
+      groupByDate(
+        selectedFolder === 'sent'
+          ? threads.map((t: any) => ({
+              ...t,
+              // Sent groups/sorts by when YOU last sent.
+              lastReceivedAt: t.lastSentAt ?? t.lastMessageAt,
+            }))
+          : threads,
+      ),
+    [threads, selectedFolder],
+  );
   const allThreadIds = useMemo(() => {
     const ids: string[] = [];
     for (const group of dateGroups) {

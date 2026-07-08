@@ -575,6 +575,7 @@ export const syncIncremental = internalAction({
         const messages: GraphMessage[] = page.value || [];
         if (messages.length === 0) break;
         for (const msg of messages) {
+          if (!msg.conversationId) continue; // unthreadable Graph item
           if (!conversationGroups.has(msg.conversationId)) {
             conversationGroups.set(msg.conversationId, []);
           }
@@ -691,6 +692,11 @@ async function runDeltaPagination(
         removedIds.push(msg.id);
         continue;
       }
+      // Some Graph delta items (meeting requests, drafts mid-edit) arrive
+      // without a conversationId — they can't be threaded and previously
+      // poisoned the whole delta: the failure held the cursor back, so the
+      // same item re-failed every minute and mail stopped advancing.
+      if (!msg.conversationId) continue;
       if (!conversationGroups.has(msg.conversationId)) {
         conversationGroups.set(msg.conversationId, []);
       }

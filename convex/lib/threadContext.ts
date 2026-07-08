@@ -65,6 +65,8 @@ export async function buildThreadContext(
   const displayedEmails = compactThreadEmails(emails);
   const omittedCount = total - displayedEmails.length;
   const emailBlocks: string[] = [];
+  const MAX_FAT_BODY_READS = 4;
+  let fatBodyReads = 0;
   for (let i = 0; i < displayedEmails.length; i++) {
     const e = displayedEmails[i];
     const dateMs = e.sentAt ?? e.receivedAt;
@@ -91,7 +93,12 @@ export async function buildThreadContext(
       body = searchRow.text.startsWith(e.subject)
         ? searchRow.text.slice(e.subject.length).trim()
         : searchRow.text;
-    } else {
+    } else if (fatBodyReads < MAX_FAT_BODY_READS) {
+      // emailBodies rows can be 1MB+ each (full marketing HTML). On long
+      // threads with several searchText-less emails, unbounded fallback
+      // reads can blow the 16MB per-query limit and kill the whole AI
+      // request — cap them and degrade those emails to their snippet.
+      fatBodyReads++;
       const bodyRow = await ctx.db
         .query("emailBodies")
         .withIndex("by_email", (q) => q.eq("emailId", e._id))

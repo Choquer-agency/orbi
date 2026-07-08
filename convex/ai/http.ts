@@ -499,6 +499,9 @@ const streamChat = httpAction(async (ctx, req) => {
 
       await send({ type: "done" });
     } catch (err) {
+      // Log server-side — the client only shows a generic banner, and
+      // without this line failures were completely invisible in the logs.
+      console.error("[ai-chat] stream failed:", err);
       await send({
         type: "error",
         data: { message: err instanceof Error ? err.message : String(err) },
