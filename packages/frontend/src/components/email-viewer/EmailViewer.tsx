@@ -32,6 +32,7 @@ import {
   ChevronDown,
   Ban,
   ArrowRightLeft,
+  ChevronUp,
 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -2526,6 +2527,25 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                     className="relative mb-2 min-w-0 overflow-hidden rounded-xl bg-white px-5 py-4 shadow-sm"
                     style={accentColor ? { borderLeftWidth: '2px', borderLeftColor: accentColor + '60' } : undefined}
                   >
+                    {/* Collapse toggle — only for older messages the user expanded */}
+                    {collapsedEmailInfo.collapsedIds.has(email.id) && (
+                      <Tooltip content="Collapse message">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedOlderIds((prev) => {
+                              const next = new Set(prev);
+                              next.delete(email.id);
+                              return next;
+                            })
+                          }
+                          className="absolute right-2 top-2 z-10 rounded-md p-1 text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary"
+                          aria-label="Collapse message"
+                        >
+                          <ChevronUp className="h-3.5 w-3.5" />
+                        </button>
+                      </Tooltip>
+                    )}
 
                     {/* Email header — expandable to show full To/Cc/Bcc chips */}
                     {(() => {
