@@ -75,6 +75,11 @@ interface UiState {
   setComposingNew: (v: boolean) => void;
   toggleThreadSelection: (id: string) => void;
   selectThreadRange: (id: string, allThreadIds: string[]) => void;
+  // Rendered thread order, synced by ThreadList — lets removal actions
+  // (delete/archive/snooze) advance selection to the next visible thread.
+  visibleThreadIds: string[];
+  setVisibleThreadIds: (ids: string[]) => void;
+  advanceSelectionAfterRemoval: (removedId: string) => void;
   clearSelection: () => void;
   setSettingsOpen: (open: boolean) => void;
   setSettingsSection: (section: string) => void;
@@ -146,6 +151,24 @@ export const useUiStore = create<UiState>()(
           if (next.has(id)) next.delete(id);
           else next.add(id);
           return { selectedThreadIds: next, lastClickedThreadId: id };
+        }),
+      visibleThreadIds: [],
+      setVisibleThreadIds: (ids) => set({ visibleThreadIds: ids }),
+      advanceSelectionAfterRemoval: (removedId) =>
+        set((s) => {
+          if (s.selectedThreadId !== removedId) return {};
+          const ids = s.visibleThreadIds;
+          const idx = ids.indexOf(removedId);
+          // Prefer the next thread down, then the previous, then nothing.
+          const next =
+            (idx >= 0 ? ids[idx + 1] : undefined) ??
+            (idx > 0 ? ids[idx - 1] : undefined) ??
+            null;
+          return {
+            selectedThreadId: next,
+            lastClickedThreadId: next,
+            ...(next ? {} : { mobileActiveView: 'list' as const }),
+          };
         }),
       selectThreadRange: (id, allThreadIds) =>
         set((s) => {

@@ -260,6 +260,13 @@ export function ThreadList() {
     return ids;
   }, [dateGroups]);
 
+  // Publish the rendered order so removal actions (delete/archive/snooze)
+  // can advance selection to the next visible thread.
+  const setVisibleThreadIds = useUiStore((s) => s.setVisibleThreadIds);
+  useEffect(() => {
+    setVisibleThreadIds(allThreadIds);
+  }, [allThreadIds, setVisibleThreadIds]);
+
   // Spark-style adjacency prefetch: as soon as a thread is selected, warm
   // the Convex cache for the previous and next thread so j/k navigation
   // and clicks on neighbours render synchronously.

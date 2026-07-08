@@ -2066,8 +2066,8 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           <Tooltip content="Archive">
             <button
               onClick={() => {
+                // Selection auto-advances to the next thread (useUpdateThread).
                 updateThread.mutate({ id: thread.id, isArchived: true });
-                setSelectedThread(null);
               }}
               className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary"
               aria-label="Archive"
@@ -2078,8 +2078,8 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           <Tooltip content="Delete">
             <button
               onClick={() => {
+                // Selection auto-advances to the next thread (useUpdateThread).
                 updateThread.mutate({ id: thread.id, isTrashed: true });
-                setSelectedThread(null);
               }}
               className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-surface hover:text-unread"
               aria-label="Delete"

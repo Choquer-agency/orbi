@@ -8,6 +8,7 @@ import {
   saveCachedPage,
 } from '../lib/threadListCache';
 import { reportMutationError } from '../lib/mutationErrors';
+import { useUiStore } from '../stores/uiStore';
 import {
   getCachedThreadSync,
   loadCachedThread,
@@ -448,6 +449,12 @@ export function useUpdateThread() {
     setIsPending(true);
     try {
       const { id, ...rest } = args;
+      // Trash/archive removes the thread from the current view — if it was
+      // the selected one, hop to the next visible thread BEFORE the list
+      // reflows (covers toolbar, hover, swipe, context menu, keyboard, bulk).
+      if (rest.isTrashed === true || rest.isArchived === true) {
+        useUiStore.getState().advanceSelectionAfterRemoval(id as string);
+      }
       return await fn({ threadId: id as Id<'threads'>, ...rest });
     } finally {
       setIsPending(false);
@@ -481,6 +488,7 @@ export function useSnoozeThread() {
         typeof args.snoozedUntil === 'number'
           ? args.snoozedUntil
           : Date.parse(args.snoozedUntil);
+      useUiStore.getState().advanceSelectionAfterRemoval(args.id as string);
       return await fn({
         threadId: args.id as Id<'threads'>,
         snoozedUntil: ts,
