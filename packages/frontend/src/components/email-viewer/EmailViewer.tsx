@@ -1803,6 +1803,30 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   }, [selectedThreadId]);
 
   // Merge emails + comments + scheduled emails into a single sorted timeline.
+  // ── Conversation collapse: default-show only the newest 2 messages (plus
+  // anything unread); older ones stack behind a "Show N older messages"
+  // pill, then render as compact one-line rows expandable per message.
+  const [olderStackOpen, setOlderStackOpen] = useState(false);
+  const [expandedOlderIds, setExpandedOlderIds] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setOlderStackOpen(false);
+    setExpandedOlderIds(new Set());
+  }, [selectedThreadId]);
+  const collapsedEmailInfo = useMemo(() => {
+    const emails = (data?.data?.emails ?? []) as any[];
+    if (emails.length <= 3) {
+      return { collapsedIds: new Set<string>(), firstCollapsedId: null as string | null };
+    }
+    const keepOpen = new Set(emails.slice(-2).map((e) => e.id));
+    const collapsed = emails.filter(
+      (e) => !keepOpen.has(e.id) && e.isRead !== false,
+    );
+    return {
+      collapsedIds: new Set<string>(collapsed.map((e) => e.id)),
+      firstCollapsedId: (collapsed[0]?.id as string) ?? null,
+    };
+  }, [data?.data?.emails]);
+
   const timeline = useMemo(() => {
     if (!data?.data) return [];
     const items: TimelineItem[] = [];
@@ -2471,6 +2495,62 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                 const senderName = resolveName(email.fromAddress, email.fromName);
                 const color = getAvatarColor(senderName);
                 const accentColor = getSenderAccent(email.fromAddress, user?.email);
+
+                // Collapsed older message: hidden behind the stack pill, or a
+                // compact one-line row once the stack is open.
+                if (
+                  collapsedEmailInfo.collapsedIds.has(email.id) &&
+                  !expandedOlderIds.has(email.id)
+                ) {
+                  if (!olderStackOpen) {
+                    if (email.id !== collapsedEmailInfo.firstCollapsedId) return null;
+                    const hiddenCount = collapsedEmailInfo.collapsedIds.size;
+                    return (
+                      <button
+                        key="older-stack"
+                        type="button"
+                        onClick={() => setOlderStackOpen(true)}
+                        className="mb-2 flex w-full items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-white/60 px-5 py-2 text-[12px] font-medium text-text-secondary shadow-sm transition-colors hover:bg-white hover:text-text-primary"
+                      >
+                        <ChevronDown className="h-3.5 w-3.5" />
+                        Show {hiddenCount} older {hiddenCount === 1 ? 'message' : 'messages'}
+                      </button>
+                    );
+                  }
+                  return (
+                    <button
+                      key={email.id}
+                      type="button"
+                      onClick={() =>
+                        setExpandedOlderIds((prev) => new Set(prev).add(email.id))
+                      }
+                      className="mb-2 flex w-full items-center gap-2.5 rounded-xl bg-white/70 px-5 py-2.5 text-left shadow-sm transition-colors hover:bg-white"
+                      title="Click to expand"
+                    >
+                      <span
+                        className={cn(
+                          'flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[9px] font-bold',
+                          color.bg,
+                          color.text,
+                        )}
+                      >
+                        {senderName.slice(0, 1).toUpperCase()}
+                      </span>
+                      <span className="shrink-0 text-[12px] font-medium text-text-primary">
+                        {senderName}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-[12px] text-text-tertiary">
+                        {email.snippet || ''}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-text-tertiary">
+                        {new Date(email.receivedAt).toLocaleDateString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                        })}
+                      </span>
+                    </button>
+                  );
+                }
 
                 return (
                   <div
