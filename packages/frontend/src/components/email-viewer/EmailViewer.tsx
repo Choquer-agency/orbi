@@ -1937,19 +1937,20 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   }, [selectedThreadId]);
 
   // Merge emails + comments + scheduled emails into a single sorted timeline.
-  // ── Conversation collapse: default-show only the newest 2 messages (plus
-  // anything unread); older ones stack behind a "Show N older messages"
-  // pill, then render as compact one-line rows expandable per message.
+  // ── Conversation collapse: default-show only the newest 4 messages (plus
+  // anything unread); older ones render as compact one-line rows expandable
+  // per message.
   const [expandedOlderIds, setExpandedOlderIds] = useState<Set<string>>(new Set());
   useEffect(() => {
     setExpandedOlderIds(new Set());
   }, [selectedThreadId]);
   const collapsedEmailInfo = useMemo(() => {
     const emails = (data?.data?.emails ?? []) as any[];
-    if (emails.length <= 3) {
+    // Collapsing a single leftover row isn't worth it — show all 5.
+    if (emails.length <= 5) {
       return { collapsedIds: new Set<string>() };
     }
-    const keepOpen = new Set(emails.slice(-2).map((e) => e.id));
+    const keepOpen = new Set(emails.slice(-4).map((e) => e.id));
     const collapsed = emails.filter(
       (e) => !keepOpen.has(e.id) && e.isRead !== false,
     );
