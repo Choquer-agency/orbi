@@ -1467,12 +1467,8 @@ export const backfillFolderFlags = internalMutation({
       const patch: Partial<Doc<"threads">> = {};
       if ((t.hasSentMail ?? undefined) !== wantSent) patch.hasSentMail = wantSent;
       if ((t.isSpam ?? undefined) !== wantSpam) patch.isSpam = wantSpam;
-      // Legacy approximation: threads with sent mail get lastSentAt =
-      // lastMessageAt (exact values stamped by send/sync writers going
-      // forward). Enough to stop THEIR replies reordering the Sent folder.
-      if (wantSent && t.lastSentAt === undefined) {
-        patch.lastSentAt = t.lastMessageAt;
-      }
+      // (lastSentAt is backfilled EXACTLY by backfillLastSentAt below —
+      // no approximation here.)
       if (Object.keys(patch).length > 0) {
         await ctx.db.patch(t._id, patch);
         patched++;
@@ -1485,5 +1481,75 @@ export const backfillFolderFlags = internalMutation({
       return { patched, status: "continuing" };
     }
     return { patched, status: "done" };
+  },
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Exact lastSentAt backfill: phase 1 clears any approximate values, phase 2
+// walks every SENT-labeled email and max-patches its thread. Run:
+//   npx convex run --prod threads:backfillLastSentAt '{}'
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const backfillLastSentAt = internalMutation({
+  args: {
+    phase: v.optional(v.union(v.literal("reset"), v.literal("walk"))),
+    cursor: v.optional(v.number()),
+  },
+  handler: async (ctx, { phase = "reset", cursor }) => {
+    if (phase === "reset") {
+      const rows = await ctx.db
+        .query("threads")
+        .withIndex("by_creation_time", (q) =>
+          cursor !== undefined ? q.gt("_creationTime", cursor) : q,
+        )
+        .order("asc")
+        .take(400);
+      for (const t of rows) {
+        if (t.lastSentAt !== undefined) {
+          await ctx.db.patch(t._id, { lastSentAt: undefined });
+        }
+      }
+      if (rows.length > 0) {
+        await ctx.scheduler.runAfter(500, internal.threads.backfillLastSentAt, {
+          phase: "reset",
+          cursor: rows[rows.length - 1]._creationTime,
+        });
+        return { phase: "reset", processed: rows.length };
+      }
+      await ctx.scheduler.runAfter(500, internal.threads.backfillLastSentAt, {
+        phase: "walk",
+      });
+      return { phase: "reset", processed: 0, next: "walk" };
+    }
+
+    // phase === "walk": max-patch threads from their actual sent emails.
+    const emails = await ctx.db
+      .query("emails")
+      .withIndex("by_creation_time", (q) =>
+        cursor !== undefined ? q.gt("_creationTime", cursor) : q,
+      )
+      .order("asc")
+      .take(300);
+    let patched = 0;
+    for (const e of emails) {
+      if (e.isDraft || !e.labels.includes("SENT")) continue;
+      const t = await ctx.db.get(e.threadId);
+      if (t && (t.lastSentAt ?? 0) < e.receivedAt) {
+        await ctx.db.patch(t._id, {
+          lastSentAt: e.receivedAt,
+          ...(t.hasSentMail ? {} : { hasSentMail: true }),
+        });
+        patched++;
+      }
+    }
+    if (emails.length > 0) {
+      await ctx.scheduler.runAfter(500, internal.threads.backfillLastSentAt, {
+        phase: "walk",
+        cursor: emails[emails.length - 1]._creationTime,
+      });
+      return { phase: "walk", patched, status: "continuing" };
+    }
+    return { phase: "walk", patched, status: "done" };
   },
 });
