@@ -914,21 +914,15 @@ export const list = query({
     // to the top (Bryce 2026-07-08: "Primary is for latest FROM emails").
     // Sent/Drafts rank by your own activity, so they keep lastMessageAt.
     // (Date group headers in the UI use the same lastReceivedAt-first key.)
-    const sortBy: "lastMessageAt" | "lastReceivedAt" =
-      folder === "sent" || folder === "drafts"
-        ? "lastMessageAt"
-        : "lastReceivedAt";
-    filtered.sort((a, b) => {
-      const aV =
-        sortBy === "lastReceivedAt"
-          ? (a.lastReceivedAt ?? a.lastMessageAt)
-          : a.lastMessageAt;
-      const bV =
-        sortBy === "lastReceivedAt"
-          ? (b.lastReceivedAt ?? b.lastMessageAt)
-          : b.lastMessageAt;
-      return bV - aV;
-    });
+    // Sent ranks by when YOU last sent (their later replies don't reorder
+    // it); Drafts by overall activity; everything else by when THEY last
+    // wrote.
+    const sortKey = (t: Doc<"threads">): number => {
+      if (folder === "sent") return t.lastSentAt ?? t.lastMessageAt;
+      if (folder === "drafts") return t.lastMessageAt;
+      return t.lastReceivedAt ?? t.lastMessageAt;
+    };
+    filtered.sort((a, b) => sortKey(b) - sortKey(a));
 
     const total = filtered.length;
     const paged = filtered.slice(skip, skip + limitNum);
@@ -1473,6 +1467,12 @@ export const backfillFolderFlags = internalMutation({
       const patch: Partial<Doc<"threads">> = {};
       if ((t.hasSentMail ?? undefined) !== wantSent) patch.hasSentMail = wantSent;
       if ((t.isSpam ?? undefined) !== wantSpam) patch.isSpam = wantSpam;
+      // Legacy approximation: threads with sent mail get lastSentAt =
+      // lastMessageAt (exact values stamped by send/sync writers going
+      // forward). Enough to stop THEIR replies reordering the Sent folder.
+      if (wantSent && t.lastSentAt === undefined) {
+        patch.lastSentAt = t.lastMessageAt;
+      }
       if (Object.keys(patch).length > 0) {
         await ctx.db.patch(t._id, patch);
         patched++;

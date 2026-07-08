@@ -252,6 +252,9 @@ export default defineSchema({
     // contain sent mail", and Spam scanned 2,000 threads per account per
     // view. Backfilled by threads.backfillFolderFlags.
     hasSentMail: v.optional(v.boolean()),
+    // When the user last SENT in this thread — the Sent folder sorts by
+    // this, so an unanswered thread doesn't ride up on THEIR later reply.
+    lastSentAt: v.optional(v.number()),
     isSpam: v.optional(v.boolean()),
   })
     .index("by_account_providerThreadId", ["accountId", "providerThreadId"])

@@ -483,8 +483,11 @@ export const _upsertEmail = internalMutation({
     // filter on it instead of loading emails per candidate thread.
     if (args.labels.includes("SENT") && !args.isDraft) {
       const t = await ctx.db.get(args.threadId);
-      if (t && !t.hasSentMail) {
-        await ctx.db.patch(args.threadId, { hasSentMail: true });
+      if (t && (!t.hasSentMail || (t.lastSentAt ?? 0) < args.receivedAt)) {
+        await ctx.db.patch(args.threadId, {
+          hasSentMail: true,
+          lastSentAt: Math.max(t.lastSentAt ?? 0, args.receivedAt),
+        });
       }
     }
     return { emailId, isNew: true };

@@ -469,6 +469,7 @@ export const send = mutation({
       messageCount: 1,
       lastMessageAt: now,
       hasSentMail: true,
+      lastSentAt: now,
     });
 
     const emailId = await ctx.db.insert("emails", {
@@ -643,6 +644,7 @@ export const reply = mutation({
       snippet: (args.bodyText || "").slice(0, 200),
       lastMessageAt: now,
       hasSentMail: true,
+      lastSentAt: now,
     });
 
     await dispatchOutboundContactExtraction(
@@ -1255,8 +1257,11 @@ export const _markSent = internalMutation({
     // provider send passes through here (compose, reply, forward, drafts,
     // scheduled), so the thread is guaranteed to be marked.
     const threadForFlag = await ctx.db.get(email.threadId);
-    if (threadForFlag && !threadForFlag.hasSentMail) {
-      await ctx.db.patch(email.threadId, { hasSentMail: true });
+    if (threadForFlag) {
+      await ctx.db.patch(email.threadId, {
+        hasSentMail: true,
+        lastSentAt: Math.max(threadForFlag.lastSentAt ?? 0, Date.now()),
+      });
     }
     if (scheduledEmailId) {
       const row = await ctx.db.get(scheduledEmailId);
@@ -1381,6 +1386,7 @@ export async function materializeScheduledEmail(
       messageCount: 1,
       lastMessageAt: now,
       hasSentMail: true,
+      lastSentAt: now,
     });
   }
 
@@ -1575,6 +1581,7 @@ export async function insertSystemOutboundEmail(
     messageCount: 1,
     lastMessageAt: now,
     hasSentMail: true,
+    lastSentAt: now,
   });
 
   const emailId = await ctx.db.insert("emails", {
