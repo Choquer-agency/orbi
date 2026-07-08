@@ -1484,6 +1484,11 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const cancelScheduledMutation = useCancelScheduledEmail();
   const scrollViewportRef = useRef<HTMLDivElement>(null);
   const userScrolledRef = useRef(false);
+  // Timestamp of our last programmatic scroll — scrollTo() fires a scroll
+  // event indistinguishable from the user's, which used to trip
+  // userScrolledRef on the FIRST anchor and cancel every re-anchor retry
+  // (the layout then shifted under the reader as bodies loaded).
+  const programmaticScrollAtRef = useRef(0);
   const [replyMode, setReplyMode] = useState<'reply' | 'forward' | 'compose' | null>(null);
   const [newComment, setNewComment] = useState('');
   const [showNoteInput, setShowNoteInput] = useState(false);
@@ -1664,7 +1669,10 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     const viewport = scrollViewportRef.current;
     if (!viewport) return;
     userScrolledRef.current = false;
-    const onScroll = () => { userScrolledRef.current = true; };
+    const onScroll = () => {
+      if (Date.now() - programmaticScrollAtRef.current < 250) return;
+      userScrolledRef.current = true;
+    };
     viewport.addEventListener('scroll', onScroll, { passive: true });
     return () => viewport.removeEventListener('scroll', onScroll);
   }, [selectedThreadId]);
@@ -1681,6 +1689,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     if (!viewport) return;
     const emailCount = data.data.emails?.length ?? 0;
     if (emailCount <= 1) {
+      programmaticScrollAtRef.current = Date.now();
       viewport.scrollTo({ top: 0, behavior: 'instant' });
       return;
     }
@@ -1691,6 +1700,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       if (cancelled || userScrolledRef.current) return;
       const blocks = viewport.querySelectorAll('[data-email-block]');
       const last = blocks[blocks.length - 1] as HTMLElement | undefined;
+      programmaticScrollAtRef.current = Date.now();
       if (!last) {
         viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'instant' });
         return;
