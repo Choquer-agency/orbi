@@ -468,11 +468,17 @@ export const _searchEmails = internalQuery({
 export const _getThreadDetail = internalQuery({
   args: { threadId: v.string() },
   handler: async (ctx, { threadId }) => {
-    const id = threadId as Id<"threads">;
-    const thread = await ctx.db.get(id);
-    if (!thread) {
+    // The model sometimes passes a placeholder ("current", a truncated id…)
+    // instead of a real thread id. normalizeId rejects garbage without
+    // throwing — a graceful "not found" lets the model recover by running
+    // search_emails for the real id, instead of the raw cast crashing the
+    // entire chat stream (the 'Invalid ID length' failures on long threads).
+    const id = ctx.db.normalizeId("threads", threadId);
+    const thread = id ? await ctx.db.get(id) : null;
+    if (!thread || !id) {
       return {
-        contextText: "Thread not found or empty.",
+        contextText:
+          "Thread not found — that thread id is not valid. Use search_emails to find the conversation and retry with the threadId from a search result.",
         subject: "Unknown",
         messageCount: 0,
         participantEmails: [],
