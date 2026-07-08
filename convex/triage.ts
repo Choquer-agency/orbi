@@ -16,6 +16,7 @@ import {
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
+import { insertSystemOutboundEmail } from "./emails";
 import { isTriageCategory } from "./ai/classifier";
 
 // ── Settings ────────────────────────────────────────────────────────────────
@@ -235,6 +236,43 @@ export const submitFeedback = mutation({
       senderAddress,
       subjectSnippet,
     });
+
+    // Marking spam auto-replies "Unsubscribe" from the receiving mailbox —
+    // many list processors honor a bare unsubscribe reply and drop the
+    // address. Plain text, no signature; sent through the normal pipeline
+    // so it shows in Sent. Skipped for bounce daemons and our own addresses.
+    if (args.finalCategory === "spam" && args.emailId) {
+      const email = await ctx.db.get(args.emailId);
+      const sender = (email?.fromAddress ?? senderAddress).toLowerCase().trim();
+      if (
+        email &&
+        sender.includes("@") &&
+        !/mailer-daemon|postmaster/i.test(sender)
+      ) {
+        const account = await ctx.db.get(email.accountId);
+        const ownAccounts = await ctx.db
+          .query("mailAccounts")
+          .withIndex("by_user", (q) => q.eq("userId", userId))
+          .collect();
+        const selfAddresses = new Set(
+          ownAccounts.map((a) => a.email.toLowerCase()),
+        );
+        if (account && account.userId === userId && !selfAddresses.has(sender)) {
+          try {
+            await insertSystemOutboundEmail(ctx, {
+              accountId: account._id,
+              to: [{ email: sender }],
+              subject: "Unsubscribe",
+              bodyHtml: "<p>Unsubscribe</p>",
+              bodyText: "Unsubscribe",
+            });
+          } catch (err) {
+            // Never let the unsubscribe courtesy block the spam action.
+            console.error("[triage] auto-unsubscribe send failed:", err);
+          }
+        }
+      }
+    }
 
     if (args.emailId) {
       const cls = await ctx.db

@@ -2380,21 +2380,8 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               </>
             );
           })()}
-          {/* Close — right corner */}
-          <Tooltip content="Close (Esc)">
-            <button
-              onClick={(e) => {
-                (e.currentTarget as HTMLButtonElement).blur();
-                setSelectedThread(null);
-              }}
-              className="ml-1 flex items-center gap-1 rounded-lg border border-border bg-surface px-2 py-1 text-[11px] font-medium text-text-secondary transition-colors hover:border-text-tertiary hover:bg-surface-hover hover:text-text-primary focus:outline-none focus-visible:outline-none"
-              aria-label="Close"
-            >
-              <X className="h-4 w-4" />
-              <span>Close</span>
-              <kbd className="ml-1 hidden rounded border border-border bg-bg px-1 text-[10px] text-text-tertiary sm:inline">Esc</kbd>
-            </button>
-          </Tooltip>
+          {/* Close button removed 2026-07-08 (Bryce) — Esc still closes via
+              useKeyboardShortcuts. */}
         </div>
       </div>
 
