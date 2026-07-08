@@ -95,7 +95,7 @@ interface UiState {
 
 export const useUiStore = create<UiState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       threadListWidth: 20,
       aiChatOpen: true,
       aiChatWidth: 27,
@@ -153,7 +153,16 @@ export const useUiStore = create<UiState>()(
           return { selectedThreadIds: next, lastClickedThreadId: id };
         }),
       visibleThreadIds: [],
-      setVisibleThreadIds: (ids) => set({ visibleThreadIds: ids }),
+      setVisibleThreadIds: (ids) => {
+        // Bail BEFORE set(): the caller's array identity churns every
+        // render, and any set() call (even a content no-op) notifies
+        // subscribers → re-render → recompute → set()… = infinite loop.
+        const prev = get().visibleThreadIds;
+        if (prev.length === ids.length && prev.every((v, i) => v === ids[i])) {
+          return;
+        }
+        set({ visibleThreadIds: ids });
+      },
       advanceSelectionAfterRemoval: (removedId) =>
         set((s) => {
           if (s.selectedThreadId !== removedId) return {};
