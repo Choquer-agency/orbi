@@ -22,6 +22,7 @@ import * as ScrollArea from '@radix-ui/react-scroll-area';
 import { useAiChat } from '../../hooks/useAiChat';
 import { useConversations } from '../../hooks/useConversations';
 import { useUiStore } from '../../stores/uiStore';
+import { useAiChatStore } from '../../stores/aiChatStore';
 import { useThread } from '../../hooks/useThreads';
 import { useContactAutocomplete } from '../../hooks/useContacts';
 import type {
@@ -105,6 +106,23 @@ export function AiChatPanel() {
     }
   }, [selectedThreadId, isMobile]);
 
+  // Auto-start a fresh chat when the user moves on: the conversation is
+  // anchored to the thread they were viewing when they sent messages, so
+  // manually opening a DIFFERENT thread means the old chat is done (draft
+  // sent → next email). Chat-driven navigation (clicking a result the AI
+  // found, opening a draft) re-anchors first and never triggers this. The
+  // old conversation stays in history.
+  useEffect(() => {
+    if (!selectedThreadId) return;
+    const chat = useAiChatStore.getState();
+    if (chat.isLoading) return;
+    if (chat.messages.length === 0) return;
+    if (!chat.anchorThreadId || chat.anchorThreadId === selectedThreadId) return;
+    clearChat();
+    refreshConversations();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedThreadId]);
+
   const suggestionPills = useMemo(() => {
     if (scope === 'all') return selectedThreadId ? ALL_EMAILS_PILLS : DEFAULT_PILLS;
     return selectedThreadId ? THREAD_PILLS : DEFAULT_PILLS;
@@ -184,7 +202,9 @@ export function AiChatPanel() {
     });
     if (draft.threadId) {
       // Reply on an existing thread → open that thread; EmailViewer's
-      // pendingDraft effect picks it up and opens reply mode.
+      // pendingDraft effect picks it up and opens reply mode. Re-anchor so
+      // this chat-driven navigation doesn't count as "moved on".
+      useAiChatStore.getState().setAnchorThreadId(draft.threadId);
       setSelectedThread(draft.threadId);
     } else {
       // Brand-new email → open a fresh compose window. setComposingNew
@@ -197,6 +217,9 @@ export function AiChatPanel() {
   const isEmpty = messages.length === 0;
 
   const navigateToThread = (threadId: string, highlightSnippet?: string | null) => {
+    // Chat-driven navigation (clicking a result the AI found) — re-anchor the
+    // conversation so it survives the jump instead of auto-clearing.
+    useAiChatStore.getState().setAnchorThreadId(threadId);
     // setSelectedFolder clears selectedThreadId, so select the folder first.
     useUiStore.getState().setSelectedFolder('inbox');
     setSelectedThread(threadId);

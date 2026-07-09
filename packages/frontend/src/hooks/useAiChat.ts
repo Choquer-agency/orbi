@@ -73,6 +73,9 @@ export function useAiChat() {
 
       addUserMessage(content.trim());
       setLoading(true);
+      // Anchor the conversation to the thread being viewed. If the user later
+      // manually opens a different thread, the panel starts a fresh chat.
+      useAiChatStore.getState().setAnchorThreadId(selectedThreadId ?? null);
 
       // Ensure we have a conversation for persistence (server-side dedup
       // creates one if missing).

@@ -85,6 +85,11 @@ interface AiChatState {
   isLoading: boolean;
   conversationId: string | null;
   conversations: ConversationSummary[];
+  // Thread the user was viewing when they last sent a message. When they
+  // manually open a DIFFERENT thread, the panel auto-starts a fresh chat
+  // (finished drafting → moved on). Null for chats loaded from history —
+  // those never auto-clear.
+  anchorThreadId: string | null;
 
   addUserMessage: (content: string) => void;
   addAssistantMessage: (
@@ -115,6 +120,7 @@ interface AiChatState {
   setLoading: (loading: boolean) => void;
   clearChat: () => void;
   setConversationId: (id: string | null) => void;
+  setAnchorThreadId: (id: string | null) => void;
   setConversations: (conversations: ConversationSummary[]) => void;
   loadConversation: (messages: AiChatMessage[], conversationId: string) => void;
 }
@@ -178,6 +184,7 @@ export const useAiChatStore = create<AiChatState>()(
       isLoading: false,
       conversationId: null,
       conversations: [],
+      anchorThreadId: null,
 
       addUserMessage: (content) =>
         set((s) => ({
@@ -272,19 +279,21 @@ export const useAiChatStore = create<AiChatState>()(
           if (buf.rafId !== null) cancelAnimationFrame(buf.rafId);
           streamBuffers.delete(id);
         }
-        set({ messages: [], isLoading: false, conversationId: null });
+        set({ messages: [], isLoading: false, conversationId: null, anchorThreadId: null });
       },
 
       setConversationId: (id) => set({ conversationId: id }),
+      setAnchorThreadId: (id) => set({ anchorThreadId: id }),
       setConversations: (conversations) => set({ conversations }),
       loadConversation: (messages, conversationId) =>
-        set({ messages, conversationId, isLoading: false }),
+        set({ messages, conversationId, isLoading: false, anchorThreadId: null }),
     }),
     {
       name: 'orbi-ai-chat',
       partialize: (state) => ({
         messages: state.messages,
         conversationId: state.conversationId,
+        anchorThreadId: state.anchorThreadId,
       }),
     },
   ),
