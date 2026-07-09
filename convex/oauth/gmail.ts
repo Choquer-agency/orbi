@@ -404,13 +404,23 @@ export const send = internalAction({
     // a brand-new email the thread starts with `local-thread-…` — we skip
     // passing threadId in that case (Gmail will create a new thread on its
     // side, which is correct for a brand-new conversation).
+    // A Gmail threadId only exists inside the mailbox that synced it. If the
+    // reply is going out from a DIFFERENT connected account (multi-account
+    // user, shared/handed-off thread), passing it makes messages.send 404
+    // ("Requested entity was not found") — skip it; In-Reply-To/References
+    // headers still thread the reply correctly for everyone.
+    const threadBelongsToSender =
+      thread && String(thread.accountId) === String(account._id);
     const derivedThreadId =
       thread &&
+      threadBelongsToSender &&
       !thread.providerThreadId.startsWith("local-thread-") &&
       !thread.providerThreadId.startsWith("draft-thread-")
         ? thread.providerThreadId.split("::")[0]
         : undefined;
-    const gmailThreadId = message.providerThreadId ?? derivedThreadId;
+    const gmailThreadId =
+      (threadBelongsToSender ? message.providerThreadId : undefined) ??
+      derivedThreadId;
 
     // Pull attachment bytes from Convex storage.
     const attachmentMeta = await ctx.runQuery(
@@ -459,19 +469,31 @@ export const send = internalAction({
 
     let providerMessageId: string | undefined;
     await withRefreshOn401(ctx, accountId, async (token) => {
-      const body: { raw: string; threadId?: string } = { raw: rawB64Url };
-      if (gmailThreadId) body.threadId = gmailThreadId;
-      const res = await fetch(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
+      const sendOnce = (withThreadId: boolean) => {
+        const body: { raw: string; threadId?: string } = { raw: rawB64Url };
+        if (withThreadId && gmailThreadId) body.threadId = gmailThreadId;
+        return fetch(
+          "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
           },
-          body: JSON.stringify(body),
-        },
-      );
+        );
+      };
+      let res = await sendOnce(true);
+      // Stale/foreign threadId (thread deleted in Gmail, cross-account edge
+      // we didn't predict) → 404. The email itself is fine; resend without
+      // the threadId rather than failing the whole send.
+      if (res.status === 404 && gmailThreadId) {
+        console.warn(
+          `[gmail-send] threadId ${gmailThreadId} rejected (404) — retrying without threadId`,
+        );
+        res = await sendOnce(false);
+      }
       if (!res.ok) {
         const text = await res.text();
         const err = new Error(
