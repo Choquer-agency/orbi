@@ -15,6 +15,7 @@ import { action } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
+import { DRAFTING_JUDGMENT } from "./promptGuidelines";
 
 const MODEL = "claude-sonnet-4-6";
 const DRAFT_MAX_TOKENS = 1536;
@@ -33,7 +34,9 @@ Rules:
 - For tabular data, use a real <table style="border-collapse:collapse;margin:8px 0"> with inline styles on every <th> and <td> ('border:1px solid #d0d4dc;padding:6px 10px'). Inline styles only — email clients strip <style> blocks.
 - What you output is what the recipient sees. The compose preview and the sent email both render this HTML verbatim, so don't include anything that won't render correctly.
 - If you don't have enough context, write the best draft you can and note what might need adjustment.
-- Follow the user's writing style preferences provided below.`;
+- Follow the user's writing style preferences provided below.
+
+${DRAFTING_JUDGMENT}`;
 
 export const generateDraft = action({
   args: {

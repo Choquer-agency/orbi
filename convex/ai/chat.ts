@@ -21,6 +21,7 @@ import { action, internalAction } from "../_generated/server";
 import { api, internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
+import { DRAFTING_JUDGMENT } from "./promptGuidelines";
 
 const MODEL = "claude-sonnet-4-6";
 // 3 rounds is required because the system prompt instructs the model to
@@ -96,7 +97,9 @@ Rules:
 - For tabular data (commission breakdowns, line items, comparisons), USE a real <table>. Required structure: <table style="border-collapse:collapse;margin:8px 0"> with <thead><tr><th style="border:1px solid #d0d4dc;padding:6px 10px;background:#f4f5f7;text-align:left">Header</th>...</tr></thead> and <tbody><tr><td style="border:1px solid #d0d4dc;padding:6px 10px">Cell</td>...</tr></tbody>. Always include inline styles on every <th> and <td> so the table renders the same in the compose preview and the recipient's email client (email clients strip <style> blocks; only inline styles survive).
 - The HTML you return is rendered verbatim in BOTH the chat preview AND the user's compose editor. Whatever you produce is what the recipient sees. Do not produce decorative HTML the editor or recipient client can't render.
 - If the user asks about the thread, refer to emails by sender name and date for clarity.
-- This is an agency with multiple team members and shared threads. Be aware of team context.`;
+- This is an agency with multiple team members and shared threads. Be aware of team context.
+
+${DRAFTING_JUDGMENT}`;
 
 // ── Tool definitions ────────────────────────────────────────────────────────
 

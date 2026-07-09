@@ -28,6 +28,7 @@ import type * as ai_meetingDetector from "../ai/meetingDetector.js";
 import type * as ai_meetingDetectorData from "../ai/meetingDetectorData.js";
 import type * as ai_needsResponse from "../ai/needsResponse.js";
 import type * as ai_needsResponseData from "../ai/needsResponseData.js";
+import type * as ai_promptGuidelines from "../ai/promptGuidelines.js";
 import type * as ai_styleProfile from "../ai/styleProfile.js";
 import type * as ai_styleProfileData from "../ai/styleProfileData.js";
 import type * as ai_taskExtractor from "../ai/taskExtractor.js";
@@ -136,6 +137,7 @@ declare const fullApi: ApiFromModules<{
   "ai/meetingDetectorData": typeof ai_meetingDetectorData;
   "ai/needsResponse": typeof ai_needsResponse;
   "ai/needsResponseData": typeof ai_needsResponseData;
+  "ai/promptGuidelines": typeof ai_promptGuidelines;
   "ai/styleProfile": typeof ai_styleProfile;
   "ai/styleProfileData": typeof ai_styleProfileData;
   "ai/taskExtractor": typeof ai_taskExtractor;
