@@ -7,22 +7,63 @@ import type { Id } from '../../../../../convex/_generated/dataModel';
 import toast from 'react-hot-toast';
 import { Tooltip } from '../ui/Tooltip';
 
+// Dismissals persist across refreshes (localStorage). Keyed by
+// emailId:sendAttempts so a dismissed failure stays gone, but if a RETRY of
+// that same email fails again (attempts increments) the banner reappears —
+// dismiss means "stop telling me about this failure", not "never warn about
+// this email again".
+const DISMISSED_KEY = 'orbi-dismissed-failed-sends';
+
+function loadDismissed(): Set<string> {
+  try {
+    const raw = localStorage.getItem(DISMISSED_KEY);
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDismissed(keys: Set<string>, currentKeys: string[]) {
+  try {
+    // Prune entries for emails no longer failed (retried OK / discarded) so
+    // the list can't grow forever.
+    const current = new Set(currentKeys);
+    localStorage.setItem(
+      DISMISSED_KEY,
+      JSON.stringify([...keys].filter((k) => current.has(k))),
+    );
+  } catch {
+    /* storage full/unavailable — dismissal just won't persist */
+  }
+}
+
+const dismissKeyOf = (e: { id: string; sendAttempts?: number }) =>
+  `${e.id}:${e.sendAttempts ?? 0}`;
+
 // Global "a send failed" surface. Failed sends used to be visible only as a
 // small badge inside the open thread — a failed reply in a thread you never
 // re-opened was effectively invisible. This banner sits above the undo pills
-// and stays until each failure is retried, discarded, or dismissed for the
-// session. Convex reactivity keeps it live: the sweep-stuck-sends cron
-// marking a wedged send FAILED pops it here within seconds.
+// and stays until each failure is retried, discarded, or dismissed. Convex
+// reactivity keeps it live: the sweep-stuck-sends cron marking a wedged send
+// FAILED pops it here within seconds.
 export function FailedSendsBanner() {
   const result = useQuery(convexApi.emails.listFailed, {});
   const retrySend = useMutation(convexApi.emails.retrySend);
   const discardSend = useMutation(convexApi.emails.discardFailedSend);
   const setSelectedThread = useUiStore((s) => s.setSelectedThread);
-  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [dismissed, setDismissed] = useState<Set<string>>(loadDismissed);
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
-  const failed = (result?.data ?? []).filter((e) => !dismissed.has(e.id));
+  const all = result?.data ?? [];
+  const failed = all.filter((e) => !dismissed.has(dismissKeyOf(e)));
   if (failed.length === 0) return null;
+
+  const handleDismiss = () => {
+    const next = new Set(dismissed);
+    for (const e of failed) next.add(dismissKeyOf(e));
+    setDismissed(next);
+    saveDismissed(next, all.map(dismissKeyOf));
+  };
 
   const markBusy = (id: string, on: boolean) =>
     setBusy((prev) => {
@@ -71,9 +112,9 @@ export function FailedSendsBanner() {
           </span>
           <button
             type="button"
-            onClick={() => setDismissed(new Set(failed.map((e) => e.id)))}
+            onClick={handleDismiss}
             className="ml-auto rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800"
-            aria-label="Dismiss for now"
+            aria-label="Dismiss"
           >
             <X className="h-4 w-4" />
           </button>
