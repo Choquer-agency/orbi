@@ -722,14 +722,16 @@ export const list = query({
           );
           break;
         default:
-          // Default = inbox: not trashed, not archived, not snoozed, and with
-          // at least one received message. Use thread metadata instead of
-          // loading every email in every thread.
+          // Default = inbox: not trashed, not archived, not snoozed, not
+          // spam, and with at least one received message. Use thread
+          // metadata instead of loading every email in every thread.
           candidates = candidates.filter(
             (t) =>
               !t.isTrashed &&
               !t.isArchived &&
               !t.snoozedUntil &&
+              !t.isSpam &&
+              !t.labels.includes("SPAM") &&
               (t.lastReceivedAt ?? 0) > 0,
           );
           // Optional triage exclusion

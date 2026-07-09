@@ -1204,3 +1204,46 @@ export const _pushThreadReadState = internalAction({
     }
   },
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Push a spam verdict up to Gmail: mark spam = add SPAM + drop INBOX (the
+// thread moves to Gmail's Spam folder); un-spam = the reverse. Best-effort,
+// same contract as _pushThreadReadState — local DB is already updated and
+// keeping Gmail in agreement is what stops the next incremental sync from
+// pulling the thread back into the inbox.
+// ─────────────────────────────────────────────────────────────────────────────
+export const _pushThreadSpamState = internalAction({
+  args: {
+    accountId: v.id("mailAccounts"),
+    providerThreadId: v.string(),
+    isSpam: v.boolean(),
+  },
+  handler: async (ctx, { accountId, providerThreadId, isSpam }) => {
+    try {
+      await withRefreshOn401(ctx, accountId, async (token) => {
+        const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(providerThreadId)}/modify`;
+        const body = isSpam
+          ? { addLabelIds: ["SPAM"], removeLabelIds: ["INBOX"] }
+          : { addLabelIds: ["INBOX"], removeLabelIds: ["SPAM"] };
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          const text = await res.text();
+          const err = new Error(
+            `Gmail spam modify failed (${res.status}): ${text.slice(0, 200)}`,
+          ) as Error & { status: number };
+          err.status = res.status;
+          throw err;
+        }
+      });
+    } catch (err) {
+      console.error("[gmail-sync] push spam-state failed:", err);
+    }
+  },
+});

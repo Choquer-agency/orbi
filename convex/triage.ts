@@ -307,13 +307,39 @@ export const submitFeedback = mutation({
       const thread = await ctx.db.get(args.threadId);
       if (thread) {
         const hasSpamLabel = thread.labels.includes("SPAM");
-        if (args.finalCategory === "spam" && !hasSpamLabel) {
+        if (args.finalCategory === "spam") {
+          // Move to Spam for real: stamp the denormalized isSpam flag (the
+          // Spam folder query reads the by_account_isSpam index, not labels)
+          // and drop INBOX so the thread leaves the inbox immediately.
           await ctx.db.patch(args.threadId, {
-            labels: [...thread.labels, "SPAM"],
+            labels: [
+              ...thread.labels.filter((l) => l !== "INBOX"),
+              ...(hasSpamLabel ? [] : ["SPAM"]),
+            ],
+            isSpam: true,
           });
-        } else if (args.finalCategory !== "spam" && hasSpamLabel) {
+        } else if (hasSpamLabel || thread.isSpam) {
           await ctx.db.patch(args.threadId, {
-            labels: thread.labels.filter((l) => l !== "SPAM"),
+            labels: [
+              ...thread.labels.filter((l) => l !== "SPAM"),
+              ...(thread.labels.includes("INBOX") ? [] : ["INBOX"]),
+            ],
+            isSpam: undefined,
+          });
+        }
+        // Mirror the move on the provider side (Gmail SPAM label). Without
+        // this the next incremental sync re-imports the provider's labels
+        // and the thread pops back into the inbox.
+        const account = await ctx.db.get(thread.accountId);
+        if (
+          account?.provider === "GMAIL" &&
+          !thread.providerThreadId.startsWith("local-thread-") &&
+          !thread.providerThreadId.startsWith("draft-thread-")
+        ) {
+          await ctx.scheduler.runAfter(0, internal.sync.gmail._pushThreadSpamState, {
+            accountId: thread.accountId,
+            providerThreadId: thread.providerThreadId.split("::")[0],
+            isSpam: args.finalCategory === "spam",
           });
         }
       }

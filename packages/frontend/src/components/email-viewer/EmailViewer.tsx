@@ -2494,7 +2494,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                         allowKind: kind,
                       });
                       setSpamRuleOpen(false);
-                      setSelectedThread(null);
+                      useUiStore.getState().advanceSelectionAfterRemoval(thread.id);
                     }}
                     onSkip={() => {
                       const lastEmail = thread.emails?.[thread.emails.length - 1];
@@ -2507,7 +2507,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                         wasConfirmed: false,
                       });
                       setSpamRuleOpen(false);
-                      setSelectedThread(null);
+                      useUiStore.getState().advanceSelectionAfterRemoval(thread.id);
                     }}
                     onCancel={() => setSpamRuleOpen(false)}
                   />
