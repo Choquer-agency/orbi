@@ -53,6 +53,7 @@ import type * as http from "../http.js";
 import type * as inboxSplits from "../inboxSplits.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_emailPreprocess from "../lib/emailPreprocess.js";
+import type * as lib_inboxStamp from "../lib/inboxStamp.js";
 import type * as lib_nameExtraction from "../lib/nameExtraction.js";
 import type * as lib_personMerge from "../lib/personMerge.js";
 import type * as lib_promiseDetector from "../lib/promiseDetector.js";
@@ -163,6 +164,7 @@ declare const fullApi: ApiFromModules<{
   inboxSplits: typeof inboxSplits;
   "lib/auth": typeof lib_auth;
   "lib/emailPreprocess": typeof lib_emailPreprocess;
+  "lib/inboxStamp": typeof lib_inboxStamp;
   "lib/nameExtraction": typeof lib_nameExtraction;
   "lib/personMerge": typeof lib_personMerge;
   "lib/promiseDetector": typeof lib_promiseDetector;

@@ -3,6 +3,7 @@ import { mutation, query, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import type { Doc, Id } from "./_generated/dataModel";
+import { patchThread, stampedThreadInsert } from "./lib/inboxStamp";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -478,32 +479,43 @@ export const list = query({
       candidates = merged.filter((t): t is Doc<"threads"> => !!t);
     } else {
       // Pull threads from each account index (fan-out then merge — Convex doesn't support `IN`).
-      // Non-search browse keeps a smaller window because the list has infinite scroll.
       const isFilterSearchMode = !!(fromEmail || args.category);
-      // COST: this query is SUBSCRIBED by every open client and re-runs on
-      // every mailbox write (each new email, read-state flip, classification).
-      // A flat 500/account window here was ~70% of the Convex database-read
-      // bill. The default inbox scales the window to how deep the user has
-      // actually scrolled — page 1 reads ~100/account, deep scroll reads
-      // more. Sparse folders (sent/archive/starred/trash) keep the wide
-      // window because their matches are thinly spread through the index,
-      // but they're only subscribed while actually viewed.
       const isDefaultInbox = !parsed && (!folder || folder === "inbox");
-      const perAccountLimit = isFilterSearchMode
-        ? 2500
-        : isDefaultInbox
-          ? Math.min(500, Math.max(100, skip + limitNum + 50))
-          : 500;
-      const threadsArrays = await Promise.all(
-        accountIds.map((aid) =>
-          ctx.db
-            .query("threads")
-            .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", aid))
-            .order("desc")
-            .take(perAccountLimit),
-        ),
-      );
-      candidates = threadsArrays.flat();
+      if (isDefaultInbox) {
+        // Sticker index (lib/inboxStamp.ts): inbox membership is stamped at
+        // write time, so this reads EXACTLY the rows the page shows (+1 for
+        // hasMore) instead of a wide window filtered in code. This query is
+        // subscribed by every client and re-runs on every mailbox write —
+        // it must stay page-sized.
+        const per = skip + limitNum + 1;
+        const threadsArrays = await Promise.all(
+          accountIds.map((aid) =>
+            ctx.db
+              .query("threads")
+              .withIndex("by_account_inbox", (q) =>
+                q.eq("accountId", aid).gt("inboxAt", 0),
+              )
+              .order("desc")
+              .take(per),
+          ),
+        );
+        candidates = threadsArrays.flat();
+      } else {
+        // Sparse folders (sent/archive/starred/trash) keep a wide window
+        // because their matches are thinly spread through the time index —
+        // but they're only subscribed while actually viewed.
+        const perAccountLimit = isFilterSearchMode ? 2500 : 500;
+        const threadsArrays = await Promise.all(
+          accountIds.map((aid) =>
+            ctx.db
+              .query("threads")
+              .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", aid))
+              .order("desc")
+              .take(perAccountLimit),
+          ),
+        );
+        candidates = threadsArrays.flat();
+      }
     }
 
     if (fromEmail && fromEmail.length > 0) {
@@ -995,7 +1007,7 @@ export const markRead = mutation({
       throw new Error("Access denied");
     }
     const newIsRead = isRead ?? true;
-    await ctx.db.patch(threadId, {
+    await patchThread(ctx, threadId, {
       isRead: newIsRead,
       readStateLocalAt: Date.now(),
     });
@@ -1065,7 +1077,7 @@ export const update = mutation({
     }
     if (rest.isTrashed !== undefined) patch.isTrashed = rest.isTrashed;
     if (rest.labels !== undefined) patch.labels = rest.labels;
-    await ctx.db.patch(threadId, patch);
+    await patchThread(ctx, threadId, patch);
     // Archiving or trashing resolves any open "Needs Response" signal on
     // this thread — the user has decided they don't owe a reply.
     if (rest.isArchived === true || rest.isTrashed === true) {
@@ -1114,7 +1126,7 @@ export const markArchived = mutation({
     const labels = isArchived
       ? thread.labels.filter((label) => label !== "INBOX")
       : Array.from(new Set([...thread.labels, "INBOX"]));
-    await ctx.db.patch(threadId, { isArchived, labels });
+    await patchThread(ctx, threadId, { isArchived, labels });
     if (isArchived) {
       await ctx.scheduler.runAfter(
         0,
@@ -1135,7 +1147,7 @@ export const updateLabels = mutation({
     if (!(await userOwnsThread(ctx, userId, thread))) {
       throw new Error("Access denied");
     }
-    await ctx.db.patch(threadId, { labels });
+    await patchThread(ctx, threadId, { labels });
     return { ok: true };
   },
 });
@@ -1158,7 +1170,7 @@ export const snooze = mutation({
     if (!account || (account as Doc<"mailAccounts">).userId !== userId) {
       throw new Error("Access denied");
     }
-    await ctx.db.patch(threadId, { snoozedUntil });
+    await patchThread(ctx, threadId, { snoozedUntil });
     await ctx.scheduler.runAt(snoozedUntil, internal.threads.unsnooze, {
       threadId,
     });
@@ -1176,7 +1188,7 @@ export const unsnoozeNow = mutation({
     if (!account || (account as Doc<"mailAccounts">).userId !== userId) {
       throw new Error("Access denied");
     }
-    await ctx.db.patch(threadId, { snoozedUntil: undefined });
+    await patchThread(ctx, threadId, { snoozedUntil: undefined });
     return { ok: true };
   },
 });
@@ -1189,7 +1201,7 @@ export const unsnooze = internalMutation({
     if (!thread) return;
     // Only clear if still snoozed (idempotent — user may have unsnoozed already).
     if (thread.snoozedUntil && thread.snoozedUntil <= Date.now()) {
-      await ctx.db.patch(threadId, { snoozedUntil: undefined });
+      await patchThread(ctx, threadId, { snoozedUntil: undefined });
     }
   },
 });
@@ -1210,24 +1222,16 @@ export const unreadCount = query({
       // Walk recent threads per account; stop as soon as we hit MAX_BADGE.
       const remaining = MAX_BADGE - total;
       if (remaining <= 0) break;
+      // Sticker index: unreadInboxAt is set only while the thread is unread
+      // AND in the inbox, so this reads exactly the rows it counts.
       const recent = await ctx.db
         .query("threads")
-        .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", a._id))
+        .withIndex("by_account_unreadInbox", (q) =>
+          q.eq("accountId", a._id).gt("unreadInboxAt", 0),
+        )
         .order("desc")
-        .take(remaining * 3); // small over-fetch so unread density doesn't starve
-      for (const t of recent) {
-        if (
-          !t.isRead &&
-          !t.isTrashed &&
-          !t.isArchived &&
-          !t.snoozedUntil &&
-          !t.labels.includes("SPAM") &&
-          t.lastReceivedAt !== undefined
-        ) {
-          total++;
-          if (total >= MAX_BADGE) break;
-        }
-      }
+        .take(remaining);
+      total += recent.length;
     }
     return { count: total };
   },

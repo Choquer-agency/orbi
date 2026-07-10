@@ -13,6 +13,7 @@ import { promisedFollowUpText } from "./lib/promiseDetector";
 import { injectTracking } from "./lib/trackingInject";
 import type { Doc, Id } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
+import { stampedThreadInsert } from "./lib/inboxStamp";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -455,7 +456,7 @@ export const send = mutation({
     const undoDeadlineAt = now + UNDO_WINDOW_MS;
     const uploads = args.attachments ?? [];
 
-    const threadId = await ctx.db.insert("threads", {
+    const threadId = await ctx.db.insert("threads", stampedThreadInsert({
       accountId: account._id,
       providerThreadId: newLocalProviderThreadId(),
       subject: args.subject,
@@ -470,7 +471,7 @@ export const send = mutation({
       lastMessageAt: now,
       hasSentMail: true,
       lastSentAt: now,
-    });
+    }));
 
     const emailId = await ctx.db.insert("emails", {
       accountId: account._id,
@@ -1372,7 +1373,7 @@ export async function materializeScheduledEmail(
     if (!t) throw new Error("Thread no longer exists");
     threadId = row.threadId;
   } else {
-    threadId = await ctx.db.insert("threads", {
+    threadId = await ctx.db.insert("threads", stampedThreadInsert({
       accountId: account._id,
       providerThreadId: newLocalProviderThreadId(),
       subject: row.subject,
@@ -1387,7 +1388,7 @@ export async function materializeScheduledEmail(
       lastMessageAt: now,
       hasSentMail: true,
       lastSentAt: now,
-    });
+    }));
   }
 
   const uploads = row.attachments ?? [];
@@ -1567,7 +1568,7 @@ export async function insertSystemOutboundEmail(
   if (!account) throw new Error("Mail account not found");
   const now = Date.now();
 
-  const threadId = await ctx.db.insert("threads", {
+  const threadId = await ctx.db.insert("threads", stampedThreadInsert({
     accountId: account._id,
     providerThreadId: newLocalProviderThreadId(),
     subject: args.subject,
@@ -1582,7 +1583,7 @@ export async function insertSystemOutboundEmail(
     lastMessageAt: now,
     hasSentMail: true,
     lastSentAt: now,
-  });
+  }));
 
   const emailId = await ctx.db.insert("emails", {
     accountId: account._id,

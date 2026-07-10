@@ -12,6 +12,7 @@ import { v } from "convex/values";
 import { promisedFollowUpText } from "../lib/promiseDetector";
 import { upsertEmailSearchText } from "../lib/searchText";
 import type { Doc, Id } from "../_generated/dataModel";
+import { patchThread, stampedThreadInsert } from "../lib/inboxStamp";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Account discovery (cron uses this to schedule periodic syncs).
@@ -319,12 +320,12 @@ export const _upsertThread = internalMutation({
         sameStringArray(existing.labels, patch.labels) &&
         sameStringArray(existing.participantEmails, patch.participantEmails);
       if (same) return existing._id;
-      await ctx.db.patch(existing._id, patch);
+      await patchThread(ctx, existing._id, patch);
       return existing._id;
     }
     // Flag freshly-created threads as "orphan until proven" — repair cron clears
     // it once email rows are confirmed (or refetches). Indexed; no blind scan.
-    return await ctx.db.insert("threads", { ...data, needsRepair: true });
+    return await ctx.db.insert("threads", stampedThreadInsert({ ...data, needsRepair: true }));
   },
 });
 
@@ -628,7 +629,7 @@ export const _onNewEmailInserted = internalMutation({
           { threadId: email.threadId },
         );
       } else {
-        await ctx.db.patch(email.threadId, { isTrashed: true });
+        await patchThread(ctx, email.threadId, { isTrashed: true });
       }
       return;
     }

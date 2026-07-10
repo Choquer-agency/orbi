@@ -256,7 +256,13 @@ export default defineSchema({
     // this, so an unanswered thread doesn't ride up on THEIR later reply.
     lastSentAt: v.optional(v.number()),
     isSpam: v.optional(v.boolean()),
-  })
+    // "Sticker" fields (see lib/inboxStamp.ts): inbox membership computed at
+    // write time so the inbox list + unread badge read exactly the rows they
+    // show instead of scanning wide windows. inboxAt/unreadInboxAt mirror
+    // lastReceivedAt while the thread qualifies, undefined otherwise.
+    inboxAt: v.optional(v.number()),
+    unreadInboxAt: v.optional(v.number()),
+})
     .index("by_account_providerThreadId", ["accountId", "providerThreadId"])
     .index("by_account_lastMessageAt", ["accountId", "lastMessageAt"])
     .index("by_account_lastReceivedAt", ["accountId", "lastReceivedAt"])
@@ -265,6 +271,8 @@ export default defineSchema({
       "isArchived",
       "isTrashed",
     ])
+    .index("by_account_inbox", ["accountId", "inboxAt"])
+    .index("by_account_unreadInbox", ["accountId", "unreadInboxAt"])
     .index("by_account_snoozedUntil", ["accountId", "snoozedUntil"])
     .index("by_account_needsRepair", ["accountId", "needsRepair"])
     .index("by_account_isSpam_lastMessageAt", [

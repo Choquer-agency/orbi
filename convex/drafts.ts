@@ -3,6 +3,7 @@ import { mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import type { Id } from "./_generated/dataModel";
+import { stampedThreadInsert } from "./lib/inboxStamp";
 
 const UNDO_WINDOW_MS = 60_000;
 
@@ -88,7 +89,7 @@ export const create = mutation({
 
     let resolvedThreadId: Id<"threads"> | undefined = args.threadId;
     if (!resolvedThreadId) {
-      resolvedThreadId = await ctx.db.insert("threads", {
+      resolvedThreadId = await ctx.db.insert("threads", stampedThreadInsert({
         accountId: account._id,
         providerThreadId: newDraftThreadId(),
         subject: resolvedSubject || "(no subject)",
@@ -104,7 +105,7 @@ export const create = mutation({
         ],
         messageCount: 0,
         lastMessageAt: now,
-      });
+      }));
     }
 
     const emailId = await ctx.db.insert("emails", {

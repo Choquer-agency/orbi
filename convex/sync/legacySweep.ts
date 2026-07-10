@@ -22,6 +22,7 @@ import { v } from "convex/values";
 import { internalAction, internalMutation } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { upsertEmailSearchText } from "../lib/searchText";
+import { computeInboxStamp } from "../lib/inboxStamp";
 
 // Fat rows: keep batches small for the 16MB per-mutation read cap.
 const BODY_BATCH = 20;
@@ -114,6 +115,92 @@ export const _sweepBodyBatch = internalMutation({
       cleared,
       nextCursor: rows.length > 0 ? rows[rows.length - 1]._creationTime : undefined,
     };
+  },
+});
+
+// ── Inbox-stamp backfill (2026-07-10 read-cost fix) ─────────────────────────
+// Stamps inboxAt/unreadInboxAt on every existing thread so the indexed inbox
+// query can take over. New/updated threads are stamped by patchThread /
+// stampedThreadInsert at write time.
+
+const STAMP_BATCH = 250;
+
+export const backfillInboxStamps = internalAction({
+  args: {
+    cursor: v.optional(v.number()),
+    totals: v.optional(v.object({ scanned: v.number(), stamped: v.number() })),
+  },
+  handler: async (ctx, { cursor, totals }) => {
+    const res: { scanned: number; stamped: number; nextCursor?: number } =
+      await ctx.runMutation(internal.sync.legacySweep._stampBatch, { cursor });
+    const running = {
+      scanned: (totals?.scanned ?? 0) + res.scanned,
+      stamped: (totals?.stamped ?? 0) + res.stamped,
+    };
+    if (res.scanned > 0 && res.nextCursor !== undefined) {
+      await ctx.scheduler.runAfter(
+        500,
+        internal.sync.legacySweep.backfillInboxStamps,
+        { cursor: res.nextCursor, totals: running },
+      );
+      return { status: "continuing", ...running };
+    }
+    console.log(
+      `[legacySweep] inbox stamps done: ${running.scanned} scanned, ${running.stamped} stamped`,
+    );
+    return { status: "done", ...running };
+  },
+});
+
+export const _stampBatch = internalMutation({
+  args: { cursor: v.optional(v.number()) },
+  handler: async (ctx, { cursor }) => {
+    const rows = await ctx.db
+      .query("threads")
+      .withIndex("by_creation_time", (q) =>
+        cursor !== undefined ? q.gt("_creationTime", cursor) : q,
+      )
+      .order("asc")
+      .take(STAMP_BATCH);
+    let stamped = 0;
+    for (const t of rows) {
+      const stamp = computeInboxStamp(t);
+      if (
+        (t.inboxAt ?? undefined) !== stamp.inboxAt ||
+        (t.unreadInboxAt ?? undefined) !== stamp.unreadInboxAt
+      ) {
+        await ctx.db.patch(t._id, stamp);
+        stamped++;
+      }
+    }
+    return {
+      scanned: rows.length,
+      stamped,
+      nextCursor: rows.length > 0 ? rows[rows.length - 1]._creationTime : undefined,
+    };
+  },
+});
+
+// Sanity check before/after switching queries to the sticker indexes: counts
+// threads whose stored stamp disagrees with a fresh computation. Must be 0.
+//   npx convex run sync/legacySweep:_verifyStamps '{}' --prod
+export const _verifyStamps = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const rows = await ctx.db.query("threads").order("desc").take(2000);
+    let mismatched = 0;
+    let inboxCount = 0;
+    for (const t of rows) {
+      const stamp = computeInboxStamp(t);
+      if (
+        (t.inboxAt ?? undefined) !== stamp.inboxAt ||
+        (t.unreadInboxAt ?? undefined) !== stamp.unreadInboxAt
+      ) {
+        mismatched++;
+      }
+      if (stamp.inboxAt !== undefined) inboxCount++;
+    }
+    return { checked: rows.length, mismatched, inboxCount };
   },
 });
 

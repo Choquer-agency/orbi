@@ -8,6 +8,7 @@
 import { v } from "convex/values";
 import { internalMutation, internalQuery } from "./_generated/server";
 import type { Id } from "./_generated/dataModel";
+import { stampedThreadInsert } from "./lib/inboxStamp";
 
 export const _listSearchableAccounts = internalQuery({
   args: {
@@ -85,7 +86,7 @@ export const _upsertSearchHits = internalMutation({
       if (existingThread) {
         threadId = existingThread._id;
       } else {
-        threadId = await ctx.db.insert("threads", {
+        threadId = await ctx.db.insert("threads", stampedThreadInsert({
           accountId,
           providerThreadId: hit.providerThreadId,
           subject: hit.subject,
@@ -103,7 +104,7 @@ export const _upsertSearchHits = internalMutation({
           messageCount: 1,
           lastMessageAt: hit.receivedAt,
           lastReceivedAt: hit.receivedAt,
-        });
+        }));
       }
 
       const emailId = await ctx.db.insert("emails", {

@@ -18,6 +18,7 @@ import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import { insertSystemOutboundEmail } from "./emails";
 import { isTriageCategory } from "./ai/classifier";
+import { patchThread, stampedThreadInsert } from "./lib/inboxStamp";
 
 // ── Settings ────────────────────────────────────────────────────────────────
 
@@ -295,7 +296,7 @@ export const submitFeedback = mutation({
         if (isTriageCategory(args.finalCategory)) {
           filtered.push(`triage:${args.finalCategory}`);
         }
-        await ctx.db.patch(args.threadId, { labels: filtered });
+        await patchThread(ctx, args.threadId, { labels: filtered });
       }
     }
 
@@ -311,7 +312,7 @@ export const submitFeedback = mutation({
           // Move to Spam for real: stamp the denormalized isSpam flag (the
           // Spam folder query reads the by_account_isSpam index, not labels)
           // and drop INBOX so the thread leaves the inbox immediately.
-          await ctx.db.patch(args.threadId, {
+          await patchThread(ctx, args.threadId, {
             labels: [
               ...thread.labels.filter((l) => l !== "INBOX"),
               ...(hasSpamLabel ? [] : ["SPAM"]),
@@ -319,7 +320,7 @@ export const submitFeedback = mutation({
             isSpam: true,
           });
         } else if (hasSpamLabel || thread.isSpam) {
-          await ctx.db.patch(args.threadId, {
+          await patchThread(ctx, args.threadId, {
             labels: [
               ...thread.labels.filter((l) => l !== "SPAM"),
               ...(thread.labels.includes("INBOX") ? [] : ["INBOX"]),
