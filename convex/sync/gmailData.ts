@@ -692,33 +692,13 @@ export const _onNewEmailInserted = internalMutation({
       }
     }
 
-    // 3. Schedule AI classification for RECENT inbound only (>90 days is
-    // backfill — already triaged manually). Outbound gets a synthetic "sent"
-    // classification (no LLM cost) plus optional follow-up watching.
+    // 3. AI classification REMOVED (2026-07-10, Bryce): the category feature
+    // was unused, cost a Haiku call per inbound email, and its query paths
+    // drove the database-read bill. Gmail's own CATEGORY_* labels (synced
+    // onto thread.labels for free) now cover the junk-skip in needsResponse.
     const CLASSIFY_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
     const isRecent = email.receivedAt > Date.now() - CLASSIFY_WINDOW_MS;
-    if (!isOutbound && isRecent) {
-      await ctx.scheduler.runAfter(
-        0,
-        internal.ai.classifier.classifyEmailWithContext,
-        { emailId, userId: account.userId },
-      );
-    } else if (isOutbound) {
-      const existingClassification = await ctx.db
-        .query("emailClassifications")
-        .withIndex("by_email", (q) => q.eq("emailId", emailId))
-        .unique();
-      if (!existingClassification) {
-        await ctx.db.insert("emailClassifications", {
-          emailId,
-          category: "sent",
-          confidence: 1,
-          urgency: "low",
-          summary: undefined,
-          manualOverride: false,
-          overriddenBy: undefined,
-        });
-      }
+    if (isOutbound) {
       if (promisedFollowUpText(bodyText)) {
         const firstRecipient = Array.isArray(email.toAddresses)
           ? (email.toAddresses[0] as { email?: string } | undefined)?.email

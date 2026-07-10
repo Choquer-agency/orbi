@@ -93,10 +93,19 @@ export const _loadForScoring = internalQuery({
     const senderIsTeamInternal =
       !isUserOutbound && !!fromDomain && teamDomains.has(fromDomain);
 
-    const classification = await ctx.db
-      .query("emailClassifications")
-      .withIndex("by_email", (q) => q.eq("emailId", emailId))
-      .unique();
+    // Junk gate: the AI classifier is removed (2026-07-10). Gmail's own
+    // CATEGORY_* labels on the thread carry the same skip signal for free.
+    const threadForLabels = await ctx.db.get(email.threadId);
+    const threadLabels = threadForLabels?.labels ?? [];
+    const labelCategory = threadLabels.includes("SPAM")
+      ? "spam"
+      : threadLabels.includes("CATEGORY_PROMOTIONS")
+        ? "marketing"
+        : threadLabels.includes("CATEGORY_UPDATES") ||
+            threadLabels.includes("CATEGORY_SOCIAL") ||
+            threadLabels.includes("CATEGORY_FORUMS")
+          ? "notification"
+          : null;
 
     // "Open signal" = a row for this email with dismissedAt undefined.
     const signal = await ctx.db
@@ -202,7 +211,7 @@ export const _loadForScoring = internalQuery({
         snippet: email.snippet,
         receivedAt: email.receivedAt,
       },
-      category: classification?.category ?? null,
+      category: labelCategory,
       hasOpenSignal,
       isUserOutbound,
       priorMessages,
@@ -327,17 +336,13 @@ export const _dismissOpenSignalsForThread = internalMutation({
         at >= 0 && at < senderAddress.length - 1
           ? senderAddress.slice(at + 1)
           : "";
-      const classification = await ctx.db
-        .query("emailClassifications")
-        .withIndex("by_email", (q) => q.eq("emailId", r.emailId))
-        .unique();
       await ctx.db.insert("needsResponseFeedback", {
         userId: r.userId,
         threadId: r.threadId,
         emailId: r.emailId,
         senderAddress,
         senderDomain,
-        category: classification?.category ?? undefined,
+        category: undefined,
         scoreAtDismissal: r.score,
         reasonAtDismissal: r.reason,
         kind,

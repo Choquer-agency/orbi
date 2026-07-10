@@ -1,4 +1,4 @@
-import { X, FolderInput, Pen, Bell, Filter, Columns3, ShieldBan, Plane, TextQuote, UserCircle, Shield, Mail, Trash2, Inbox, Users } from 'lucide-react';
+import { X, FolderInput, Pen, Bell, Filter, ShieldBan, Plane, TextQuote, UserCircle, Shield, Mail, Trash2, Inbox, Users } from 'lucide-react';
 import { SignatureIcon } from '../icons/SignatureIcon';
 import { useUiStore } from '../../stores/uiStore';
 import { WritingPreferences } from './WritingPreferences';
@@ -7,7 +7,6 @@ import { SignatureSettings } from './SignatureSettings';
 import { NotificationSettings } from './NotificationSettings';
 import { SecuritySettings } from './SecuritySettings';
 import { BlockedSendersSettings } from './BlockedSendersSettings';
-import { InboxSplitSettings } from './InboxSplitSettings';
 import { AiFilterSettings } from './AiFilterSettings';
 import { VacationResponderSettings } from './VacationResponderSettings';
 import { SnippetSettings } from './SnippetSettings';
@@ -32,7 +31,6 @@ const SECTIONS = [
   { id: 'notifications', label: 'Notifications', icon: Bell },
   { id: 'security', label: 'Security', icon: Shield },
   { id: 'filters', label: 'AI Filters', icon: Filter },
-  { id: 'splits', label: 'Inbox Splits', icon: Columns3 },
   { id: 'needs-response', label: 'Needs Response', icon: Inbox },
   { id: 'blocked', label: 'Blocked Senders', icon: ShieldBan },
   { id: 'retention', label: 'Auto-Delete', icon: Trash2 },
@@ -64,8 +62,6 @@ export function SettingsPanel({ onClose }: SettingsPanelProps) {
         return <SecuritySettings />;
       case 'filters':
         return <AiFilterSettings />;
-      case 'splits':
-        return <InboxSplitSettings />;
       case 'needs-response':
         return <NeedsResponseSettings />;
       case 'blocked':

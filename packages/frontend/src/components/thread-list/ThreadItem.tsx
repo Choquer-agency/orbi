@@ -8,7 +8,6 @@ import { useUpdateThread, useSnoozeThread, useUnsnoozeThread } from '../../hooks
 import { useContactNameResolver } from '../../hooks/useContacts';
 import { cn, formatRelativeTime, getInitials, getCompanyLogoUrls } from '../../lib/utils';
 import { getAvatarColor } from '../../lib/constants';
-import { CategoryPill } from '../ui/CategoryPill';
 import { SnoozePopover } from './SnoozePopover';
 import { useUiStore } from '../../stores/uiStore';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -248,9 +247,6 @@ function ThreadItemImpl({ thread, isSelected, isMultiSelected, onSelect, onShift
                 <span className="rounded-md bg-amber-100 px-1.5 text-[10px] font-semibold leading-[16px] text-amber-700 ring-1 ring-inset ring-amber-200">
                   Draft
                 </span>
-              )}
-              {classification && (
-                <CategoryPill category={classification.category} />
               )}
               {commentCount > 0 && (
                 <span className="rounded-md bg-amber-100 px-1.5 text-[10px] font-semibold leading-[16px] text-amber-700 ring-1 ring-inset ring-amber-200">

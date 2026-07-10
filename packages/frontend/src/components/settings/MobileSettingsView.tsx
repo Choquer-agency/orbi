@@ -1,5 +1,5 @@
 import { useState, type ComponentType, type SVGProps } from 'react';
-import { ChevronLeft, ChevronRight, LogOut, UserCircle, FolderInput, Pen, Bell, Filter, Columns3, ShieldBan, Plane, TextQuote, Shield } from 'lucide-react';
+import { ChevronLeft, ChevronRight, LogOut, UserCircle, FolderInput, Pen, Bell, Filter, ShieldBan, Plane, TextQuote, Shield } from 'lucide-react';
 import { SignatureIcon } from '../icons/SignatureIcon';
 import { useAuthStore } from '../../stores/authStore';
 import { getInitials } from '../../lib/utils';
@@ -10,7 +10,6 @@ import { SignatureSettings } from './SignatureSettings';
 import { NotificationSettings } from './NotificationSettings';
 import { SecuritySettings } from './SecuritySettings';
 import { AiFilterSettings } from './AiFilterSettings';
-import { InboxSplitSettings } from './InboxSplitSettings';
 import { BlockedSendersSettings } from './BlockedSendersSettings';
 import { VacationResponderSettings } from './VacationResponderSettings';
 import { SnippetSettings } from './SnippetSettings';
@@ -48,7 +47,6 @@ const SECTION_GROUPS: SectionGroup[] = [
     title: 'Inbox',
     items: [
       { id: 'filters', label: 'AI Filters', icon: Filter },
-      { id: 'splits', label: 'Inbox Splits', icon: Columns3 },
       { id: 'blocked', label: 'Blocked Senders', icon: ShieldBan },
     ],
   },
@@ -75,7 +73,6 @@ function renderSectionContent(section: string) {
     case 'notifications': return <NotificationSettings />;
     case 'security': return <SecuritySettings />;
     case 'filters': return <AiFilterSettings />;
-    case 'splits': return <InboxSplitSettings />;
     case 'blocked': return <BlockedSendersSettings />;
     case 'vacation': return <VacationResponderSettings />;
     case 'snippets': return <SnippetSettings />;

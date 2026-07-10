@@ -397,216 +397,10 @@ export const list = query({
       };
     }
 
-    // Marketing fast path uses the AI emailClassifications table because the
-    // pink "Marketing" pill in the inbox is driven by that signal, not a Gmail
-    // label. Pull recent classifications matching this category and assemble
-    // the thread list from them directly.
-    if (folder === "marketing" && !searchTerm && !fromEmail) {
-      const CLASSIFICATION_HITS = 300;
-      const classifications = await ctx.db
-        .query("emailClassifications")
-        .withIndex("by_category", (q) => q.eq("category", folder))
-        .order("desc")
-        .take(CLASSIFICATION_HITS);
-      const userAccountSet = new Set(accountIds.map((a) => String(a)));
-      // Group/filter on the classification row's denormalized fields — a
-      // full email-doc get per hit was reading fat legacy rows just to learn
-      // accountId/threadId. Legacy rows without the stamp fall back to one
-      // email get (disappears once the backfill finishes).
-      const threadLatest = new Map<
-        Id<"threads">,
-        {
-          emailId: Id<"emails">;
-          receivedAt: number;
-          classification: {
-            category: string;
-            confidence?: number;
-            urgency?: string;
-            summary?: string;
-          };
-        }
-      >();
-      for (const c of classifications) {
-        let accountId = c.accountId;
-        let threadId = c.threadId;
-        let receivedAt = c.receivedAt;
-        if (!accountId || !threadId || receivedAt === undefined) {
-          const email = await ctx.db.get(c.emailId);
-          if (!email) continue;
-          accountId = email.accountId;
-          threadId = email.threadId;
-          receivedAt = email.receivedAt;
-        }
-        if (!userAccountSet.has(String(accountId))) continue;
-        const cur = threadLatest.get(threadId);
-        if (!cur || receivedAt > cur.receivedAt) {
-          threadLatest.set(threadId, {
-            emailId: c.emailId,
-            receivedAt,
-            classification: {
-              category: c.category,
-              confidence: c.confidence,
-              urgency: c.urgency,
-              summary: c.summary,
-            },
-          });
-        }
-      }
-      const sortedThreadIds = Array.from(threadLatest.entries())
-        .sort((a, b) => b[1].receivedAt - a[1].receivedAt)
-        .map(([id]) => id);
-      const total = sortedThreadIds.length;
-      const pagedIds = sortedThreadIds.slice(skip, skip + limitNum);
-      const pagedThreads = (
-        await Promise.all(pagedIds.map((id) => ctx.db.get(id)))
-      ).filter(
-        (t): t is Doc<"threads"> => !!t && !t.isTrashed && !t.isArchived,
-      );
-      const data = await Promise.all(
-        pagedThreads.map(async (t) => {
-          const hit = threadLatest.get(t._id)!;
-          // Only the visible page reads its preview email doc.
-          const email = await ctx.db.get(hit.emailId);
-          const comments = await ctx.db
-            .query("threadComments")
-            .withIndex("by_thread", (q) => q.eq("threadId", t._id))
-            .collect();
-          return {
-            ...t,
-            id: t._id,
-            emails: [
-              {
-                fromAddress: email?.fromAddress ?? "",
-                fromName: email?.fromName,
-                snippet: email?.snippet,
-                receivedAt: hit.receivedAt,
-                classification: hit.classification,
-              },
-            ],
-            _count: { comments: comments.length },
-            hasDraft: false,
-          };
-        }),
-      );
-      return {
-        data,
-        total,
-        page: pageNum,
-        limit: limitNum,
-        hasMore: skip + limitNum < total,
-      };
-    }
-
-    // Inbox-split / category fast path. The inbox tab bar passes args.category
-    // ("client_work", "internal", "billing", etc — comma-separated when the
-    // user combines several into one split). The generic candidate-fan-out
-    // path would read every email body in every recent thread to filter by
-    // classification, which trivially blows the 16MB read limit on a real
-    // mailbox. Here we go directly to the classifications index instead.
-    if (args.category && !searchTerm && !fromEmail) {
-      const cats = args.category
-        .split(",")
-        .map((c) => c.trim())
-        .filter(Boolean);
-      if (cats.length > 0) {
-        const PER_CATEGORY_HITS = 200;
-        const allClassifications: Doc<"emailClassifications">[] = [];
-        for (const cat of cats) {
-          const hits = await ctx.db
-            .query("emailClassifications")
-            .withIndex("by_category", (q) => q.eq("category", cat))
-            .order("desc")
-            .take(PER_CATEGORY_HITS);
-          allClassifications.push(...hits);
-        }
-        const userAccountSet = new Set(accountIds.map((a) => String(a)));
-        // Same denormalized-field grouping as the marketing path above: no
-        // per-hit email gets (legacy rows fall back until backfilled).
-        const threadLatest = new Map<
-          Id<"threads">,
-          {
-            emailId: Id<"emails">;
-            receivedAt: number;
-            classification: {
-              category: string;
-              confidence?: number;
-              urgency?: string;
-              summary?: string;
-            };
-          }
-        >();
-        for (const c of allClassifications) {
-          let accountId = c.accountId;
-          let threadId = c.threadId;
-          let receivedAt = c.receivedAt;
-          if (!accountId || !threadId || receivedAt === undefined) {
-            const email = await ctx.db.get(c.emailId);
-            if (!email) continue;
-            accountId = email.accountId;
-            threadId = email.threadId;
-            receivedAt = email.receivedAt;
-          }
-          if (!userAccountSet.has(String(accountId))) continue;
-          const cur = threadLatest.get(threadId);
-          if (!cur || receivedAt > cur.receivedAt) {
-            threadLatest.set(threadId, {
-              emailId: c.emailId,
-              receivedAt,
-              classification: {
-                category: c.category,
-                confidence: c.confidence,
-                urgency: c.urgency,
-                summary: c.summary,
-              },
-            });
-          }
-        }
-        const sortedThreadIds = Array.from(threadLatest.entries())
-          .sort((a, b) => b[1].receivedAt - a[1].receivedAt)
-          .map(([id]) => id);
-        const total = sortedThreadIds.length;
-        const pagedIds = sortedThreadIds.slice(skip, skip + limitNum);
-        const pagedThreads = (
-          await Promise.all(pagedIds.map((id) => ctx.db.get(id)))
-        ).filter(
-          (t): t is Doc<"threads"> =>
-            !!t && !t.isTrashed && !t.isArchived && !t.snoozedUntil,
-        );
-        const data = await Promise.all(
-          pagedThreads.map(async (t) => {
-            const hit = threadLatest.get(t._id)!;
-            // Only the visible page reads its preview email doc.
-            const email = await ctx.db.get(hit.emailId);
-            const comments = await ctx.db
-              .query("threadComments")
-              .withIndex("by_thread", (q) => q.eq("threadId", t._id))
-              .collect();
-            return {
-              ...t,
-              id: t._id,
-              emails: [
-                {
-                  fromAddress: email?.fromAddress ?? "",
-                  fromName: email?.fromName,
-                  snippet: email?.snippet,
-                  receivedAt: hit.receivedAt,
-                  classification: hit.classification,
-                },
-              ],
-              _count: { comments: comments.length },
-              hasDraft: false,
-            };
-          }),
-        );
-        return {
-          data,
-          total,
-          page: pageNum,
-          limit: limitNum,
-          hasMore: skip + limitNum < total,
-        };
-      }
-    }
+    // Marketing / category / inbox-split fast paths REMOVED (2026-07-10,
+    // Bryce): the AI classification feature is deleted. args.category is
+    // still accepted for old clients but ignored — they fall through to the
+    // default folder handling below.
 
     // Pull threads. Default path: most recent N per account by lastMessageAt.
     // Search path: query the search indexes on threads.subject AND
@@ -922,37 +716,6 @@ export const list = query({
         .map(({ thread }) => thread);
     }
 
-    // Category filter (post-process: needs email classifications)
-    if (args.category) {
-      const cats = args.category
-        .split(",")
-        .map((c) => c.trim())
-        .filter(Boolean);
-      if (cats.length > 0) {
-        const cleared: Doc<"threads">[] = [];
-        for (const t of filtered) {
-          const emails = await ctx.db
-            .query("emails")
-            .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
-            .order("desc")
-            .take(10);
-          let matched = false;
-          for (const e of emails) {
-            const cls = await ctx.db
-              .query("emailClassifications")
-              .withIndex("by_email", (q) => q.eq("emailId", e._id))
-              .unique();
-            if (cls && cats.includes(cls.category)) {
-              matched = true;
-              break;
-            }
-          }
-          if (matched) cleared.push(t);
-        }
-        filtered = cleared;
-      }
-    }
-
     // Sort: the inbox ranks by when THEY last wrote (lastReceivedAt) — your
     // own reply keeps the thread in place; only an incoming message bumps it
     // to the top (Bryce 2026-07-08: "Primary is for latest FROM emails").
@@ -1002,21 +765,8 @@ export const list = query({
           ? true
           : emailsDesc.some((e) => e.isDraft);
 
-        let classification = null;
-        if (primary) {
-          const c = await ctx.db
-            .query("emailClassifications")
-            .withIndex("by_email", (q) => q.eq("emailId", primary._id))
-            .unique();
-          if (c) {
-            classification = {
-              category: c.category,
-              confidence: c.confidence,
-              urgency: c.urgency,
-              summary: c.summary,
-            };
-          }
-        }
+        // Classification feature removed (2026-07-10) — rows carry no pill.
+        const classification = null;
 
         return {
           ...t,
@@ -1104,7 +854,7 @@ export const get = query({
         // them here, alongside attachments + classification. If a row exists
         // both on the legacy `emails.bodyHtml` *and* the new `emailBodies`
         // table during the migration, prefer the sibling row.
-        const [attachmentRows, body, cls] = await Promise.all([
+        const [attachmentRows, body] = await Promise.all([
           ctx.db
             .query("attachments")
             .withIndex("by_email", (q) => q.eq("emailId", e._id))
@@ -1113,11 +863,8 @@ export const get = query({
             .query("emailBodies")
             .withIndex("by_email", (q) => q.eq("emailId", e._id))
             .unique(),
-          ctx.db
-            .query("emailClassifications")
-            .withIndex("by_email", (q) => q.eq("emailId", e._id))
-            .unique(),
         ]);
+        const cls = null as { category: string; confidence?: number; urgency?: string; summary?: string } | null;
         const attachments = await Promise.all(
           attachmentRows.map(async (a) => ({
             ...a,

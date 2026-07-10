@@ -5,7 +5,6 @@ import { Search, Check, Plus, X, Archive, Star, Trash2, Loader2, Mail, MailOpen,
 import { useThreads, useUpdateThread, usePrefetchAdjacentThreads, useIdleThreadPrefetch, useThreadHoverPrefetch } from '../../hooks/useThreads';
 import { useAccounts } from '../../hooks/useAccounts';
 import { useContactAutocomplete } from '../../hooks/useContacts';
-import { useInboxSplits } from '../../hooks/useInboxSplits';
 import { useAnyHistoricalSyncInProgress } from '../../hooks/useHistoricalSync';
 import { useUiStore } from '../../stores/uiStore';
 import { cn, groupByDate } from '../../lib/utils';
@@ -76,15 +75,11 @@ export function ThreadList() {
   const [activeOperator, setActiveOperator] = useState<string | null>(null); // operator being filled in (e.g. "from:")
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
-  const [activeSplitCategory, setActiveSplitCategory] = useState<string | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [mobileSplitMenuOpen, setMobileSplitMenuOpen] = useState(false);
   const isMobile = useIsMobile();
   const selectedSuggestionRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
-  const { data: inboxSplits } = useInboxSplits();
-  const enabledSplits = useMemo(() => inboxSplits?.filter((s) => s.isEnabled) ?? [], [inboxSplits]);
 
   // Contact autocomplete for suggestions dropdown
   const { data: autocompleteData } = useContactAutocomplete(searchQuery);
@@ -187,7 +182,7 @@ export function ThreadList() {
     folder: isSearching ? undefined : (selectedFolder !== 'dashboard' ? selectedFolder : 'inbox'),
     search: searchFrom ? undefined : (debouncedSearch || undefined),
     from: searchFrom,
-    category: (selectedFolder === 'inbox' && activeSplitCategory) ? activeSplitCategory : undefined,
+
   });
   const { data: accountsData } = useAccounts();
   const updateThread = useUpdateThread();
@@ -371,7 +366,7 @@ export function ThreadList() {
     setDesktopScrollTop(0);
     const el = desktopViewportRef.current;
     if (el) el.scrollTop = 0;
-  }, [activeSplitCategory, selectedFolder, selectedAccountId, threadListFilter, searchFrom, debouncedSearch]);
+  }, [selectedFolder, selectedAccountId, threadListFilter, searchFrom, debouncedSearch]);
 
   const desktopRowPositions = useMemo(() => {
     let start = 0;
@@ -544,57 +539,7 @@ export function ThreadList() {
         <>
           <div className="flex items-center justify-between border-b border-border px-3 pb-2.5 pt-1" style={{ paddingTop: 'max(env(safe-area-inset-top, 0px), 0.25rem)' }}>
             <NavigationDropdown />
-            {enabledSplits.length > 1 && (
-              <button
-                onClick={() => setMobileSplitMenuOpen((v) => !v)}
-                className={cn(
-                  'flex h-7 w-7 items-center justify-center rounded-lg transition-colors',
-                  mobileSplitMenuOpen || activeSplitCategory
-                    ? 'bg-primary/10 text-primary'
-                    : 'text-text-tertiary',
-                )}
-              >
-                <Tag className="h-4 w-4" />
-              </button>
-            )}
           </div>
-          {/* Expandable category filter row */}
-          <AnimatePresence>
-            {mobileSplitMenuOpen && enabledSplits.length > 1 && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: 'auto', opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                transition={{ type: 'spring', stiffness: 400, damping: 30 }}
-                className="overflow-hidden border-b border-border"
-              >
-                <div className="flex items-center gap-1 overflow-x-auto px-3 py-2 scrollbar-none">
-                  {enabledSplits.map((split) => {
-                    const isActive = split.category === 'all'
-                      ? !activeSplitCategory
-                      : activeSplitCategory === split.category;
-                    return (
-                      <button
-                        key={split.id}
-                        onClick={() => {
-                          setActiveSplitCategory(split.category === 'all' ? null : split.category);
-                          setMobileSplitMenuOpen(false);
-                        }}
-                        className={cn(
-                          'shrink-0 rounded-md px-2.5 py-1 text-xs font-medium transition-colors',
-                          isActive
-                            ? 'bg-primary/10 text-primary'
-                            : 'text-text-tertiary',
-                        )}
-                      >
-                        {split.label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
         </>
       ) : (
         <div className="flex h-[78px] items-center gap-2 border-b border-border px-3 pt-[32px]">
@@ -924,31 +869,6 @@ export function ThreadList() {
           </motion.div>
         )}
       </AnimatePresence>
-
-      {/* Inbox split tabs — only in smart mode, desktop only (mobile has them in header) */}
-      {!isMobile && !isSearching && selectedFolder === 'inbox' && inboxFilterMode === 'smart' && enabledSplits.length > 1 && (
-        <div className="flex items-center gap-0.5 overflow-x-auto border-b border-border px-3 py-1.5 scrollbar-none">
-          {enabledSplits.map((split) => {
-            const isActive = split.category === 'all'
-              ? !activeSplitCategory
-              : activeSplitCategory === split.category;
-            return (
-              <button
-                key={split.id}
-                onClick={() => setActiveSplitCategory(split.category === 'all' ? null : split.category)}
-                className={cn(
-                  'shrink-0 rounded-md px-2.5 py-1 text-[11px] font-medium transition-colors',
-                  isActive
-                    ? 'bg-primary/10 text-primary'
-                    : 'text-text-tertiary hover:bg-surface hover:text-text-secondary',
-                )}
-              >
-                {split.label}
-              </button>
-            );
-          })}
-        </div>
-      )}
 
       {/* Filter tabs — only render when there's actually something to show */}
       {!isMobile && isSearching && (

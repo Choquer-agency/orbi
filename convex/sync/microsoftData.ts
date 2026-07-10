@@ -675,35 +675,10 @@ export const _onNewEmailInserted = internalMutation({
       }
     }
 
-    // 3. Schedule AI classification for RECENT inbound mail only. Older mail
-    // (>90 days) is almost always backfill — we don't pay Claude to label
-    // emails from years ago that were already triaged manually. Outbound gets
-    // a synthetic "sent" classification (no LLM cost) plus optional follow-up
-    // watching.
+    // 3. AI classification REMOVED (2026-07-10) — see gmailData.ts twin.
     const CLASSIFY_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
     const isRecent = email.receivedAt > Date.now() - CLASSIFY_WINDOW_MS;
-    if (!isOutbound && isRecent) {
-      await ctx.scheduler.runAfter(
-        0,
-        internal.ai.classifier.classifyEmailWithContext,
-        { emailId, userId: account.userId },
-      );
-    } else if (isOutbound) {
-      const existingClassification = await ctx.db
-        .query("emailClassifications")
-        .withIndex("by_email", (q) => q.eq("emailId", emailId))
-        .unique();
-      if (!existingClassification) {
-        await ctx.db.insert("emailClassifications", {
-          emailId,
-          category: "sent",
-          confidence: 1,
-          urgency: "low",
-          summary: undefined,
-          manualOverride: false,
-          overriddenBy: undefined,
-        });
-      }
+    if (isOutbound) {
       if (promisedFollowUpText(bodyText)) {
         const firstRecipient = Array.isArray(email.toAddresses)
           ? (email.toAddresses[0] as { email?: string } | undefined)?.email

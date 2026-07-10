@@ -117,7 +117,55 @@ export const _sweepBodyBatch = internalMutation({
   },
 });
 
+// ── Classification purge (2026-07-10: category feature deleted) ─────────────
+// Deletes every emailClassifications row. The classifier no longer runs on
+// new mail, list paths no longer read the table, and the UI is removed —
+// this clears the stored data per Bryce's "delete it altogether".
+
+const PURGE_BATCH = 400;
+
+export const purgeClassifications = internalAction({
+  args: {
+    totals: v.optional(v.object({ deleted: v.number() })),
+  },
+  handler: async (ctx, { totals }) => {
+    const res: { deleted: number } = await ctx.runMutation(
+      internal.sync.legacySweep._purgeClsBatch,
+      {},
+    );
+    const running = { deleted: (totals?.deleted ?? 0) + res.deleted };
+    if (res.deleted > 0) {
+      await ctx.scheduler.runAfter(
+        500,
+        internal.sync.legacySweep.purgeClassifications,
+        { totals: running },
+      );
+      return { status: "continuing", ...running };
+    }
+    console.log(`[legacySweep] classifications purged: ${running.deleted} rows`);
+    return { status: "done", ...running };
+  },
+});
+
+export const _purgeClsBatch = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const rows = await ctx.db
+      .query("emailClassifications")
+      .withIndex("by_creation_time", (q) => q)
+      .order("asc")
+      .take(PURGE_BATCH);
+    for (const r of rows) {
+      await ctx.db.delete(r._id);
+    }
+    return { deleted: rows.length };
+  },
+});
+
 // ── Classification denorm backfill ──────────────────────────────────────────
+// OBSOLETE (2026-07-10): superseded by purgeClassifications the same day the
+// backfill shipped — the category feature was deleted outright. Kept so an
+// in-flight chained run terminates cleanly (it stops once rows are gone).
 
 const CLS_BATCH = 100;
 

@@ -39,10 +39,9 @@ import * as Avatar from '@radix-ui/react-avatar';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as ScrollArea from '@radix-ui/react-scroll-area';
 import { useThread, useUpdateThread } from '../../hooks/useThreads';
-import { TriageBanner, SenderRuleDialog } from './TriageBanner';
+import { SenderRuleDialog } from './TriageBanner';
 import { useTriageFeedback } from '../../hooks/useTriage';
 import { DeliveryStatus } from './DeliveryStatus';
-import { TriageCategoryPill } from './TriageCategoryPill';
 import { useAddComment } from '../../hooks/useComments';
 import { useAccounts } from '../../hooks/useAccounts';
 import { useUiStore } from '../../stores/uiStore';
@@ -2193,10 +2192,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           </h2>
         </div>
         <div className="flex shrink-0 items-center gap-1">
-          <TriageCategoryPill
-            threadId={thread.id}
-            latestEmailId={thread.emails?.[thread.emails.length - 1]?.id}
-          />
           <Tooltip content="Add team member">
             <button
               onClick={() => setShowTagMenu(!showTagMenu)}
@@ -2586,13 +2581,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           </div>
         </div>
       )}
-
-      {/* Triage suggestion banner */}
-      <TriageBanner
-        threadId={thread.id}
-        latestEmailId={thread.emails?.[thread.emails.length - 1]?.id}
-        senderAddress={thread.emails?.[thread.emails.length - 1]?.fromAddress}
-      />
 
       {/* Timeline: emails + comments merged */}
       <ScrollArea.Root className="min-h-0 flex-1">
