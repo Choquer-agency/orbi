@@ -596,6 +596,13 @@ export default defineSchema({
   emailClassifications: defineTable({
     emailId: v.id("emails"),
     category: v.string(),
+    // Denormalized from the email row at classify time (backfilled for older
+    // rows). The category/marketing list paths group and account-filter with
+    // these instead of ctx.db.get(email) per hit — legacy email docs carry
+    // in-row bodies, so those gets were reading ~77KB to learn 3 fields.
+    accountId: v.optional(v.id("mailAccounts")),
+    threadId: v.optional(v.id("threads")),
+    receivedAt: v.optional(v.number()),
     // The trio below (confidence, urgency, summary) used to be required but
     // is no longer displayed. Kept as optional so we can drop them from new
     // writes (saves ~40% per row) without breaking legacy rows. A one-shot

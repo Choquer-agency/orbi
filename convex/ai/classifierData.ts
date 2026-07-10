@@ -123,10 +123,15 @@ export const _persistClassification = internalMutation({
       .withIndex("by_email", (q) => q.eq("emailId", args.emailId))
       .unique();
     if (existing) return existing;
+    // Stamp account/thread/receivedAt so list queries never need the email doc.
+    const email = await ctx.db.get(args.emailId);
     const id = await ctx.db.insert("emailClassifications", {
       emailId: args.emailId,
       category: args.category,
       manualOverride: args.manualOverride ?? false,
+      accountId: email?.accountId,
+      threadId: email?.threadId,
+      receivedAt: email?.receivedAt,
     });
     return await ctx.db.get(id);
   },

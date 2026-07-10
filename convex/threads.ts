@@ -409,10 +409,15 @@ export const list = query({
         .order("desc")
         .take(CLASSIFICATION_HITS);
       const userAccountSet = new Set(accountIds.map((a) => String(a)));
+      // Group/filter on the classification row's denormalized fields — a
+      // full email-doc get per hit was reading fat legacy rows just to learn
+      // accountId/threadId. Legacy rows without the stamp fall back to one
+      // email get (disappears once the backfill finishes).
       const threadLatest = new Map<
         Id<"threads">,
         {
-          email: Doc<"emails">;
+          emailId: Id<"emails">;
+          receivedAt: number;
           classification: {
             category: string;
             confidence?: number;
@@ -422,13 +427,22 @@ export const list = query({
         }
       >();
       for (const c of classifications) {
-        const email = await ctx.db.get(c.emailId);
-        if (!email) continue;
-        if (!userAccountSet.has(String(email.accountId))) continue;
-        const cur = threadLatest.get(email.threadId);
-        if (!cur || email.receivedAt > cur.email.receivedAt) {
-          threadLatest.set(email.threadId, {
-            email,
+        let accountId = c.accountId;
+        let threadId = c.threadId;
+        let receivedAt = c.receivedAt;
+        if (!accountId || !threadId || receivedAt === undefined) {
+          const email = await ctx.db.get(c.emailId);
+          if (!email) continue;
+          accountId = email.accountId;
+          threadId = email.threadId;
+          receivedAt = email.receivedAt;
+        }
+        if (!userAccountSet.has(String(accountId))) continue;
+        const cur = threadLatest.get(threadId);
+        if (!cur || receivedAt > cur.receivedAt) {
+          threadLatest.set(threadId, {
+            emailId: c.emailId,
+            receivedAt,
             classification: {
               category: c.category,
               confidence: c.confidence,
@@ -439,11 +453,10 @@ export const list = query({
         }
       }
       const sortedThreadIds = Array.from(threadLatest.entries())
-        .sort((a, b) => b[1].email.receivedAt - a[1].email.receivedAt)
+        .sort((a, b) => b[1].receivedAt - a[1].receivedAt)
         .map(([id]) => id);
-      const visibleIds = sortedThreadIds.filter((_id) => true);
-      const total = visibleIds.length;
-      const pagedIds = visibleIds.slice(skip, skip + limitNum);
+      const total = sortedThreadIds.length;
+      const pagedIds = sortedThreadIds.slice(skip, skip + limitNum);
       const pagedThreads = (
         await Promise.all(pagedIds.map((id) => ctx.db.get(id)))
       ).filter(
@@ -452,6 +465,8 @@ export const list = query({
       const data = await Promise.all(
         pagedThreads.map(async (t) => {
           const hit = threadLatest.get(t._id)!;
+          // Only the visible page reads its preview email doc.
+          const email = await ctx.db.get(hit.emailId);
           const comments = await ctx.db
             .query("threadComments")
             .withIndex("by_thread", (q) => q.eq("threadId", t._id))
@@ -461,10 +476,10 @@ export const list = query({
             id: t._id,
             emails: [
               {
-                fromAddress: hit.email.fromAddress,
-                fromName: hit.email.fromName,
-                snippet: hit.email.snippet,
-                receivedAt: hit.email.receivedAt,
+                fromAddress: email?.fromAddress ?? "",
+                fromName: email?.fromName,
+                snippet: email?.snippet,
+                receivedAt: hit.receivedAt,
                 classification: hit.classification,
               },
             ],
@@ -505,10 +520,13 @@ export const list = query({
           allClassifications.push(...hits);
         }
         const userAccountSet = new Set(accountIds.map((a) => String(a)));
+        // Same denormalized-field grouping as the marketing path above: no
+        // per-hit email gets (legacy rows fall back until backfilled).
         const threadLatest = new Map<
           Id<"threads">,
           {
-            email: Doc<"emails">;
+            emailId: Id<"emails">;
+            receivedAt: number;
             classification: {
               category: string;
               confidence?: number;
@@ -518,13 +536,22 @@ export const list = query({
           }
         >();
         for (const c of allClassifications) {
-          const email = await ctx.db.get(c.emailId);
-          if (!email) continue;
-          if (!userAccountSet.has(String(email.accountId))) continue;
-          const cur = threadLatest.get(email.threadId);
-          if (!cur || email.receivedAt > cur.email.receivedAt) {
-            threadLatest.set(email.threadId, {
-              email,
+          let accountId = c.accountId;
+          let threadId = c.threadId;
+          let receivedAt = c.receivedAt;
+          if (!accountId || !threadId || receivedAt === undefined) {
+            const email = await ctx.db.get(c.emailId);
+            if (!email) continue;
+            accountId = email.accountId;
+            threadId = email.threadId;
+            receivedAt = email.receivedAt;
+          }
+          if (!userAccountSet.has(String(accountId))) continue;
+          const cur = threadLatest.get(threadId);
+          if (!cur || receivedAt > cur.receivedAt) {
+            threadLatest.set(threadId, {
+              emailId: c.emailId,
+              receivedAt,
               classification: {
                 category: c.category,
                 confidence: c.confidence,
@@ -535,7 +562,7 @@ export const list = query({
           }
         }
         const sortedThreadIds = Array.from(threadLatest.entries())
-          .sort((a, b) => b[1].email.receivedAt - a[1].email.receivedAt)
+          .sort((a, b) => b[1].receivedAt - a[1].receivedAt)
           .map(([id]) => id);
         const total = sortedThreadIds.length;
         const pagedIds = sortedThreadIds.slice(skip, skip + limitNum);
@@ -548,6 +575,8 @@ export const list = query({
         const data = await Promise.all(
           pagedThreads.map(async (t) => {
             const hit = threadLatest.get(t._id)!;
+            // Only the visible page reads its preview email doc.
+            const email = await ctx.db.get(hit.emailId);
             const comments = await ctx.db
               .query("threadComments")
               .withIndex("by_thread", (q) => q.eq("threadId", t._id))
@@ -557,10 +586,10 @@ export const list = query({
               id: t._id,
               emails: [
                 {
-                  fromAddress: hit.email.fromAddress,
-                  fromName: hit.email.fromName,
-                  snippet: hit.email.snippet,
-                  receivedAt: hit.email.receivedAt,
+                  fromAddress: email?.fromAddress ?? "",
+                  fromName: email?.fromName,
+                  snippet: email?.snippet,
+                  receivedAt: hit.receivedAt,
                   classification: hit.classification,
                 },
               ],
@@ -657,7 +686,20 @@ export const list = query({
       // Pull threads from each account index (fan-out then merge — Convex doesn't support `IN`).
       // Non-search browse keeps a smaller window because the list has infinite scroll.
       const isFilterSearchMode = !!(fromEmail || args.category);
-      const perAccountLimit = isFilterSearchMode ? 2500 : 500;
+      // COST: this query is SUBSCRIBED by every open client and re-runs on
+      // every mailbox write (each new email, read-state flip, classification).
+      // A flat 500/account window here was ~70% of the Convex database-read
+      // bill. The default inbox scales the window to how deep the user has
+      // actually scrolled — page 1 reads ~100/account, deep scroll reads
+      // more. Sparse folders (sent/archive/starred/trash) keep the wide
+      // window because their matches are thinly spread through the index,
+      // but they're only subscribed while actually viewed.
+      const isDefaultInbox = !parsed && (!folder || folder === "inbox");
+      const perAccountLimit = isFilterSearchMode
+        ? 2500
+        : isDefaultInbox
+          ? Math.min(500, Math.max(100, skip + limitNum + 50))
+          : 500;
       const threadsArrays = await Promise.all(
         accountIds.map((aid) =>
           ctx.db
