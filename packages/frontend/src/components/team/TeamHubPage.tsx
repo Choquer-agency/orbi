@@ -1,5 +1,6 @@
 import { useMemo, type ReactElement } from 'react';
 import { Users, Mail, Crown, ChevronRight } from 'lucide-react';
+import { NavigationDropdown } from '../navigation/NavigationDropdown';
 import { useUiStore } from '../../stores/uiStore';
 import { useMyWorkspace, useSetManager } from '../../hooks/useWorkspace';
 import { getAvatarColor } from '../../lib/constants';
@@ -68,17 +69,17 @@ export function TeamHubPage() {
   );
   const owner = members.find((m) => m.id === ownerId);
 
-  if (workspace === undefined) {
+  if (workspace === undefined || workspace === null) {
     return (
-      <div className="flex h-full items-center justify-center text-sm text-text-tertiary">
-        Loading team…
-      </div>
-    );
-  }
-  if (workspace === null) {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-text-tertiary">
-        Team features aren't enabled for this account.
+      <div className="flex h-full flex-col">
+        <div className="border-b border-border px-4 pb-3 pt-[30px]">
+          <NavigationDropdown />
+        </div>
+        <div className="flex flex-1 items-center justify-center text-sm text-text-tertiary">
+          {workspace === undefined
+            ? 'Loading team…'
+            : "Team features aren't enabled for this account."}
+        </div>
       </div>
     );
   }
@@ -155,7 +156,13 @@ export function TeamHubPage() {
   );
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto px-8 pb-10 pt-12">
+    <div className="flex h-full flex-col">
+      {/* Header with nav dropdown — the main menu must stay reachable from
+          every full-page view. */}
+      <div className="border-b border-border px-4 pb-3 pt-[30px]">
+        <NavigationDropdown />
+      </div>
+      <div className="flex-1 overflow-y-auto px-8 pb-10 pt-8">
       <div className="mx-auto w-full max-w-3xl">
         <div className="mb-1 flex items-center gap-2">
           <Users size={20} className="text-primary" />
@@ -177,6 +184,7 @@ export function TeamHubPage() {
             No teammates yet — invite people from Settings → Team.
           </div>
         )}
+      </div>
       </div>
     </div>
   );

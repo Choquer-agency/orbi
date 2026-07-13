@@ -84,10 +84,19 @@ function dueByEpoch(s: string | null | undefined): number | undefined {
 }
 
 export const extractFromEmail = internalAction({
-  args: { emailId: v.id("emails") },
+  args: {
+    emailId: v.id("emails"),
+    // Backfill overrides (internal callers only — commitments.backfillCommitments):
+    // widen the recency window, and account spend against a separate feature
+    // key with its own one-off budget so a backfill can't eat the live
+    // detector's daily cap (or vice versa).
+    maxAgeMs: v.optional(v.number()),
+    featureKey: v.optional(v.string()),
+    capUsd: v.optional(v.number()),
+  },
   handler: async (
     ctx,
-    { emailId },
+    { emailId, maxAgeMs, featureKey, capUsd },
   ): Promise<{ ran: boolean; inserted?: number; completed?: number; reason?: string }> => {
     const data = await ctx.runQuery(internal.commitments._loadForExtraction, {
       emailId,
@@ -104,7 +113,7 @@ export const extractFromEmail = internalAction({
     if (data.isJunk) return { ran: false, reason: "junk thread" };
 
     // Gate 4: recency — backfill and historical sync must never burn tokens.
-    if (Date.now() - data.email.receivedAt > MAX_EMAIL_AGE_MS) {
+    if (Date.now() - data.email.receivedAt > (maxAgeMs ?? MAX_EMAIL_AGE_MS)) {
       return { ran: false, reason: "too old" };
     }
 
@@ -116,15 +125,17 @@ export const extractFromEmail = internalAction({
     // run outbound extraction for promises — but only when tracking is on
     // (checked above), so the volume is the tracked mailbox's own sends.
 
-    // Gate 3: daily spend cap (workspace-wide, default $2/day).
-    const cap = data.commitmentsDailyCapUsd ?? DEFAULT_DAILY_CAP_USD;
+    // Gate 3: daily spend cap (workspace-wide, default $2/day) — or, for a
+    // backfill, its own budget under its own feature key.
+    const effectiveFeature = featureKey ?? FEATURE_KEY;
+    const cap = capUsd ?? data.commitmentsDailyCapUsd ?? DEFAULT_DAILY_CAP_USD;
     const window = (await ctx.runQuery(internal.ai.usageData._featureWindow, {
       hours: 24,
-      feature: FEATURE_KEY,
+      feature: effectiveFeature,
     })) as { total: { estimatedCostUsd: number } };
     if (window.total.estimatedCostUsd >= cap) {
       console.warn(
-        `[commitments] daily cap $${cap} reached — skipping extraction`,
+        `[commitments] cap $${cap} reached for ${effectiveFeature} — skipping extraction`,
       );
       return { ran: false, reason: "daily cap reached" };
     }
@@ -157,7 +168,7 @@ export const extractFromEmail = internalAction({
 
     await ctx.runMutation(internal.ai.usageData._record, {
       userId: data.mailboxOwnerUserId as Id<"users">,
-      feature: FEATURE_KEY,
+      feature: effectiveFeature,
       model: MODEL,
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,

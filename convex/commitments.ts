@@ -21,7 +21,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { v } from "convex/values";
-import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
+import {
+  query,
+  mutation,
+  internalAction,
+  internalMutation,
+  internalQuery,
+} from "./_generated/server";
+import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import {
   requireTeamHub,
@@ -393,6 +400,178 @@ export const _loadForExtraction = internalQuery({
         requestedAt: c.requestedAt,
       })),
     };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One-shot backfill — run from the CLI, never callable from clients:
+//   npx convex run --prod commitments:backfillCommitments \
+//     '{"accountEmails":["a@x.com","b@x.com"]}'
+//
+// Walks each account's emails from the last `sinceDays` (default 14) OLDEST
+// FIRST — order matters: an inbound request must be logged before the later
+// outbound reply that completes it. Emails are processed one at a time
+// (serial, no parallel AI bursts) in self-rescheduling chunks. Spend is
+// logged under feature "commitments_backfill" with its own hard budget
+// (default $5) checked before every call — the live detector's daily cap is
+// untouched. Read cost: one indexed range walk per account, page-sized.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const _accountsByEmails = internalQuery({
+  args: { emails: v.array(v.string()) },
+  handler: async (ctx, { emails }) => {
+    const wanted = emails.map((e) => e.toLowerCase().trim());
+    const out: Array<{ id: Id<"mailAccounts">; email: string }> = [];
+    for (const email of wanted) {
+      for (const provider of ["GMAIL", "MICROSOFT", "APPLE_IMAP"] as const) {
+        const acc = await ctx.db
+          .query("mailAccounts")
+          .withIndex("by_provider_email", (q) =>
+            q.eq("provider", provider).eq("email", email),
+          )
+          .first();
+        if (acc) {
+          out.push({ id: acc._id, email: acc.email });
+          break;
+        }
+      }
+    }
+    return out;
+  },
+});
+
+export const _enableTracking = internalMutation({
+  args: { accountIds: v.array(v.id("mailAccounts")) },
+  handler: async (ctx, { accountIds }) => {
+    for (const id of accountIds) {
+      const acc = await ctx.db.get(id);
+      if (acc && acc.commitmentTrackingEnabled !== true) {
+        await ctx.db.patch(id, { commitmentTrackingEnabled: true });
+      }
+    }
+  },
+});
+
+export const _backfillPage = internalQuery({
+  args: {
+    accountId: v.id("mailAccounts"),
+    since: v.number(),
+    afterReceivedAt: v.optional(v.number()),
+    batch: v.number(),
+  },
+  handler: async (ctx, { accountId, since, afterReceivedAt, batch }) => {
+    const lower = Math.max(since, (afterReceivedAt ?? 0) + 1);
+    const rows = await ctx.db
+      .query("emails")
+      .withIndex("by_account_receivedAt", (q) =>
+        q.eq("accountId", accountId).gte("receivedAt", lower),
+      )
+      .order("asc")
+      .take(batch);
+    return rows.map((e) => ({ id: e._id, receivedAt: e.receivedAt }));
+  },
+});
+
+export const backfillCommitments = internalAction({
+  args: {
+    accountEmails: v.array(v.string()),
+    sinceDays: v.optional(v.number()),
+    budgetUsd: v.optional(v.number()),
+    // Internal continuation state — leave unset when kicking off.
+    accountIdx: v.optional(v.number()),
+    afterReceivedAt: v.optional(v.number()),
+    processed: v.optional(v.number()),
+    extracted: v.optional(v.number()),
+  },
+  handler: async (ctx, args): Promise<void> => {
+    const sinceDays = args.sinceDays ?? 14;
+    const budgetUsd = args.budgetUsd ?? 5;
+    const since = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+    const BATCH = 15;
+
+    const accounts = (await ctx.runQuery(internal.commitments._accountsByEmails, {
+      emails: args.accountEmails,
+    })) as Array<{ id: Id<"mailAccounts">; email: string }>;
+
+    // First invocation: turn tracking on for these mailboxes (the extractor's
+    // opt-in gate requires it, and the user asked for these to be tracked).
+    if (args.accountIdx === undefined) {
+      await ctx.runMutation(internal.commitments._enableTracking, {
+        accountIds: accounts.map((a) => a.id),
+      });
+      console.log(
+        `[commitments-backfill] starting: ${accounts.map((a) => a.email).join(", ")} — last ${sinceDays}d, budget $${budgetUsd}`,
+      );
+    }
+
+    const accountIdx = args.accountIdx ?? 0;
+    let processed = args.processed ?? 0;
+    let extracted = args.extracted ?? 0;
+
+    if (accountIdx >= accounts.length) {
+      console.log(
+        `[commitments-backfill] DONE — ${processed} emails scanned, ${extracted} produced commitments/completions`,
+      );
+      return;
+    }
+
+    // Budget gate (checked per chunk; the extractor re-checks per email).
+    const window = (await ctx.runQuery(internal.ai.usageData._featureWindow, {
+      hours: 48,
+      feature: "commitments_backfill",
+    })) as { total: { estimatedCostUsd: number } };
+    if (window.total.estimatedCostUsd >= budgetUsd) {
+      console.warn(
+        `[commitments-backfill] STOPPED at budget $${budgetUsd} after ${processed} emails`,
+      );
+      return;
+    }
+
+    const account = accounts[accountIdx];
+    const page = (await ctx.runQuery(internal.commitments._backfillPage, {
+      accountId: account.id,
+      since,
+      afterReceivedAt: args.afterReceivedAt,
+      batch: BATCH,
+    })) as Array<{ id: Id<"emails">; receivedAt: number }>;
+
+    if (page.length === 0) {
+      // This account is drained — move to the next one.
+      await ctx.scheduler.runAfter(500, internal.commitments.backfillCommitments, {
+        ...args,
+        accountIdx: accountIdx + 1,
+        afterReceivedAt: undefined,
+        processed,
+        extracted,
+      });
+      return;
+    }
+
+    // Serial, oldest-first. The extractor itself skips junk, short bodies,
+    // already-extracted emails, and anything else that doesn't qualify.
+    for (const e of page) {
+      const result = (await ctx.runAction(internal.ai.commitments.extractFromEmail, {
+        emailId: e.id,
+        maxAgeMs: (sinceDays + 1) * 24 * 60 * 60 * 1000,
+        featureKey: "commitments_backfill",
+        capUsd: budgetUsd,
+      })) as { ran: boolean; inserted?: number; completed?: number };
+      processed++;
+      if (result.ran && ((result.inserted ?? 0) > 0 || (result.completed ?? 0) > 0)) {
+        extracted++;
+      }
+    }
+
+    console.log(
+      `[commitments-backfill] ${account.email}: ${processed} scanned so far (${extracted} hits)`,
+    );
+    await ctx.scheduler.runAfter(1_000, internal.commitments.backfillCommitments, {
+      ...args,
+      accountIdx,
+      afterReceivedAt: page[page.length - 1].receivedAt,
+      processed,
+      extracted,
+    });
   },
 });
 
