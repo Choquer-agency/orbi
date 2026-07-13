@@ -4,6 +4,8 @@ import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import type { Doc, Id } from "./_generated/dataModel";
 import { patchThread } from "./lib/inboxStamp";
+import { canAccessThread } from "./lib/threadAccessCheck";
+import { canViewUserMailbox } from "./lib/workspace";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -39,20 +41,14 @@ function isSelfAddress(allAccountEmails: string[], fromAddress: string | undefin
   return allAccountEmails.includes(fromAddress.toLowerCase());
 }
 
+// Owner, explicit grant (handoff/@mention), or Team Hub hierarchy viewer —
+// one source of truth in lib/threadAccessCheck.ts.
 async function userOwnsThread(
   ctx: { db: any },
   userId: Id<"users">,
   thread: Doc<"threads">,
 ): Promise<boolean> {
-  const account = await ctx.db.get(thread.accountId);
-  if (account && (account as Doc<"mailAccounts">).userId === userId) return true;
-  const access = await ctx.db
-    .query("threadAccess")
-    .withIndex("by_thread_user", (q: any) =>
-      q.eq("threadId", thread._id).eq("userId", userId),
-    )
-    .unique();
-  return !!access;
+  return await canAccessThread(ctx, userId, thread);
 }
 
 function ciIncludes(haystack: string | undefined | null, needle: string): boolean {
@@ -142,9 +138,24 @@ export const list = query({
     category: v.optional(v.string()),
     page: v.optional(v.number()),
     limit: v.optional(v.number()),
+    // Team Hub: browse another member's mailbox. HARD-GATED server-side —
+    // passing this without the workspace entitlement + org-tree visibility
+    // throws, regardless of what the UI shows.
+    viewAsUserId: v.optional(v.id("users")),
   },
   handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
+
+    // Resolve whose mailbox this list reads. Default (no viewAsUserId) is
+    // byte-for-byte the old behavior; the team path swaps in the target
+    // member's accounts after the visibility check.
+    let effectiveUserId = userId;
+    if (args.viewAsUserId && args.viewAsUserId !== userId) {
+      if (!(await canViewUserMailbox(ctx, userId, args.viewAsUserId))) {
+        throw new Error("Access denied");
+      }
+      effectiveUserId = args.viewAsUserId;
+    }
 
     const pageNum = args.page ?? 1;
     // Cap is generous so the per-page request can grow without silently
@@ -154,10 +165,15 @@ export const list = query({
     const skip = (pageNum - 1) * limitNum;
 
     const { ids: ownedAccountIds, emails: allAccountEmails } =
-      await getUserAccountEmails(ctx, userId);
+      await getUserAccountEmails(ctx, effectiveUserId);
 
+    // An explicit accountId filter must belong to the mailbox owner being
+    // viewed — otherwise any signed-in user could list an arbitrary
+    // account's threads by guessing its id.
     const accountIds: Id<"mailAccounts">[] = args.accountId
-      ? [args.accountId]
+      ? ownedAccountIds.some((id) => id === args.accountId)
+        ? [args.accountId]
+        : []
       : ownedAccountIds;
     if (accountIds.length === 0) {
       return { data: [], total: 0, page: pageNum, limit: limitNum, hasMore: false };
@@ -586,7 +602,7 @@ export const list = query({
           {
             const triage = await ctx.db
               .query("triageSettings")
-              .withIndex("by_user", (q) => q.eq("userId", userId))
+              .withIndex("by_user", (q) => q.eq("userId", effectiveUserId))
               .unique();
             if (triage?.autoSortEnabled) {
               candidates = candidates.filter(

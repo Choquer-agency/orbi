@@ -134,9 +134,79 @@ export default defineSchema({
     role: v.optional(userRole),
     displayName: v.optional(v.string()),
     avatarUrl: v.optional(v.string()),
+
+    // Team Hub (feature-gated): which workspace this user belongs to, and who
+    // their manager is inside it. The manager chain defines mailbox
+    // visibility: the workspace owner sees everyone; a manager sees the
+    // subtree under them; peers never see each other. Both optional so
+    // pre-workspace accounts validate untouched.
+    workspaceId: v.optional(v.id("workspaces")),
+    managerUserId: v.optional(v.id("users")),
   })
     .index("email", ["email"])
-    .index("phone", ["phone"]),
+    .index("phone", ["phone"])
+    .index("by_workspace", ["workspaceId"]),
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Workspaces — the entitlement boundary for team features. Every team
+  // endpoint checks `features` server-side (being hidden in the UI is not the
+  // gate). Accounts with no workspace (or a workspace without the flag) can't
+  // call any team endpoint at all.
+  // ───────────────────────────────────────────────────────────────────────────
+  workspaces: defineTable({
+    name: v.string(),
+    ownerUserId: v.id("users"),
+    // Feature entitlements, e.g. ["team_hub"]. Checked by lib/workspace.ts.
+    features: v.array(v.string()),
+    // Daily USD ceiling for the commitments AI detector across the workspace.
+    // Undefined = code default. The detector checks spend BEFORE each call
+    // and silently skips once the cap is hit — AI features never run open-loop.
+    commitmentsDailyCapUsd: v.optional(v.number()),
+  }),
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Commitments — tracked client requests (INBOUND) and our promises
+  // (OUTBOUND), extracted by the opt-in AI detector. Rows are NEVER deleted:
+  // completion/dismissal only stamps status + timestamps so the workspace
+  // keeps a permanent audit log of who asked for what, when, and when it was
+  // delivered.
+  // ───────────────────────────────────────────────────────────────────────────
+  commitments: defineTable({
+    workspaceId: v.id("workspaces"),
+    // The mailbox the commitment lives in (thread's account + its owner).
+    accountId: v.id("mailAccounts"),
+    userId: v.id("users"),
+    threadId: v.id("threads"),
+    sourceEmailId: v.id("emails"),
+    direction: v.union(v.literal("INBOUND"), v.literal("OUTBOUND")),
+    description: v.string(),
+    counterpartyEmail: v.string(),
+    counterpartyName: v.optional(v.string()),
+    // When the request/promise was made (source email's receivedAt).
+    requestedAt: v.number(),
+    dueAtHint: v.optional(v.number()),
+    status: v.union(
+      v.literal("OPEN"),
+      v.literal("COMPLETED"),
+      v.literal("DISMISSED"),
+    ),
+    // Completion audit trail. completedByEmailId = the outbound email that
+    // delivered on it (when auto-detected); completedByUserId set on manual
+    // completes; completionNote = the AI's one-line evidence.
+    completedAt: v.optional(v.number()),
+    completedByEmailId: v.optional(v.id("emails")),
+    completedByUserId: v.optional(v.id("users")),
+    completionNote: v.optional(v.string()),
+    dismissedAt: v.optional(v.number()),
+    dismissedByUserId: v.optional(v.id("users")),
+  })
+    // Dashboard reads exactly the page it shows (workspace-wide or per-member).
+    .index("by_workspace_status", ["workspaceId", "status"])
+    .index("by_user_status", ["userId", "status"])
+    // Completion detection walks OPEN rows for one thread; thread panel too.
+    .index("by_thread_status", ["threadId", "status"])
+    // Idempotency guard: one extraction per source email.
+    .index("by_sourceEmail", ["sourceEmailId"]),
 
   // ───────────────────────────────────────────────────────────────────────────
   // Mail accounts (Gmail / Microsoft / IMAP) — renamed from Prisma `Account`
@@ -172,6 +242,9 @@ export default defineSchema({
     // Discovered "send as" aliases (Gmail), refreshed periodically.
     aliases: v.optional(v.array(v.string())),
     aliasesUpdatedAt: v.optional(v.number()),
+    // Team Hub commitments detector opt-in. AI extraction ONLY runs for
+    // accounts where this is explicitly true (never automatic).
+    commitmentTrackingEnabled: v.optional(v.boolean()),
     // Contact backfill bookkeeping. Set once the chunked recipient scan
     // finishes so the next deploy doesn't re-trigger it.
     contactBackfillStatus: v.optional(

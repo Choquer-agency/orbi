@@ -1,0 +1,471 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// commitments.ts — Team Hub commitment tracker (V8 queries/mutations).
+//
+// A commitment is either a client's request that landed in a tracked mailbox
+// (INBOUND) or a promise we made to a client (OUTBOUND). Rows are extracted
+// by the opt-in AI detector in ai/commitments.ts and are NEVER deleted —
+// completing or dismissing only stamps status + who/when, so the log is a
+// permanent audit trail.
+//
+// Gating: every public endpoint calls requireTeamHub. Visibility follows the
+// same org tree as mailbox viewing: owner sees the whole workspace, a
+// manager sees their subtree + self, everyone sees their own.
+//
+// Cost notes (subscribed queries):
+//   - `dashboard` reads exactly one page of commitment rows via an index
+//     (by_user_status fan-out over visible members, or by_workspace_status),
+//     plus one thread doc per visible row for subject display. It re-runs
+//     when a commitment row changes — commitment writes are rare (a few per
+//     day per tracked mailbox), NOT per mailbox write.
+//   - `listForThread` reads only that thread's rows (by_thread_status).
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { v } from "convex/values";
+import { query, mutation, internalMutation, internalQuery } from "./_generated/server";
+import { requireUser } from "./lib/auth";
+import {
+  requireTeamHub,
+  listViewableMembers,
+  canViewUserMailbox,
+} from "./lib/workspace";
+import { canAccessThread } from "./lib/threadAccessCheck";
+import type { Doc, Id } from "./_generated/dataModel";
+
+const statusArg = v.union(
+  v.literal("OPEN"),
+  v.literal("COMPLETED"),
+  v.literal("DISMISSED"),
+);
+
+function forClient(c: Doc<"commitments">) {
+  return {
+    id: c._id,
+    userId: c.userId,
+    accountId: c.accountId,
+    threadId: c.threadId,
+    sourceEmailId: c.sourceEmailId,
+    direction: c.direction,
+    description: c.description,
+    counterpartyEmail: c.counterpartyEmail,
+    counterpartyName: c.counterpartyName ?? null,
+    requestedAt: c.requestedAt,
+    dueAtHint: c.dueAtHint ?? null,
+    status: c.status,
+    completedAt: c.completedAt ?? null,
+    completionNote: c.completionNote ?? null,
+    dismissedAt: c.dismissedAt ?? null,
+    createdAt: c._creationTime,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dashboard
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const dashboard = query({
+  args: {
+    status: statusArg,
+    // Narrow to one member's mailboxes; omitted = every member the viewer
+    // may see (self included).
+    memberUserId: v.optional(v.id("users")),
+    page: v.optional(v.number()),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUser(ctx);
+    await requireTeamHub(ctx, userId);
+
+    const pageNum = Math.max(args.page ?? 1, 1);
+    const limitNum = Math.min(Math.max(args.limit ?? 50, 1), 200);
+    const skip = (pageNum - 1) * limitNum;
+
+    // Resolve whose commitments the viewer may see.
+    let memberIds: Id<"users">[];
+    if (args.memberUserId) {
+      if (!(await canViewUserMailbox(ctx, userId, args.memberUserId))) {
+        throw new Error("Access denied");
+      }
+      memberIds = [args.memberUserId];
+    } else {
+      const viewable = await listViewableMembers(ctx, userId);
+      memberIds = [userId, ...viewable.map((m) => m._id)];
+    }
+
+    // Per-member indexed reads, newest first, page-bounded (+1 for hasMore).
+    const per = skip + limitNum + 1;
+    const arrays = await Promise.all(
+      memberIds.map((mid) =>
+        ctx.db
+          .query("commitments")
+          .withIndex("by_user_status", (q) =>
+            q.eq("userId", mid).eq("status", args.status),
+          )
+          .order("desc")
+          .take(per),
+      ),
+    );
+    const merged = arrays
+      .flat()
+      .sort((a, b) => sortKey(b) - sortKey(a));
+    const total = merged.length;
+    const pageRows = merged.slice(skip, skip + limitNum);
+
+    // Hydrate display info: thread subject + member name (one get per row,
+    // page-bounded).
+    const memberCache = new Map<string, { name: string | null; email: string | null }>();
+    const data = await Promise.all(
+      pageRows.map(async (c) => {
+        const thread = await ctx.db.get(c.threadId);
+        let member = memberCache.get(String(c.userId));
+        if (!member) {
+          const u = (await ctx.db.get(c.userId)) as Doc<"users"> | null;
+          member = {
+            name: u?.displayName ?? u?.name ?? null,
+            email: u?.email ?? null,
+          };
+          memberCache.set(String(c.userId), member);
+        }
+        return {
+          ...forClient(c),
+          threadSubject: thread?.subject ?? "(thread unavailable)",
+          memberName: member.name,
+          memberEmail: member.email,
+        };
+      }),
+    );
+
+    return {
+      data,
+      total,
+      page: pageNum,
+      limit: limitNum,
+      hasMore: skip + limitNum < total,
+    };
+  },
+});
+
+// Open items sort by due date first (soonest at top), then newest; closed
+// items by completion/dismissal time.
+function sortKey(c: Doc<"commitments">): number {
+  if (c.status === "OPEN") {
+    return c.dueAtHint !== undefined
+      ? Number.MAX_SAFE_INTEGER - c.dueAtHint
+      : c.requestedAt;
+  }
+  return c.completedAt ?? c.dismissedAt ?? c.requestedAt;
+}
+
+// Small always-cheap badge: open counts per visible member.
+export const openCounts = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUser(ctx);
+    await requireTeamHub(ctx, userId);
+    const viewable = await listViewableMembers(ctx, userId);
+    const memberIds = [userId, ...viewable.map((m) => m._id)];
+    const MAX_PER_MEMBER = 100;
+    const counts = await Promise.all(
+      memberIds.map(async (mid) => {
+        const rows = await ctx.db
+          .query("commitments")
+          .withIndex("by_user_status", (q) =>
+            q.eq("userId", mid).eq("status", "OPEN"),
+          )
+          .take(MAX_PER_MEMBER);
+        return { userId: mid, open: rows.length };
+      }),
+    );
+    return {
+      totalOpen: counts.reduce((s, c) => s + c.open, 0),
+      byMember: counts,
+    };
+  },
+});
+
+// Commitments attached to one thread (shown in the viewer side panel).
+export const listForThread = query({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, { threadId }) => {
+    const userId = await requireUser(ctx);
+    await requireTeamHub(ctx, userId);
+    const thread = await ctx.db.get(threadId);
+    if (!thread || !(await canAccessThread(ctx, userId, thread))) {
+      throw new Error("Access denied");
+    }
+    const rows = await ctx.db
+      .query("commitments")
+      .withIndex("by_thread_status", (q) => q.eq("threadId", threadId))
+      .collect();
+    return rows.map(forClient);
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Manual status changes — logged, never deleted.
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function loadForStatusChange(
+  ctx: { db: any },
+  userId: Id<"users">,
+  commitmentId: Id<"commitments">,
+): Promise<Doc<"commitments">> {
+  const row = (await ctx.db.get(commitmentId)) as Doc<"commitments"> | null;
+  if (!row) throw new Error("Commitment not found");
+  if (!(await canViewUserMailbox(ctx, userId, row.userId))) {
+    throw new Error("Access denied");
+  }
+  return row;
+}
+
+export const complete = mutation({
+  args: { commitmentId: v.id("commitments"), note: v.optional(v.string()) },
+  handler: async (ctx, { commitmentId, note }) => {
+    const userId = await requireUser(ctx);
+    await requireTeamHub(ctx, userId);
+    const row = await loadForStatusChange(ctx, userId, commitmentId);
+    if (row.status === "COMPLETED") return { ok: true };
+    await ctx.db.patch(commitmentId, {
+      status: "COMPLETED",
+      completedAt: Date.now(),
+      completedByUserId: userId,
+      completionNote: note ?? "Marked done manually",
+      dismissedAt: undefined,
+      dismissedByUserId: undefined,
+    });
+    return { ok: true };
+  },
+});
+
+export const reopen = mutation({
+  args: { commitmentId: v.id("commitments") },
+  handler: async (ctx, { commitmentId }) => {
+    const userId = await requireUser(ctx);
+    await requireTeamHub(ctx, userId);
+    const row = await loadForStatusChange(ctx, userId, commitmentId);
+    if (row.status === "OPEN") return { ok: true };
+    await ctx.db.patch(commitmentId, {
+      status: "OPEN",
+      completedAt: undefined,
+      completedByEmailId: undefined,
+      completedByUserId: undefined,
+      completionNote: undefined,
+      dismissedAt: undefined,
+      dismissedByUserId: undefined,
+    });
+    return { ok: true };
+  },
+});
+
+// "This wasn't actually a request/promise" — kept in the log as DISMISSED.
+export const dismiss = mutation({
+  args: { commitmentId: v.id("commitments") },
+  handler: async (ctx, { commitmentId }) => {
+    const userId = await requireUser(ctx);
+    await requireTeamHub(ctx, userId);
+    const row = await loadForStatusChange(ctx, userId, commitmentId);
+    if (row.status === "DISMISSED") return { ok: true };
+    await ctx.db.patch(commitmentId, {
+      status: "DISMISSED",
+      dismissedAt: Date.now(),
+      dismissedByUserId: userId,
+    });
+    return { ok: true };
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal — used by the AI detector (ai/commitments.ts).
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Everything the extractor needs in ONE query: email + body text + thread's
+// account/workspace gating info + open commitments on the thread.
+export const _loadForExtraction = internalQuery({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }) => {
+    const email = await ctx.db.get(emailId);
+    if (!email) return null;
+    const thread = await ctx.db.get(email.threadId);
+    if (!thread) return null;
+    // Gate on the THREAD's mailbox (where commitments live) — a manager
+    // replying from their own account into a tracked report's thread still
+    // counts against that tracked mailbox.
+    const threadAccount = await ctx.db.get(thread.accountId);
+    if (!threadAccount) return null;
+    const owner = (await ctx.db.get(threadAccount.userId)) as Doc<"users"> | null;
+    const workspace = owner?.workspaceId
+      ? await ctx.db.get(owner.workspaceId)
+      : null;
+
+    // Junk gate: never extract from spam/promo/social/forum threads.
+    const junkLabels = [
+      "SPAM",
+      "CATEGORY_PROMOTIONS",
+      "CATEGORY_SOCIAL",
+      "CATEGORY_FORUMS",
+    ];
+    const isJunk =
+      thread.isSpam === true ||
+      thread.isTrashed === true ||
+      (thread.labels ?? []).some((l: string) => junkLabels.includes(l));
+
+    // Existing extraction for this email = idempotency stop.
+    const alreadyExtracted = await ctx.db
+      .query("commitments")
+      .withIndex("by_sourceEmail", (q) => q.eq("sourceEmailId", emailId))
+      .first();
+
+    // Determine outbound: sender is one of the thread owner's account
+    // addresses, or the email row itself is labeled SENT (in-app sends).
+    const ownerAccounts = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", threadAccount.userId))
+      .collect();
+    const ownEmails = new Set(
+      ownerAccounts.map((a: Doc<"mailAccounts">) => a.email.toLowerCase()),
+    );
+    // A send from ANY workspace mailbox (e.g. the owner replying from
+    // inside a report's inbox) counts as outbound for completion purposes.
+    const senderAccount = await ctx.db.get(email.accountId);
+    const senderIsWorkspaceMember =
+      !!senderAccount &&
+      !!(await (async () => {
+        const su = (await ctx.db.get(senderAccount.userId)) as Doc<"users"> | null;
+        return su?.workspaceId && owner?.workspaceId && su.workspaceId === owner.workspaceId;
+      })());
+    const isOutbound =
+      ownEmails.has(email.fromAddress.toLowerCase()) ||
+      ((email.labels ?? []).includes("SENT") && senderIsWorkspaceMember);
+
+    // Body text: emailSearchText (lean, always populated once the body
+    // fetch lands) → emailBodies text → legacy in-row → snippet.
+    let bodyText = "";
+    const searchRow = await ctx.db
+      .query("emailSearchText")
+      .withIndex("by_email", (q) => q.eq("emailId", emailId))
+      .unique();
+    if (searchRow) {
+      bodyText = searchRow.text.startsWith(email.subject)
+        ? searchRow.text.slice(email.subject.length).trim()
+        : searchRow.text;
+    } else {
+      const bodyRow = await ctx.db
+        .query("emailBodies")
+        .withIndex("by_email", (q) => q.eq("emailId", emailId))
+        .unique();
+      bodyText = bodyRow?.bodyText || email.bodyText || email.snippet || "";
+    }
+
+    const openRows = await ctx.db
+      .query("commitments")
+      .withIndex("by_thread_status", (q) =>
+        q.eq("threadId", email.threadId).eq("status", "OPEN"),
+      )
+      .collect();
+
+    return {
+      email: {
+        _id: email._id,
+        threadId: email.threadId,
+        fromAddress: email.fromAddress,
+        fromName: email.fromName ?? null,
+        toAddresses: email.toAddresses,
+        subject: email.subject,
+        receivedAt: email.receivedAt,
+        sentAt: email.sentAt ?? null,
+      },
+      bodyText: bodyText.slice(0, 6000),
+      isOutbound,
+      isJunk,
+      alreadyExtracted: !!alreadyExtracted,
+      trackingEnabled: threadAccount.commitmentTrackingEnabled === true,
+      accountId: threadAccount._id,
+      mailboxOwnerUserId: threadAccount.userId,
+      workspaceId: (workspace?._id ?? null) as Id<"workspaces"> | null,
+      teamHubEnabled:
+        !!workspace && (workspace.features ?? []).includes("team_hub"),
+      commitmentsDailyCapUsd: workspace?.commitmentsDailyCapUsd ?? null,
+      threadSubject: thread.subject,
+      openCommitments: openRows.map((c: Doc<"commitments">) => ({
+        id: c._id,
+        direction: c.direction,
+        description: c.description,
+        counterpartyEmail: c.counterpartyEmail,
+        requestedAt: c.requestedAt,
+      })),
+    };
+  },
+});
+
+export const _persistExtraction = internalMutation({
+  args: {
+    workspaceId: v.id("workspaces"),
+    accountId: v.id("mailAccounts"),
+    userId: v.id("users"),
+    threadId: v.id("threads"),
+    sourceEmailId: v.id("emails"),
+    requestedAt: v.number(),
+    newCommitments: v.array(
+      v.object({
+        direction: v.union(v.literal("INBOUND"), v.literal("OUTBOUND")),
+        description: v.string(),
+        counterpartyEmail: v.string(),
+        counterpartyName: v.optional(v.string()),
+        dueAtHint: v.optional(v.number()),
+      }),
+    ),
+    completions: v.array(
+      v.object({
+        commitmentId: v.id("commitments"),
+        note: v.string(),
+        completedAt: v.number(),
+      }),
+    ),
+  },
+  handler: async (ctx, args) => {
+    // Idempotency: bail if another run already wrote rows for this email.
+    if (args.newCommitments.length > 0) {
+      const existing = await ctx.db
+        .query("commitments")
+        .withIndex("by_sourceEmail", (q) =>
+          q.eq("sourceEmailId", args.sourceEmailId),
+        )
+        .first();
+      if (existing) return { inserted: 0, completed: 0 };
+    }
+    let inserted = 0;
+    for (const c of args.newCommitments) {
+      await ctx.db.insert("commitments", {
+        workspaceId: args.workspaceId,
+        accountId: args.accountId,
+        userId: args.userId,
+        threadId: args.threadId,
+        sourceEmailId: args.sourceEmailId,
+        direction: c.direction,
+        description: c.description.slice(0, 500),
+        counterpartyEmail: c.counterpartyEmail.toLowerCase(),
+        counterpartyName: c.counterpartyName,
+        requestedAt: args.requestedAt,
+        dueAtHint: c.dueAtHint,
+        status: "OPEN",
+      });
+      inserted++;
+    }
+    let completed = 0;
+    for (const done of args.completions) {
+      const row = (await ctx.db.get(done.commitmentId)) as
+        | Doc<"commitments">
+        | null;
+      if (!row || row.status !== "OPEN") continue;
+      // Guard against a hallucinated id pointing at another thread.
+      if (row.threadId !== args.threadId) continue;
+      await ctx.db.patch(done.commitmentId, {
+        status: "COMPLETED",
+        completedAt: done.completedAt,
+        completedByEmailId: args.sourceEmailId,
+        completionNote: done.note.slice(0, 300),
+      });
+      completed++;
+    }
+    return { inserted, completed };
+  },
+});

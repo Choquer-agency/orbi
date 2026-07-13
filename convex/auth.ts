@@ -24,6 +24,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
       const anyExistingUser = await ctx.db.query("users").first();
 
       let role: "ADMIN" | "MANAGER" | "AGENT" = "ADMIN";
+      let workspaceId: unknown;
       if (anyExistingUser) {
         // ctx here is typed against AnyDataModel (no schema indexes visible),
         // and the invites table is tiny — a filtered collect is fine.
@@ -32,6 +33,7 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
           email: string;
           status: string;
           role: "ADMIN" | "MANAGER" | "AGENT";
+          invitedByUserId: any;
         }>;
         const pending = invites.find(
           (i) => i.email === email && i.status === "PENDING",
@@ -46,12 +48,19 @@ export const { auth, signIn, signOut, store, isAuthenticated } = convexAuth({
           status: "ACCEPTED",
           acceptedAt: Date.now(),
         });
+        // New members join the inviter's workspace so team features (which
+        // are workspace-scoped) cover them without a manual step.
+        const inviter = (await ctx.db.get(pending.invitedByUserId)) as {
+          workspaceId?: unknown;
+        } | null;
+        workspaceId = inviter?.workspaceId;
       }
 
       return await ctx.db.insert("users", {
         email,
         name: (args.profile.name as string | undefined) ?? undefined,
         role,
+        ...(workspaceId ? { workspaceId } : {}),
       });
     },
   },

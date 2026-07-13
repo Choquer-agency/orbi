@@ -700,6 +700,21 @@ export const _onNewEmailInserted = internalMutation({
       }
     }
 
+    // 3a-bis. Team Hub commitment detector — opt-in per account, re-gated
+    // inside the action (entitlement, spend cap, recency, junk). Mirror of
+    // gmailData.
+    const COMMITMENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+    if (
+      account.commitmentTrackingEnabled === true &&
+      email.receivedAt > Date.now() - COMMITMENT_WINDOW_MS
+    ) {
+      await ctx.scheduler.runAfter(
+        90_000,
+        internal.ai.commitments.extractFromEmail,
+        { emailId },
+      );
+    }
+
     // 3b. Schedule "Needs Response" scoring (recent inbound only) or dismiss
     // open signals on this thread (outbound). Mirror of gmailData.
     if (!isOutbound && isRecent) {

@@ -720,6 +720,23 @@ export const _onNewEmailInserted = internalMutation({
       }
     }
 
+    // 3a-bis. Team Hub commitment detector — STRICTLY opt-in per account
+    // (commitmentTrackingEnabled) and re-gated inside the action (workspace
+    // entitlement, daily spend cap, 7-day recency, junk filter). The 90s
+    // delay lets the body fetch + searchText land so extraction reads real
+    // content instead of a snippet.
+    const COMMITMENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+    if (
+      account.commitmentTrackingEnabled === true &&
+      email.receivedAt > Date.now() - COMMITMENT_WINDOW_MS
+    ) {
+      await ctx.scheduler.runAfter(
+        90_000,
+        internal.ai.commitments.extractFromEmail,
+        { emailId },
+      );
+    }
+
     // 3b. "Needs Response" scoring (recent inbound) / dismiss open signals
     // (outbound). Skips marketing/spam/notification internally. 2s delay so
     // classification lands first for the scorer's skip-list check.

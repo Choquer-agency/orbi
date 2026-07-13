@@ -9,6 +9,7 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
+import { canAccessThread } from "./lib/threadAccessCheck";
 import { promisedFollowUpText } from "./lib/promiseDetector";
 import { injectTracking } from "./lib/trackingInject";
 import type { Doc, Id } from "./_generated/dataModel";
@@ -181,16 +182,9 @@ export const listByThread = query({
     const userId = await requireUser(ctx);
     const thread = await ctx.db.get(threadId);
     if (!thread) throw new Error("Thread not found");
-    const account = await ctx.db.get(thread.accountId);
-    if (!account || (account as Doc<"mailAccounts">).userId !== userId) {
-      // Check shared access
-      const access = await ctx.db
-        .query("threadAccess")
-        .withIndex("by_thread_user", (q) =>
-          q.eq("threadId", threadId).eq("userId", userId),
-        )
-        .unique();
-      if (!access) throw new Error("Access denied");
+    // Owner, shared grant, or Team Hub hierarchy viewer.
+    if (!(await canAccessThread(ctx, userId, thread))) {
+      throw new Error("Access denied");
     }
     const emails = await ctx.db
       .query("emails")
@@ -550,6 +544,13 @@ export const reply = mutation({
     }
     const parent = await ctx.db.get(args.parentEmailId);
     if (!parent) throw new Error("Email not found");
+    // The reply lands in the parent's thread — require access to it (owner,
+    // shared grant, or Team Hub hierarchy). Without this, any signed-in user
+    // could inject sends into anyone's thread by guessing an email id.
+    const parentThread = await ctx.db.get(parent.threadId);
+    if (!parentThread || !(await canAccessThread(ctx, userId, parentThread))) {
+      throw new Error("Email not found");
+    }
 
     const now = Date.now();
     const undoDeadlineAt = now + UNDO_WINDOW_MS;
@@ -692,6 +693,10 @@ export const forward = mutation({
     }
     const source = await ctx.db.get(args.sourceEmailId);
     if (!source) throw new Error("Email not found");
+    const sourceThread = await ctx.db.get(source.threadId);
+    if (!sourceThread || !(await canAccessThread(ctx, userId, sourceThread))) {
+      throw new Error("Email not found");
+    }
 
     const now = Date.now();
     const undoDeadlineAt = now + UNDO_WINDOW_MS;
@@ -1180,13 +1185,10 @@ export const _userHasThreadAccessForEmail = internalQuery({
   handler: async (ctx, { emailId, userId }): Promise<boolean> => {
     const email = await ctx.db.get(emailId);
     if (!email) return false;
-    const access = await ctx.db
-      .query("threadAccess")
-      .withIndex("by_thread_user", (q) =>
-        q.eq("threadId", email.threadId).eq("userId", userId),
-      )
-      .unique();
-    return !!access;
+    const thread = await ctx.db.get(email.threadId);
+    if (!thread) return false;
+    // Owner, shared grant, or Team Hub hierarchy viewer.
+    return await canAccessThread(ctx, userId, thread);
   },
 });
 
@@ -1200,13 +1202,8 @@ export const _getAttachmentForHttp = internalQuery({
     const account = await ctx.db.get(email.accountId);
     if (!account) return null;
     if (account.userId !== userId) {
-      const access = await ctx.db
-        .query("threadAccess")
-        .withIndex("by_thread_user", (q) =>
-          q.eq("threadId", email.threadId).eq("userId", userId),
-        )
-        .unique();
-      if (!access) return null;
+      const thread = await ctx.db.get(email.threadId);
+      if (!thread || !(await canAccessThread(ctx, userId, thread))) return null;
     }
     return {
       attachment: {
@@ -1263,6 +1260,19 @@ export const _markSent = internalMutation({
         hasSentMail: true,
         lastSentAt: Math.max(threadForFlag.lastSentAt ?? 0, Date.now()),
       });
+      // Team Hub commitment detector for in-app sends (sync only fires for
+      // brand-new rows, and this row already existed). Gate on the THREAD's
+      // mailbox — a manager replying from their own account into a tracked
+      // report's thread still counts for that mailbox. The action re-checks
+      // entitlement, spend cap, and recency before any AI call.
+      const threadAccount = await ctx.db.get(threadForFlag.accountId);
+      if (threadAccount?.commitmentTrackingEnabled === true) {
+        await ctx.scheduler.runAfter(
+          5_000,
+          internal.ai.commitments.extractFromEmail,
+          { emailId },
+        );
+      }
     }
     if (scheduledEmailId) {
       const row = await ctx.db.get(scheduledEmailId);

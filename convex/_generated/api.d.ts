@@ -16,6 +16,7 @@ import type * as ai_chatData from "../ai/chatData.js";
 import type * as ai_chatHistory from "../ai/chatHistory.js";
 import type * as ai_classifier from "../ai/classifier.js";
 import type * as ai_classifierData from "../ai/classifierData.js";
+import type * as ai_commitments from "../ai/commitments.js";
 import type * as ai_costAlerts from "../ai/costAlerts.js";
 import type * as ai_draft from "../ai/draft.js";
 import type * as ai_draftData from "../ai/draftData.js";
@@ -41,6 +42,7 @@ import type * as attachmentsHttp from "../attachmentsHttp.js";
 import type * as auth from "../auth.js";
 import type * as blockedSenders from "../blockedSenders.js";
 import type * as classifications from "../classifications.js";
+import type * as commitments from "../commitments.js";
 import type * as contacts from "../contacts.js";
 import type * as crons from "../crons.js";
 import type * as dashboard from "../dashboard.js";
@@ -63,6 +65,7 @@ import type * as lib_styleContext from "../lib/styleContext.js";
 import type * as lib_threadAccessCheck from "../lib/threadAccessCheck.js";
 import type * as lib_threadContext from "../lib/threadContext.js";
 import type * as lib_trackingInject from "../lib/trackingInject.js";
+import type * as lib_workspace from "../lib/workspace.js";
 import type * as mailAccounts from "../mailAccounts.js";
 import type * as meetings from "../meetings.js";
 import type * as needsResponse from "../needsResponse.js";
@@ -110,6 +113,7 @@ import type * as trackingExclusions from "../trackingExclusions.js";
 import type * as triage from "../triage.js";
 import type * as usage from "../usage.js";
 import type * as users from "../users.js";
+import type * as workspaces from "../workspaces.js";
 import type * as writingPreferences from "../writingPreferences.js";
 
 import type {
@@ -127,6 +131,7 @@ declare const fullApi: ApiFromModules<{
   "ai/chatHistory": typeof ai_chatHistory;
   "ai/classifier": typeof ai_classifier;
   "ai/classifierData": typeof ai_classifierData;
+  "ai/commitments": typeof ai_commitments;
   "ai/costAlerts": typeof ai_costAlerts;
   "ai/draft": typeof ai_draft;
   "ai/draftData": typeof ai_draftData;
@@ -152,6 +157,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   blockedSenders: typeof blockedSenders;
   classifications: typeof classifications;
+  commitments: typeof commitments;
   contacts: typeof contacts;
   crons: typeof crons;
   dashboard: typeof dashboard;
@@ -174,6 +180,7 @@ declare const fullApi: ApiFromModules<{
   "lib/threadAccessCheck": typeof lib_threadAccessCheck;
   "lib/threadContext": typeof lib_threadContext;
   "lib/trackingInject": typeof lib_trackingInject;
+  "lib/workspace": typeof lib_workspace;
   mailAccounts: typeof mailAccounts;
   meetings: typeof meetings;
   needsResponse: typeof needsResponse;
@@ -221,6 +228,7 @@ declare const fullApi: ApiFromModules<{
   triage: typeof triage;
   usage: typeof usage;
   users: typeof users;
+  workspaces: typeof workspaces;
   writingPreferences: typeof writingPreferences;
 }>;
 

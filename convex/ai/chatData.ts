@@ -20,6 +20,7 @@ import { v } from "convex/values";
 import { internalQuery, internalMutation } from "../_generated/server";
 import { buildThreadContext } from "../lib/threadContext";
 import { buildStyleContext } from "../lib/styleContext";
+import { canAccessThread } from "../lib/threadAccessCheck";
 import { BASE_SYSTEM_PROMPT } from "./chat";
 import type { Id } from "../_generated/dataModel";
 
@@ -180,10 +181,16 @@ export const buildContext = internalQuery({
     }
 
     if (args.threadId) {
-      const { contextText, participantEmails } = await buildThreadContext(
-        ctx,
-        args.threadId,
-      );
+      // Access check: the chat must never leak a thread the user can't open
+      // (owner, shared grant, or Team Hub hierarchy — same rule as the
+      // viewer). A denied/stale threadId just contributes no context instead
+      // of killing the whole chat request.
+      const threadDoc = await ctx.db.get(args.threadId);
+      const threadAllowed =
+        !!threadDoc && (await canAccessThread(ctx, args.userId, threadDoc));
+      const { contextText, participantEmails } = threadAllowed
+        ? await buildThreadContext(ctx, args.threadId)
+        : { contextText: "", participantEmails: [] as string[] };
       if (contextText) {
         systemParts.push(`\n\n## Current Thread Context\n${contextText}`);
         primaryRecipient = participantEmails.find(

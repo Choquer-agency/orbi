@@ -211,15 +211,19 @@ export const add = mutation({
         });
       }
 
-      // Notify the mentioned user
-      await ctx.db.insert("notifications", {
-        userId: mid as Id<"users">,
-        type: "MENTION",
-        title: `${author.name} mentioned you`,
-        body: bodyText.slice(0, 200),
-        data: { threadId, commentId },
-        isRead: false,
-      });
+      // Notify the mentioned user — but never the author about their own
+      // action (e.g. a manager @-mentioning while working inside a report's
+      // mailbox shouldn't ping themselves).
+      if ((mid as Id<"users">) !== userId) {
+        await ctx.db.insert("notifications", {
+          userId: mid as Id<"users">,
+          type: "MENTION",
+          title: `${author.name} mentioned you`,
+          body: bodyText.slice(0, 200),
+          data: { threadId, commentId },
+          isRead: false,
+        });
+      }
     }
 
     const comment = await ctx.db.get(commentId);
