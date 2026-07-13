@@ -55,6 +55,8 @@ Output ONLY valid JSON, no markdown:
 
 Rules:
 - If nothing qualifies, return {"newCommitments": [], "completions": []}.
+- You may receive an ALREADY TRACKED list — commitments previously logged on this thread. NEVER re-log anything that is the same as, overlaps with, or is a rewording of an already-tracked item. Only log asks that are genuinely NEW in this specific email.
+- The body you receive has quoted history removed; judge only the fresh text. If the fresh text is just a follow-up, nudge, or restatement ("just checking in on the changes"), that is NOT a new commitment.
 - Never invent completions for items not clearly addressed as finished.
 - Automated emails (receipts, notifications, newsletters) → empty arrays.
 - dueBy only when an explicit or strongly implied date exists ("by Friday", "tomorrow", "end of month"). Resolve relative dates using the email date you're given.`;
@@ -156,7 +158,16 @@ export const extractFromEmail = internalAction({
       ? "This email was SENT BY the agency. Extract any new OUTBOUND promises, and check the OPEN COMMITMENTS list for items this email clearly delivers/completes."
       : "This email was RECEIVED FROM the counterparty. Extract any new INBOUND requests. Do not report completions.";
 
-    const userMsg = `${task}\n\n${openList}Email direction: ${direction}\nEmail date: ${emailDate}\nSubject: ${data.email.subject}\nFrom: ${data.email.fromName ?? ""} <${data.email.fromAddress}>\n\nBody:\n${body.slice(0, 5000)}`;
+    const tracked = (data.alreadyTrackedDescriptions ?? []) as string[];
+    const trackedBlock =
+      tracked.length > 0
+        ? `ALREADY TRACKED on this thread (do NOT re-log these or variations of them):\n${tracked
+            .slice(0, 25)
+            .map((d: string) => `- ${d}`)
+            .join("\n")}\n\n`
+        : "";
+
+    const userMsg = `${task}\n\n${trackedBlock}${openList}Email direction: ${direction}\nEmail date: ${emailDate}\nSubject: ${data.email.subject}\nFrom: ${data.email.fromName ?? ""} <${data.email.fromAddress}>\n\nBody:\n${body.slice(0, 5000)}`;
 
     const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
     const response = await client.messages.create({
@@ -215,7 +226,7 @@ export const extractFromEmail = internalAction({
       threadId: data.email.threadId as Id<"threads">,
       sourceEmailId: emailId,
       requestedAt: data.email.receivedAt,
-      newCommitments: parsed.newCommitments.slice(0, 10).map((c) => ({
+      newCommitments: parsed.newCommitments.slice(0, 5).map((c) => ({
         direction: (data.isOutbound ? "OUTBOUND" : "INBOUND") as
           | "INBOUND"
           | "OUTBOUND",

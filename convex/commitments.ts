@@ -393,11 +393,31 @@ export const _loadForExtraction = internalQuery({
         .unique();
       bodyText = bodyRow?.bodyText || email.bodyText || email.snippet || "";
     }
+    // Strip quoted reply history. Without this, every reply in a long thread
+    // re-contains the whole conversation below it, and the detector re-logs
+    // the same requests once per message (a single client thread produced
+    // 100+ duplicate rows in the first backfill).
+    bodyText = stripQuotedHistory(bodyText);
 
     const openRows = await ctx.db
       .query("commitments")
       .withIndex("by_thread_status", (q) =>
         q.eq("threadId", email.threadId).eq("status", "OPEN"),
+      )
+      .collect();
+    // Everything ever tracked on this thread (open + completed + dismissed)
+    // goes to the model as "already tracked — do not re-log". Uses the same
+    // index, three point-range reads.
+    const completedRows = await ctx.db
+      .query("commitments")
+      .withIndex("by_thread_status", (q) =>
+        q.eq("threadId", email.threadId).eq("status", "COMPLETED"),
+      )
+      .collect();
+    const dismissedRows = await ctx.db
+      .query("commitments")
+      .withIndex("by_thread_status", (q) =>
+        q.eq("threadId", email.threadId).eq("status", "DISMISSED"),
       )
       .collect();
 
@@ -431,9 +451,35 @@ export const _loadForExtraction = internalQuery({
         counterpartyEmail: c.counterpartyEmail,
         requestedAt: c.requestedAt,
       })),
+      alreadyTrackedDescriptions: [
+        ...openRows,
+        ...completedRows,
+        ...dismissedRows,
+      ].map((c: Doc<"commitments">) => c.description),
     };
   },
 });
+
+// Cut a plain-text email body down to the NEW content: drop quoted lines
+// and everything below the first reply/forward marker.
+function stripQuotedHistory(text: string): string {
+  const markers = [
+    /^On .{5,80} wrote:\s*$/i,
+    /^-{2,}\s*Original Message\s*-{2,}/i,
+    /^-{2,}\s*Forwarded message\s*-{2,}/i,
+    /^From:\s.+$/i,
+    /^Le .{5,80} a écrit\s*:/i,
+    /^_{10,}\s*$/,
+  ];
+  const kept: string[] = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (markers.some((re) => re.test(trimmed))) break;
+    if (trimmed.startsWith(">")) continue;
+    kept.push(line);
+  }
+  return kept.join("\n").trim();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // One-shot backfill — run from the CLI, never callable from clients:
@@ -473,14 +519,41 @@ export const _accountsByEmails = internalQuery({
 });
 
 export const _enableTracking = internalMutation({
-  args: { accountIds: v.array(v.id("mailAccounts")) },
-  handler: async (ctx, { accountIds }) => {
+  args: {
+    accountIds: v.array(v.id("mailAccounts")),
+    // false = emergency off-switch: the extractor's opt-in gate makes every
+    // in-flight scheduled extraction a no-op immediately.
+    enabled: v.optional(v.boolean()),
+  },
+  handler: async (ctx, { accountIds, enabled }) => {
+    const want = enabled !== false;
     for (const id of accountIds) {
       const acc = await ctx.db.get(id);
-      if (acc && acc.commitmentTrackingEnabled !== true) {
-        await ctx.db.patch(id, { commitmentTrackingEnabled: true });
+      if (acc && (acc.commitmentTrackingEnabled === true) !== want) {
+        await ctx.db.patch(id, {
+          commitmentTrackingEnabled: want ? true : undefined,
+        });
       }
     }
+  },
+});
+
+// Dev reset for a buggy extraction run — wipes ALL commitment rows. (The
+// "never delete" product rule is about user workflow; rebuilding a bad
+// machine-generated backfill is maintenance.) CLI only:
+//   npx convex run --prod commitments:_wipeAll '{"confirm":"WIPE"}'
+export const _wipeAll = internalMutation({
+  args: { confirm: v.string() },
+  handler: async (ctx, { confirm }) => {
+    if (confirm !== "WIPE") throw new Error('Pass {"confirm":"WIPE"}');
+    const rows = await ctx.db.query("commitments").take(1000);
+    for (const r of rows) await ctx.db.delete(r._id);
+    if (rows.length === 1000) {
+      await ctx.scheduler.runAfter(500, internal.commitments._wipeAll, {
+        confirm,
+      });
+    }
+    return { deleted: rows.length };
   },
 });
 
