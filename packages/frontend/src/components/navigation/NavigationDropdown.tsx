@@ -119,6 +119,7 @@ export function NavigationDropdown() {
     setNavDropdownOpen,
     teamViewUserId,
     teamViewUserName,
+    enterTeamView,
     exitTeamView,
   } = useUiStore();
   // Null unless this account's workspace holds the team entitlement — the
@@ -251,13 +252,16 @@ export function NavigationDropdown() {
             ))}
           </DropdownMenu.Group>
 
-          {/* Team Hub — only rendered when the workspace entitlement exists */}
+          {/* Team Hub — only rendered when the workspace entitlement exists.
+              The section is titled with the company (workspace) name and
+              lists the teammates whose inboxes the viewer may open, plus the
+              Team-overview and Commitments pages. */}
           {workspace && (
             <>
               <DropdownMenu.Separator className="my-2 h-px bg-border" />
               <DropdownMenu.Group>
                 <DropdownMenu.Label className="mb-1 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
-                  Team
+                  {workspace.name} Team
                 </DropdownMenu.Label>
                 <DropdownMenu.Item
                   onSelect={() => {
@@ -273,7 +277,7 @@ export function NavigationDropdown() {
                   )}
                 >
                   <Users className="h-4 w-4" />
-                  <span>Team</span>
+                  <span>Team Overview</span>
                 </DropdownMenu.Item>
                 <DropdownMenu.Item
                   onSelect={() => {
@@ -291,6 +295,38 @@ export function NavigationDropdown() {
                   <ClipboardCheck className="h-4 w-4" />
                   <span>Commitments</span>
                 </DropdownMenu.Item>
+                {/* Teammates whose inbox the viewer can open, straight from
+                    the menu. Selecting one enters their mailbox view. */}
+                {workspace.members
+                  .filter((m) => m.canView && !m.isSelf)
+                  .map((m) => (
+                    <DropdownMenu.Item
+                      key={m.id}
+                      onSelect={() => {
+                        enterTeamView(m.id, m.name ?? m.email);
+                      }}
+                      className={cn(
+                        'flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm outline-none transition-colors',
+                        teamViewUserId === m.id
+                          ? 'bg-selected text-primary font-medium'
+                          : 'text-text-primary hover:bg-surface',
+                      )}
+                    >
+                      <span className="flex h-4 w-4 items-center justify-center rounded-full bg-violet-100 text-[9px] font-bold text-violet-600">
+                        {(m.name ?? m.email ?? '?').slice(0, 1).toUpperCase()}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <span className="block truncate font-medium">
+                          {m.name ?? m.email}
+                        </span>
+                        {m.name && (
+                          <span className="block truncate text-[11px] text-text-tertiary">
+                            {m.email}
+                          </span>
+                        )}
+                      </div>
+                    </DropdownMenu.Item>
+                  ))}
               </DropdownMenu.Group>
             </>
           )}
