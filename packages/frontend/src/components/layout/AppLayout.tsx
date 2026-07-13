@@ -38,6 +38,12 @@ const MobileComposeSheet = lazy(() =>
 const SettingsPanel = lazy(() =>
   import('../settings/SettingsPanel').then((module) => ({ default: module.SettingsPanel })),
 );
+const TeamHubPage = lazy(() =>
+  import('../team/TeamHubPage').then((module) => ({ default: module.TeamHubPage })),
+);
+const CommitmentsPage = lazy(() =>
+  import('../team/CommitmentsPage').then((module) => ({ default: module.CommitmentsPage })),
+);
 const MobileSettingsView = lazy(() =>
   import('../settings/MobileSettingsView').then((module) => ({ default: module.MobileSettingsView })),
 );
@@ -72,7 +78,7 @@ const mobileSlideTransition = { type: 'spring' as const, stiffness: 500, damping
 const reducedMotionTransition = { duration: 0.15 };
 
 export function AppLayout() {
-  const { threadListWidth, setThreadListWidth, aiChatWidth, selectedFolder, selectedContactId, selectedPersonId, settingsOpen, setSettingsOpen, composingNew, mobileActiveView, setMobileActiveView, mobileTransitionDirection } =
+  const { threadListWidth, setThreadListWidth, aiChatWidth, selectedFolder, selectedContactId, selectedPersonId, settingsOpen, setSettingsOpen, composingNew, mobileActiveView, setMobileActiveView, mobileTransitionDirection, teamViewUserId, teamViewUserName, exitTeamView } =
     useUiStore();
   const hasContactOrPerson = !!(selectedContactId || selectedPersonId);
   const isDragging = useRef<boolean>(false);
@@ -112,7 +118,11 @@ export function AppLayout() {
   // persisted 'dashboard' folder selection falls through to the inbox.
   const isDashboard = false;
   const isContacts = selectedFolder === 'contacts';
-  const isFullPage = isDashboard || isContacts;
+  // Team Hub full pages. While a member's inbox is open (teamViewUserId set)
+  // the normal mail columns render instead — with the banner below.
+  const isTeamHub = selectedFolder === 'team' && !teamViewUserId;
+  const isCommitments = selectedFolder === 'commitments' && !teamViewUserId;
+  const isFullPage = isDashboard || isContacts || isTeamHub || isCommitments;
 
   // Mobile: use explicit view routing via mobileActiveView
   const showThreadList = isCompact
@@ -156,6 +166,25 @@ export function AppLayout() {
         <OfflineBanner />
         <ReauthBanner />
       </div>
+
+      {/* Team Hub: member-inbox banner — always visible while browsing a
+          teammate's mailbox so it's unmistakable whose mail this is. */}
+      {teamViewUserId && (
+        <div className={`pointer-events-none absolute inset-x-0 z-40 flex justify-center ${isCompact ? 'top-2' : 'top-[6px]'}`}>
+          <div className="pointer-events-auto flex items-center gap-3 rounded-full bg-violet-600 py-1.5 pl-4 pr-2 text-xs font-medium text-white shadow-lg">
+            <span>
+              Viewing {teamViewUserName ?? 'teammate'}'s inbox — replies send from your
+              email
+            </span>
+            <button
+              onClick={exitTeamView}
+              className="rounded-full bg-white/20 px-2.5 py-0.5 text-[11px] font-semibold hover:bg-white/30"
+            >
+              Exit
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Undo Send overlay */}
       <UndoSendToast />
@@ -237,6 +266,18 @@ export function AppLayout() {
             <div className="min-w-0 flex-1 overflow-hidden">
               <Suspense fallback={<PanelFallback />}>
                 <Dashboard />
+              </Suspense>
+            </div>
+          ) : isTeamHub ? (
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <Suspense fallback={<PanelFallback />}>
+                <TeamHubPage />
+              </Suspense>
+            </div>
+          ) : isCommitments ? (
+            <div className="min-w-0 flex-1 overflow-hidden">
+              <Suspense fallback={<PanelFallback />}>
+                <CommitmentsPage />
               </Suspense>
             </div>
           ) : isContacts && !hasContactOrPerson ? (

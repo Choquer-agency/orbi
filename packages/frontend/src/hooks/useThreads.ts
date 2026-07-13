@@ -44,6 +44,9 @@ interface ThreadListParams {
   search?: string;
   from?: string;
   category?: string;
+  // Team Hub: browse a member's mailbox. The server re-verifies org-tree
+  // visibility + workspace entitlement on every call.
+  viewAsUserId?: Id<'users'>;
 }
 
 interface ThreadListResponse {
@@ -70,6 +73,7 @@ export function useThreads(params: ThreadListParams = {}) {
       search: params.search ?? null,
       from: params.from ?? null,
       category: params.category ?? null,
+      viewAsUserId: params.viewAsUserId ?? null,
       limit,
     }),
     [
@@ -79,6 +83,7 @@ export function useThreads(params: ThreadListParams = {}) {
       params.search,
       params.from,
       params.category,
+      params.viewAsUserId,
       limit,
     ],
   );
@@ -121,6 +126,7 @@ export function useThreads(params: ThreadListParams = {}) {
       ...(params.search ? { search: params.search } : {}),
       ...(params.from ? { from: params.from } : {}),
       ...(params.category ? { category: params.category } : {}),
+      ...(params.viewAsUserId ? { viewAsUserId: params.viewAsUserId } : {}),
       page,
       limit,
     }),
@@ -131,6 +137,7 @@ export function useThreads(params: ThreadListParams = {}) {
       params.search,
       params.from,
       params.category,
+      params.viewAsUserId,
       page,
       limit,
     ],

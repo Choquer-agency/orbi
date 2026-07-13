@@ -55,6 +55,11 @@ interface UiState {
   mobileActiveView: MobileActiveView;
   mobileTransitionDirection: MobileTransitionDirection;
   defaultAccountId: string | null;
+  // Team Hub: when set, the mail columns show THIS member's mailbox (the
+  // backend re-verifies visibility on every query — this is display state,
+  // not authorization). teamViewUserName is display-only for the banner.
+  teamViewUserId: string | null;
+  teamViewUserName: string | null;
 
   setComposeContext: (ctx: ComposeContext | null) => void;
   setPendingReplyMode: (mode: 'reply' | 'forward' | null) => void;
@@ -91,6 +96,10 @@ interface UiState {
   setMobileActiveView: (view: MobileActiveView) => void;
   setMobileTransitionDirection: (dir: MobileTransitionDirection) => void;
   setDefaultAccountId: (id: string | null) => void;
+  // Enter/exit a member's mailbox (Team Hub). Entering resets folder to
+  // inbox and clears any selection so no stale own-mailbox state leaks in.
+  enterTeamView: (userId: string, userName: string | null) => void;
+  exitTeamView: () => void;
 }
 
 export const useUiStore = create<UiState>()(
@@ -126,6 +135,8 @@ export const useUiStore = create<UiState>()(
       mobileActiveView: 'list',
       mobileTransitionDirection: 'forward',
       defaultAccountId: null,
+      teamViewUserId: null,
+      teamViewUserName: null,
 
       setComposeContext: (ctx) => set({ composeContext: ctx }),
       setThreadListWidth: (pct) =>
@@ -209,6 +220,28 @@ export const useUiStore = create<UiState>()(
       setMobileActiveView: (view) => set((s) => ({ mobileActiveView: view, mobileTransitionDirection: view === 'list' ? 'back' : (s.mobileActiveView === 'list' ? 'forward' : s.mobileTransitionDirection) })),
       setMobileTransitionDirection: (dir) => set({ mobileTransitionDirection: dir }),
       setDefaultAccountId: (id) => set({ defaultAccountId: id }),
+      enterTeamView: (userId, userName) =>
+        set({
+          teamViewUserId: userId,
+          teamViewUserName: userName,
+          selectedFolder: 'inbox',
+          selectedThreadId: null,
+          selectedAccountId: null,
+          selectedThreadIds: new Set<string>(),
+          lastClickedThreadId: null,
+          composingNew: false,
+        }),
+      exitTeamView: () =>
+        set({
+          teamViewUserId: null,
+          teamViewUserName: null,
+          selectedFolder: 'team',
+          selectedThreadId: null,
+          selectedAccountId: null,
+          selectedThreadIds: new Set<string>(),
+          lastClickedThreadId: null,
+          composingNew: false,
+        }),
     }),
     {
       name: 'orbi-ui-v3',

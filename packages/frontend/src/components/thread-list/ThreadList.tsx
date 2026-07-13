@@ -66,7 +66,7 @@ function MeasuredRow({
 }
 
 export function ThreadList() {
-  const { selectedAccountId, selectedThreadId, selectedFolder, threadListFilter, setSelectedThread, setThreadListFilter, composingNew, setComposingNew, selectedThreadIds, toggleThreadSelection, selectThreadRange, clearSelection, inboxFilterMode, contactSearchEmail, setContactSearchEmail } =
+  const { selectedAccountId, selectedThreadId, selectedFolder, threadListFilter, setSelectedThread, setThreadListFilter, composingNew, setComposingNew, selectedThreadIds, toggleThreadSelection, selectThreadRange, clearSelection, inboxFilterMode, contactSearchEmail, setContactSearchEmail, teamViewUserId } =
     useUiStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -178,11 +178,15 @@ export function ThreadList() {
   };
 
   const { data, isLoading, isError, refetch, fetchNextPage, hasNextPage, isFetchingNextPage } = useThreads({
-    accountId: (selectedAccountId ?? undefined) as Id<'mailAccounts'> | undefined,
+    // Team Hub: account filters are the viewer's own — never applied while
+    // browsing a teammate's mailbox.
+    accountId: teamViewUserId
+      ? undefined
+      : ((selectedAccountId ?? undefined) as Id<'mailAccounts'> | undefined),
     folder: isSearching ? undefined : (selectedFolder !== 'dashboard' ? selectedFolder : 'inbox'),
     search: searchFrom ? undefined : (debouncedSearch || undefined),
     from: searchFrom,
-
+    viewAsUserId: (teamViewUserId ?? undefined) as Id<'users'> | undefined,
   });
   const { data: accountsData } = useAccounts();
   const updateThread = useUpdateThread();

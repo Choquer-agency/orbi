@@ -1578,7 +1578,7 @@ function injectHighlight(html: string, text: string): string {
 }
 
 export function EmailViewer({ onBack }: EmailViewerProps) {
-  const { selectedThreadId, setSelectedThread, pendingDraft, setPendingDraft, highlightText, setHighlightText, scrollToScheduled, setScrollToScheduled, editingScheduledId, setEditingScheduledId, composingNew, setComposingNew, pendingReplyMode, setPendingReplyMode } = useUiStore();
+  const { selectedThreadId, setSelectedThread, pendingDraft, setPendingDraft, highlightText, setHighlightText, scrollToScheduled, setScrollToScheduled, editingScheduledId, setEditingScheduledId, composingNew, setComposingNew, pendingReplyMode, setPendingReplyMode, teamViewUserId } = useUiStore();
   const [blockOpen, setBlockOpen] = useState(false);
   // Per-sender / per-domain "send to spam forever" prompt — fires from the
   // Mark-as-spam button on the email viewer toolbar. Distinct from Block
@@ -1780,14 +1780,17 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   }, [isMobile, onBack, replyMode]);
 
   // Mark thread and any linked notifications as read when opened.
+  // Team Hub: NEVER while browsing a teammate's mailbox — a manager reading
+  // over someone's shoulder must not change the teammate's unread state.
   useEffect(() => {
+    if (teamViewUserId) return;
     if (!selectedThreadId || !data?.data) return;
     const thread = data.data;
     if (!thread.isRead) {
       updateThread.mutate({ id: selectedThreadId, isRead: true });
     }
     markThreadNotificationsRead(selectedThreadId).catch(console.error);
-  }, [selectedThreadId, data?.data?.isRead, markThreadNotificationsRead]);
+  }, [selectedThreadId, data?.data?.isRead, markThreadNotificationsRead, teamViewUserId]);
 
   // Open reply/forward from context menu
   useEffect(() => {
@@ -3090,9 +3093,16 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
             lastEmailId={thread.emails?.[thread.emails.length - 1]?.id}
             accountId={(() => {
               // Smart reply-from: find which of the user's accounts was in the To/CC of the last email
-              const lastEmail = thread.emails?.[thread.emails.length - 1];
-              if (!lastEmail) return thread.accountId;
               const allAccounts = accountsData ?? [];
+              // The thread's receiving account is only a valid send-from when
+              // the viewer OWNS it. On a teammate's thread (Team Hub) or a
+              // shared thread, fall back to the viewer's own first account —
+              // replies are always on the viewer's behalf.
+              const ownFallback = allAccounts.some((a: any) => a.id === thread.accountId)
+                ? thread.accountId
+                : allAccounts[0]?.id ?? thread.accountId;
+              const lastEmail = thread.emails?.[thread.emails.length - 1];
+              if (!lastEmail) return ownFallback;
               const recipientEmails = [
                 ...asAddressArray(lastEmail.toAddresses),
                 ...asAddressArray(lastEmail.ccAddresses),
@@ -3100,7 +3110,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               const matchedAccount = allAccounts.find((a: any) =>
                 recipientEmails.includes(a.email?.toLowerCase()),
               );
-              return matchedAccount?.id ?? thread.accountId;
+              return matchedAccount?.id ?? ownFallback;
             })()}
             mode={replyMode}
             onClose={() => {
@@ -3204,7 +3214,12 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                 );
                 if (matched) return matched.email;
               }
-              return allAccounts.find((a: any) => a.id === thread.accountId)?.email;
+              // Own account for this thread, else (teammate's/shared thread)
+              // the viewer's first own account.
+              return (
+                allAccounts.find((a: any) => a.id === thread.accountId)?.email ??
+                allAccounts[0]?.email
+              );
             })()}
           />
           </Suspense>

@@ -11,7 +11,9 @@ import {
   Loader2,
   X,
 } from 'lucide-react';
+import { Users, ClipboardCheck } from 'lucide-react';
 import { useUiStore } from '../../stores/uiStore';
+import { useMyWorkspace } from '../../hooks/useWorkspace';
 import { useAccounts, useStartOAuth, useSyncAccount } from '../../hooks/useAccounts';
 import { useHistoricalSyncStatus, useStartHistoricalSync } from '../../hooks/useHistoricalSync';
 import { useDraftCount } from '../../hooks/useDrafts';
@@ -115,7 +117,14 @@ export function NavigationDropdown() {
     setSelectedFolder,
     setSelectedAccount,
     setNavDropdownOpen,
+    teamViewUserId,
+    teamViewUserName,
+    exitTeamView,
   } = useUiStore();
+  // Null unless this account's workspace holds the team entitlement — the
+  // Team section below simply doesn't render for everyone else (and the
+  // backend rejects the endpoints regardless).
+  const workspace = useMyWorkspace();
   const { data: accountsData } = useAccounts();
   // useAccounts() returns { data: <array> } — `accountsData` IS the array.
   // The previous `accountsData?.data` lookup was undefined, which left this
@@ -130,7 +139,12 @@ export function NavigationDropdown() {
     FOLDERS.find((f) => f.id === selectedFolder) ??
     SMART_FOLDERS.find((f) => f.id === selectedFolder) ??
     TRIAGE_FOLDERS.find((f) => f.id === selectedFolder);
-  const currentLabel = currentFolder?.label ?? 'Inbox';
+  const teamLabel =
+    selectedFolder === 'team' ? 'Team' : selectedFolder === 'commitments' ? 'Commitments' : null;
+  const baseLabel = teamLabel ?? currentFolder?.label ?? 'Inbox';
+  const currentLabel = teamViewUserId
+    ? `${teamViewUserName ?? 'Teammate'} · ${currentFolder?.label ?? 'Inbox'}`
+    : baseLabel;
 
   return (
     <DropdownMenu.Root open={navDropdownOpen} onOpenChange={setNavDropdownOpen}>
@@ -236,6 +250,50 @@ export function NavigationDropdown() {
               </DropdownMenu.Item>
             ))}
           </DropdownMenu.Group>
+
+          {/* Team Hub — only rendered when the workspace entitlement exists */}
+          {workspace && (
+            <>
+              <DropdownMenu.Separator className="my-2 h-px bg-border" />
+              <DropdownMenu.Group>
+                <DropdownMenu.Label className="mb-1 px-2 py-1 text-[11px] font-semibold uppercase tracking-wider text-text-tertiary">
+                  Team
+                </DropdownMenu.Label>
+                <DropdownMenu.Item
+                  onSelect={() => {
+                    if (teamViewUserId) exitTeamView();
+                    setSelectedFolder('team');
+                    setSelectedAccount(null);
+                  }}
+                  className={cn(
+                    'flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm outline-none transition-colors',
+                    selectedFolder === 'team'
+                      ? 'bg-selected text-primary font-medium'
+                      : 'text-text-primary hover:bg-surface',
+                  )}
+                >
+                  <Users className="h-4 w-4" />
+                  <span>Team</span>
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  onSelect={() => {
+                    if (teamViewUserId) exitTeamView();
+                    setSelectedFolder('commitments');
+                    setSelectedAccount(null);
+                  }}
+                  className={cn(
+                    'flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm outline-none transition-colors',
+                    selectedFolder === 'commitments'
+                      ? 'bg-selected text-primary font-medium'
+                      : 'text-text-primary hover:bg-surface',
+                  )}
+                >
+                  <ClipboardCheck className="h-4 w-4" />
+                  <span>Commitments</span>
+                </DropdownMenu.Item>
+              </DropdownMenu.Group>
+            </>
+          )}
 
           <DropdownMenu.Separator className="my-2 h-px bg-border" />
 
