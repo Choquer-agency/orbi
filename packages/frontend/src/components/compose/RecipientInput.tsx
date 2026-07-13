@@ -10,6 +10,226 @@ interface RecipientInputProps {
   placeholder?: string;
 }
 
+const CHIP_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Autocomplete input for the chip-based reply/reply-all recipient rows.
+ * The reply composer commits full addresses into a chip list — this wraps its
+ * raw <input> with the same person-ranked suggestions RecipientInput has
+ * (matches on name/email, ordered by how often you email them — backend
+ * sorts by totalEmailCount, so "johnny you email daily" beats "johnny abc").
+ */
+export function ChipRecipientInput({
+  inputValue,
+  onInputChange,
+  onCommit,
+  onBackspaceEmpty,
+  placeholder,
+}: {
+  inputValue: string;
+  onInputChange: (v: string) => void;
+  onCommit: (email: string, name?: string) => void;
+  onBackspaceEmpty: () => void;
+  placeholder?: string;
+}) {
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [expandedPersonId, setExpandedPersonId] = useState<string | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const term = inputValue.trim();
+  const { data } = usePersonAutocomplete(term);
+  const suggestions = data?.data ?? [];
+
+  // Flat list for keyboard navigation: persons + their expanded emails.
+  const flatItems: { type: 'person' | 'email'; person: any; contact?: any; index: number }[] = [];
+  let idx = 0;
+  for (const person of suggestions) {
+    flatItems.push({ type: 'person', person, index: idx++ });
+    if (expandedPersonId === person.id && person.contacts?.length > 1) {
+      for (const contact of person.contacts) {
+        flatItems.push({ type: 'email', person, contact, index: idx++ });
+      }
+    }
+  }
+
+  useEffect(() => {
+    setShowDropdown(term.length >= 1 && suggestions.length > 0);
+    setActiveIndex(0);
+    setExpandedPersonId(null);
+  }, [term, suggestions.length]);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (
+        dropdownRef.current &&
+        !dropdownRef.current.contains(e.target as Node) &&
+        inputRef.current &&
+        !inputRef.current.contains(e.target as Node)
+      ) {
+        setShowDropdown(false);
+        setExpandedPersonId(null);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const pick = (email: string, name?: string) => {
+    onCommit(email, name);
+    onInputChange('');
+    setShowDropdown(false);
+    setExpandedPersonId(null);
+    inputRef.current?.focus();
+  };
+
+  const commitRaw = () => {
+    const email = inputValue.trim().replace(/,$/, '');
+    if (email && CHIP_EMAIL_REGEX.test(email)) {
+      pick(email);
+      return true;
+    }
+    return false;
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (showDropdown && flatItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setActiveIndex((i) => Math.min(i + 1, flatItems.length - 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setActiveIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        const item = flatItems[activeIndex];
+        if (item) {
+          e.preventDefault();
+          if (item.type === 'email' && item.contact) {
+            pick(item.contact.email, item.person?.displayName ?? undefined);
+          } else if (item.person.contacts?.length === 1) {
+            pick(item.person.contacts[0].email, item.person.displayName ?? undefined);
+          } else if (item.person.primaryEmail) {
+            // Multi-email person: Enter takes their most-used address.
+            pick(item.person.primaryEmail, item.person.displayName ?? undefined);
+          }
+          return;
+        }
+      }
+      if (e.key === 'Escape') {
+        setShowDropdown(false);
+        setExpandedPersonId(null);
+        return;
+      }
+    }
+    if ((e.key === 'Enter' || e.key === ',' || e.key === 'Tab') && inputValue.trim()) {
+      if (commitRaw()) e.preventDefault();
+      else if (e.key === 'Enter' || e.key === ',') e.preventDefault();
+    } else if (e.key === 'Backspace' && !inputValue) {
+      onBackspaceEmpty();
+    }
+  };
+
+  return (
+    <div className="relative min-w-[120px] flex-1">
+      <input
+        ref={inputRef}
+        type="text"
+        value={inputValue}
+        onChange={(e) => onInputChange(e.target.value)}
+        onKeyDown={handleKeyDown}
+        onBlur={() => {
+          // Delay so a click on a suggestion wins over blur-commit.
+          setTimeout(() => commitRaw(), 150);
+        }}
+        onFocus={() => {
+          if (term.length >= 1 && suggestions.length > 0) setShowDropdown(true);
+        }}
+        className="w-full text-[11px] text-text-primary outline-none placeholder:text-text-tertiary"
+        placeholder={placeholder}
+        autoComplete="off"
+        autoCorrect="off"
+        spellCheck={false}
+        data-form-type="other"
+        data-lpignore="true"
+      />
+      {showDropdown && flatItems.length > 0 && (
+        <div
+          ref={dropdownRef}
+          className="absolute left-0 top-full z-50 mt-1 w-[360px] max-h-[300px] overflow-y-auto rounded-lg border border-border bg-white py-1 shadow-lg"
+        >
+          {flatItems.map((item) => {
+            if (item.type === 'person') {
+              const person = item.person;
+              const avatarColor = getAvatarColor(person.displayName || person.contacts?.[0]?.email || '');
+              const hasMultiple = person.contacts?.length > 1;
+              const isExpanded = expandedPersonId === person.id;
+              return (
+                <button
+                  key={`person-${person.id}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    if (hasMultiple) {
+                      setExpandedPersonId((prev) => (prev === person.id ? null : person.id));
+                    } else if (person.contacts?.length === 1) {
+                      pick(person.contacts[0].email, person.displayName ?? undefined);
+                    }
+                  }}
+                  className={cn(
+                    'flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors',
+                    item.index === activeIndex ? 'bg-selected' : 'hover:bg-surface',
+                  )}
+                >
+                  <div className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold', avatarColor.bg, avatarColor.text)}>
+                    {getInitials(person.displayName || person.contacts?.[0]?.email || '')}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-text-primary">
+                      {person.displayName || person.contacts?.[0]?.email}
+                    </p>
+                    <p className="truncate text-[11px] text-text-tertiary">
+                      {hasMultiple ? `${person.contacts.length} emails — Enter picks most used` : person.contacts?.[0]?.email}
+                      {person.company && ` · ${person.company}`}
+                    </p>
+                  </div>
+                  {hasMultiple && (
+                    <span className={cn('shrink-0 text-[10px] text-text-tertiary transition-transform', isExpanded && 'rotate-180')}>
+                      ▾
+                    </span>
+                  )}
+                </button>
+              );
+            }
+            const { contact } = item;
+            return (
+              <button
+                key={`email-${contact.id}`}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => pick(contact.email, item.person?.displayName ?? undefined)}
+                className={cn(
+                  'flex w-full items-center gap-2.5 pl-12 pr-3 py-1.5 text-left transition-colors',
+                  item.index === activeIndex ? 'bg-selected' : 'hover:bg-surface',
+                )}
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs text-text-primary">{contact.email}</p>
+                </div>
+                <span className="shrink-0 text-[10px] text-text-tertiary tabular-nums">
+                  {contact.emailCount || 0}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function RecipientInput({ value, onChange, placeholder }: RecipientInputProps) {
   const [showDropdown, setShowDropdown] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);

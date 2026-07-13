@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { Sparkles, X, CalendarClock, Save, Play, ChevronDown, TextQuote, Trash2, Paperclip, Maximize2, Minimize2 } from 'lucide-react';
 import { SignatureIcon } from '../icons/SignatureIcon';
-import { RecipientInput } from './RecipientInput';
+import { RecipientInput, ChipRecipientInput } from './RecipientInput';
 import { useMutation, useAction } from 'convex/react';
 import toast from 'react-hot-toast';
 import { useUiStore } from '../../stores/uiStore';
@@ -874,30 +874,17 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
                 </button>
               </span>
             ))}
-            <input
-              type="text"
-              value={toInput}
-              onChange={(e) => setToInput(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.key === 'Enter' || e.key === ',' || e.key === 'Tab') && toInput.trim()) {
-                  e.preventDefault();
-                  const email = toInput.trim().replace(/,$/, '');
-                  if (EMAIL_REGEX.test(email) && !recipients.some((r) => r.email === email)) {
-                    setRecipients((prev) => [...prev, { email }]);
-                    setToInput('');
-                  }
-                } else if (e.key === 'Backspace' && !toInput && recipients.length > 0) {
-                  setRecipients((prev) => prev.slice(0, -1));
+            <ChipRecipientInput
+              inputValue={toInput}
+              onInputChange={setToInput}
+              onCommit={(email, name) => {
+                if (!recipients.some((r) => r.email === email)) {
+                  setRecipients((prev) => [...prev, { email, ...(name ? { name } : {}) }]);
                 }
               }}
-              onBlur={() => {
-                const email = toInput.trim().replace(/,$/, '');
-                if (email && EMAIL_REGEX.test(email) && !recipients.some((r) => r.email === email)) {
-                  setRecipients((prev) => [...prev, { email }]);
-                  setToInput('');
-                }
+              onBackspaceEmpty={() => {
+                if (recipients.length > 0) setRecipients((prev) => prev.slice(0, -1));
               }}
-              className="min-w-[120px] flex-1 text-[11px] text-text-primary outline-none placeholder:text-text-tertiary"
               placeholder={recipients.length === 0 ? 'Add recipient…' : ''}
             />
             <div className="flex items-center gap-1.5 ml-auto">
@@ -976,30 +963,17 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
                   </button>
                 </span>
               ))}
-              <input
-                type="text"
-                value={ccInput}
-                onChange={(e) => setCcInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if ((e.key === 'Enter' || e.key === ',' || e.key === 'Tab') && ccInput.trim()) {
-                    e.preventDefault();
-                    const email = ccInput.trim().replace(/,$/, '');
-                    if (EMAIL_REGEX.test(email)) {
-                      setCcRecipients((prev) => [...prev, { email }]);
-                      setCcInput('');
-                    }
-                  } else if (e.key === 'Backspace' && !ccInput && ccRecipients.length > 0) {
-                    setCcRecipients((prev) => prev.slice(0, -1));
+              <ChipRecipientInput
+                inputValue={ccInput}
+                onInputChange={setCcInput}
+                onCommit={(email, name) => {
+                  if (!ccRecipients.some((r) => r.email === email)) {
+                    setCcRecipients((prev) => [...prev, { email, ...(name ? { name } : {}) }]);
                   }
                 }}
-                onBlur={() => {
-                  const email = ccInput.trim().replace(/,$/, '');
-                  if (email && EMAIL_REGEX.test(email)) {
-                    setCcRecipients((prev) => [...prev, { email }]);
-                    setCcInput('');
-                  }
+                onBackspaceEmpty={() => {
+                  if (ccRecipients.length > 0) setCcRecipients((prev) => prev.slice(0, -1));
                 }}
-                className="min-w-[120px] flex-1 text-[11px] text-text-primary outline-none placeholder:text-text-tertiary"
                 placeholder="Add CC recipient..."
               />
             </div>
@@ -1023,30 +997,17 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
                   </button>
                 </span>
               ))}
-              <input
-                type="text"
-                value={bccInput}
-                onChange={(e) => setBccInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if ((e.key === 'Enter' || e.key === ',' || e.key === 'Tab') && bccInput.trim()) {
-                    e.preventDefault();
-                    const email = bccInput.trim().replace(/,$/, '');
-                    if (EMAIL_REGEX.test(email)) {
-                      setBccRecipients((prev) => [...prev, { email }]);
-                      setBccInput('');
-                    }
-                  } else if (e.key === 'Backspace' && !bccInput && bccRecipients.length > 0) {
-                    setBccRecipients((prev) => prev.slice(0, -1));
+              <ChipRecipientInput
+                inputValue={bccInput}
+                onInputChange={setBccInput}
+                onCommit={(email, name) => {
+                  if (!bccRecipients.some((r) => r.email === email)) {
+                    setBccRecipients((prev) => [...prev, { email, ...(name ? { name } : {}) }]);
                   }
                 }}
-                onBlur={() => {
-                  const email = bccInput.trim().replace(/,$/, '');
-                  if (email && EMAIL_REGEX.test(email)) {
-                    setBccRecipients((prev) => [...prev, { email }]);
-                    setBccInput('');
-                  }
+                onBackspaceEmpty={() => {
+                  if (bccRecipients.length > 0) setBccRecipients((prev) => prev.slice(0, -1));
                 }}
-                className="min-w-[120px] flex-1 text-[11px] text-text-primary outline-none placeholder:text-text-tertiary"
                 placeholder="Add BCC recipient..."
               />
             </div>
