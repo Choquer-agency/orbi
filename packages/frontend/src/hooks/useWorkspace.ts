@@ -94,3 +94,11 @@ export function useReopenCommitment() {
 export function useDismissCommitment() {
   return useMutation(api.commitments.dismiss);
 }
+
+export function useSetCommitmentStuck() {
+  return useMutation(api.commitments.setStuck);
+}
+
+export function useSnoozeCommitment() {
+  return useMutation(api.commitments.snooze);
+}

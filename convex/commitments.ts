@@ -61,6 +61,8 @@ function forClient(c: Doc<"commitments">) {
     completedAt: c.completedAt ?? null,
     completionNote: c.completionNote ?? null,
     dismissedAt: c.dismissedAt ?? null,
+    isStuck: c.isStuck === true,
+    snoozedUntil: c.snoozedUntil ?? null,
     createdAt: c._creationTime,
   };
 }
@@ -238,6 +240,8 @@ export const complete = mutation({
       completionNote: note ?? "Marked done manually",
       dismissedAt: undefined,
       dismissedByUserId: undefined,
+      isStuck: undefined,
+      snoozedUntil: undefined,
     });
     return { ok: true };
   },
@@ -259,6 +263,34 @@ export const reopen = mutation({
       dismissedAt: undefined,
       dismissedByUserId: undefined,
     });
+    return { ok: true };
+  },
+});
+
+// Flag / unflag an item as stuck (blocked on something). Status unchanged.
+export const setStuck = mutation({
+  args: { commitmentId: v.id("commitments"), stuck: v.boolean() },
+  handler: async (ctx, { commitmentId, stuck }) => {
+    const userId = await requireUser(ctx);
+    await requireTeamHub(ctx, userId);
+    await loadForStatusChange(ctx, userId, commitmentId);
+    await ctx.db.patch(commitmentId, { isStuck: stuck ? true : undefined });
+    return { ok: true };
+  },
+});
+
+// "Remind me later" — hides the row in the Snoozed section until the time
+// passes. Pass no `until` to un-snooze.
+export const snooze = mutation({
+  args: { commitmentId: v.id("commitments"), until: v.optional(v.number()) },
+  handler: async (ctx, { commitmentId, until }) => {
+    const userId = await requireUser(ctx);
+    await requireTeamHub(ctx, userId);
+    await loadForStatusChange(ctx, userId, commitmentId);
+    if (until !== undefined && (!Number.isFinite(until) || until <= Date.now())) {
+      throw new Error("Remind-me time must be in the future");
+    }
+    await ctx.db.patch(commitmentId, { snoozedUntil: until });
     return { ok: true };
   },
 });

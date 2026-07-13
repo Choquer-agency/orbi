@@ -199,6 +199,11 @@ export default defineSchema({
     completionNote: v.optional(v.string()),
     dismissedAt: v.optional(v.number()),
     dismissedByUserId: v.optional(v.id("users")),
+    // Workflow markers on OPEN items (Notion-style list): "stuck" flags the
+    // row visually; "remind me later" hides it in a Snoozed section until
+    // the time passes. Neither changes status — the audit trail stays.
+    isStuck: v.optional(v.boolean()),
+    snoozedUntil: v.optional(v.number()),
   })
     // Dashboard reads exactly the page it shows (workspace-wide or per-member).
     .index("by_workspace_status", ["workspaceId", "status"])
