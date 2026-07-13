@@ -13,6 +13,7 @@ import {
   OctagonAlert,
 } from 'lucide-react';
 import { NavigationDropdown } from '../navigation/NavigationDropdown';
+import { Tooltip } from '../ui/Tooltip';
 import { useUiStore } from '../../stores/uiStore';
 import {
   useMyWorkspace,
@@ -223,24 +224,32 @@ export function CommitmentsPage() {
         )}
       >
         {/* Circle checkbox */}
-        <button
-          title={tab === 'OPEN' ? 'Mark done' : 'Reopen'}
-          onClick={() => {
-            if (tab === 'OPEN') markDone(row);
-            else
-              reopen({ commitmentId: row.id as Id<'commitments'> }).catch((err) =>
-                reportMutationError(err),
-              );
-          }}
-          className={cn(
-            'mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-[1.5px] transition-all',
-            done
-              ? 'border-primary bg-primary text-white'
-              : 'border-text-tertiary/50 text-transparent hover:border-primary hover:text-primary/40',
-          )}
+        <Tooltip
+          side="top"
+          content={
+            tab === 'OPEN'
+              ? 'Mark done — logs it as completed with today’s date'
+              : 'Put this back on the Open list'
+          }
         >
-          <Check size={11} strokeWidth={3} />
-        </button>
+          <button
+            onClick={() => {
+              if (tab === 'OPEN') markDone(row);
+              else
+                reopen({ commitmentId: row.id as Id<'commitments'> }).catch((err) =>
+                  reportMutationError(err),
+                );
+            }}
+            className={cn(
+              'mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-[1.5px] transition-all',
+              done
+                ? 'border-primary bg-primary text-white'
+                : 'border-text-tertiary/50 text-transparent hover:border-primary hover:text-primary/40',
+            )}
+          >
+            <Check size={11} strokeWidth={3} />
+          </button>
+        </Tooltip>
 
         {/* Text — clickable to open the email */}
         <button
@@ -301,39 +310,47 @@ export function CommitmentsPage() {
         <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
           {tab === 'OPEN' ? (
             <>
-              <button
-                title="Reply to this email"
-                onClick={() => openThread(row, true)}
-                className="rounded-md p-1.5 text-text-tertiary hover:bg-white hover:text-primary"
-              >
-                <Reply size={14} />
-              </button>
-              <button
-                title={row.isStuck ? 'Unmark stuck' : 'Mark as stuck'}
-                onClick={() =>
-                  setStuck({
-                    commitmentId: row.id as Id<'commitments'>,
-                    stuck: !row.isStuck,
-                  }).catch((err) => reportMutationError(err))
-                }
-                className={cn(
-                  'rounded-md p-1.5 hover:bg-white',
+              <Tooltip side="top" content="Reply — opens the email with a reply ready to write">
+                <button
+                  onClick={() => openThread(row, true)}
+                  className="rounded-md p-1.5 text-text-tertiary hover:bg-white hover:text-primary"
+                >
+                  <Reply size={14} />
+                </button>
+              </Tooltip>
+              <Tooltip
+                side="top"
+                content={
                   row.isStuck
-                    ? 'text-amber-600'
-                    : 'text-text-tertiary hover:text-amber-600',
-                )}
+                    ? 'Remove the Stuck flag'
+                    : 'Mark as stuck — flags it so you know it’s blocked'
+                }
               >
-                <OctagonAlert size={14} />
-              </button>
+                <button
+                  onClick={() =>
+                    setStuck({
+                      commitmentId: row.id as Id<'commitments'>,
+                      stuck: !row.isStuck,
+                    }).catch((err) => reportMutationError(err))
+                  }
+                  className={cn(
+                    'rounded-md p-1.5 hover:bg-white',
+                    row.isStuck
+                      ? 'text-amber-600'
+                      : 'text-text-tertiary hover:text-amber-600',
+                  )}
+                >
+                  <OctagonAlert size={14} />
+                </button>
+              </Tooltip>
               <DropdownMenu.Root>
-                <DropdownMenu.Trigger asChild>
-                  <button
-                    title="Remind me later"
-                    className="rounded-md p-1.5 text-text-tertiary hover:bg-white hover:text-primary"
-                  >
-                    <Clock size={14} />
-                  </button>
-                </DropdownMenu.Trigger>
+                <Tooltip side="top" content="Remind me later — hides it until it pops back up">
+                  <DropdownMenu.Trigger asChild>
+                    <button className="rounded-md p-1.5 text-text-tertiary hover:bg-white hover:text-primary">
+                      <Clock size={14} />
+                    </button>
+                  </DropdownMenu.Trigger>
+                </Tooltip>
                 <DropdownMenu.Portal>
                   <DropdownMenu.Content
                     className="z-50 w-[150px] rounded-lg border border-border bg-white p-1 shadow-lg"
@@ -369,30 +386,35 @@ export function CommitmentsPage() {
                   </DropdownMenu.Content>
                 </DropdownMenu.Portal>
               </DropdownMenu.Root>
-              <button
-                title="Dismiss (not a real request)"
-                onClick={() =>
-                  dismiss({ commitmentId: row.id as Id<'commitments'> }).catch(
-                    (err) => reportMutationError(err),
-                  )
-                }
-                className="rounded-md p-1.5 text-text-tertiary hover:bg-white hover:text-red-500"
+              <Tooltip
+                side="top"
+                content="Dismiss — not a real request; kept in the Dismissed tab"
               >
-                <X size={14} />
-              </button>
+                <button
+                  onClick={() =>
+                    dismiss({ commitmentId: row.id as Id<'commitments'> }).catch(
+                      (err) => reportMutationError(err),
+                    )
+                  }
+                  className="rounded-md p-1.5 text-text-tertiary hover:bg-white hover:text-red-500"
+                >
+                  <X size={14} />
+                </button>
+              </Tooltip>
             </>
           ) : (
-            <button
-              title="Reopen"
-              onClick={() =>
-                reopen({ commitmentId: row.id as Id<'commitments'> }).catch((err) =>
-                  reportMutationError(err),
-                )
-              }
-              className="rounded-md p-1.5 text-text-tertiary hover:bg-white hover:text-primary"
-            >
-              <RotateCcw size={14} />
-            </button>
+            <Tooltip side="top" content="Reopen — put this back on the Open list">
+              <button
+                onClick={() =>
+                  reopen({ commitmentId: row.id as Id<'commitments'> }).catch((err) =>
+                    reportMutationError(err),
+                  )
+                }
+                className="rounded-md p-1.5 text-text-tertiary hover:bg-white hover:text-primary"
+              >
+                <RotateCcw size={14} />
+              </button>
+            </Tooltip>
           )}
         </div>
       </div>
