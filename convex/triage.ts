@@ -18,7 +18,7 @@ import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import { insertSystemOutboundEmail } from "./emails";
 import { isTriageCategory } from "./ai/classifier";
-import { patchThread, stampedThreadInsert } from "./lib/inboxStamp";
+import { patchThread } from "./lib/inboxStamp";
 
 // ── Settings ────────────────────────────────────────────────────────────────
 

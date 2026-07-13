@@ -1206,6 +1206,38 @@ export const _pushThreadReadState = internalAction({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Trash a single Gmail message. Used when discarding a provider-synced draft —
+// without this, Gmail keeps the draft and the next incremental sync
+// resurrects it locally. Best-effort; 404 means it's already gone.
+// ─────────────────────────────────────────────────────────────────────────────
+export const _trashProviderMessage = internalAction({
+  args: {
+    accountId: v.id("mailAccounts"),
+    providerMessageId: v.string(),
+  },
+  handler: async (ctx, { accountId, providerMessageId }) => {
+    try {
+      await withRefreshOn401(ctx, accountId, async (token) => {
+        const res = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(providerMessageId)}/trash`,
+          { method: "POST", headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok && res.status !== 404) {
+          const text = await res.text();
+          const err = new Error(
+            `Gmail message trash failed (${res.status}): ${text.slice(0, 200)}`,
+          ) as Error & { status: number };
+          err.status = res.status;
+          throw err;
+        }
+      });
+    } catch (err) {
+      console.error("[gmail-sync] trash provider message failed:", err);
+    }
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Push a spam verdict up to Gmail: mark spam = add SPAM + drop INBOX (the
 // thread moves to Gmail's Spam folder); un-spam = the reverse. Best-effort,
 // same contract as _pushThreadReadState — local DB is already updated and

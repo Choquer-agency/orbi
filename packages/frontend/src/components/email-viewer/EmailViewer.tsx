@@ -1915,10 +1915,17 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     }
   }, [pendingDraft, selectedThreadId]);
 
-  // Auto-open compose when thread has a saved draft email
+  // Auto-open compose when thread has a saved draft email — ONCE per draft.
+  // Without the ref, closing the composer put the state back to "draft
+  // exists + composer closed" and this effect instantly reopened it: an
+  // unclosable, frozen-looking draft (Bryce 2026-07-13).
   const savedDraftEmail = data?.data?.emails?.find((e: any) => e.isDraft);
+  const autoOpenedDraftRef = useRef<string | null>(null);
   useEffect(() => {
     if (savedDraftEmail && selectedThreadId && !replyMode && !pendingDraft) {
+      const key = `${selectedThreadId}:${savedDraftEmail.id}`;
+      if (autoOpenedDraftRef.current === key) return; // user closed it — respect that
+      autoOpenedDraftRef.current = key;
       setReplyMode(savedDraftEmail.inReplyTo ? 'reply' : 'compose');
     }
   }, [savedDraftEmail?.id, selectedThreadId]);

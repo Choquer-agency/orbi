@@ -3,7 +3,7 @@ import { mutation, query, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import type { Doc, Id } from "./_generated/dataModel";
-import { patchThread, stampedThreadInsert } from "./lib/inboxStamp";
+import { patchThread } from "./lib/inboxStamp";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers

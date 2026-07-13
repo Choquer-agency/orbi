@@ -406,8 +406,47 @@ function installContentSecurityPolicy() {
   });
 }
 
+function installDownloadHandler() {
+  // Attachment/image downloads: the renderer triggers a normal Chromium
+  // download (blob + <a download>). Without this handler the shell had no
+  // download pipeline wired up, so clicks did nothing. Save straight to
+  // ~/Downloads with no dialog (Bryce 2026-07-13), dedupe filenames, and
+  // confirm with the macOS Downloads-stack bounce + a notification.
+  session.defaultSession.on('will-download', (_event, item) => {
+    const downloadsDir = app.getPath('downloads');
+    const base = item.getFilename() || 'download';
+    const ext = path.extname(base);
+    const stem = ext ? base.slice(0, -ext.length) : base;
+    let target = path.join(downloadsDir, base);
+    let n = 2;
+    while (fs.existsSync(target)) {
+      target = path.join(downloadsDir, `${stem} ${n}${ext}`);
+      n++;
+    }
+    item.setSavePath(target);
+    item.once('done', (_e, state) => {
+      if (state === 'completed') {
+        if (process.platform === 'darwin') {
+          app.dock?.downloadFinished(target);
+        }
+        if (Notification.isSupported()) {
+          const note = new Notification({
+            title: 'Saved to Downloads',
+            body: path.basename(target),
+          });
+          note.on('click', () => shell.showItemInFolder(target));
+          note.show();
+        }
+      } else if (state !== 'cancelled' && Notification.isSupported()) {
+        new Notification({ title: 'Download failed', body: base }).show();
+      }
+    });
+  });
+}
+
 app.whenReady().then(() => {
   installContentSecurityPolicy();
+  installDownloadHandler();
   createWindow();
   createTray();
   configureAutoUpdates();

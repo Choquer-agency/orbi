@@ -208,6 +208,22 @@ export const discard = mutation({
     const thread = await ctx.db.get(email.threadId);
     await ctx.db.delete(draftId);
 
+    // Provider-synced drafts (started in Gmail / on the phone) also live in
+    // Gmail — deleting only our copy meant the next incremental sync
+    // resurrected the draft, which read as "the draft won't go away". Trash
+    // it provider-side too (best-effort; gmail.modify scope allows trash).
+    if (
+      account.provider === "GMAIL" &&
+      email.providerMessageId &&
+      !email.providerMessageId.startsWith("local-") &&
+      !email.providerMessageId.startsWith("draft-")
+    ) {
+      await ctx.scheduler.runAfter(0, internal.sync.gmail._trashProviderMessage, {
+        accountId: account._id,
+        providerMessageId: email.providerMessageId,
+      });
+    }
+
     // Clean up draft-only thread (no other emails).
     if (thread && thread.providerThreadId.startsWith("draft-thread-")) {
       const remaining = await ctx.db
