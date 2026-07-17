@@ -102,7 +102,7 @@ export async function buildThreadContext(
       const bodyRow = await ctx.db
         .query("emailBodies")
         .withIndex("by_email", (q) => q.eq("emailId", e._id))
-        .unique();
+        .first();
       body = bodyRow?.bodyText || e.bodyText || "";
       const html = bodyRow?.bodyHtml || e.bodyHtml;
       if (body.length < 100 && html) {

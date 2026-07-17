@@ -390,7 +390,7 @@ export const _loadForExtraction = internalQuery({
       const bodyRow = await ctx.db
         .query("emailBodies")
         .withIndex("by_email", (q) => q.eq("emailId", emailId))
-        .unique();
+        .first();
       bodyText = bodyRow?.bodyText || email.bodyText || email.snippet || "";
     }
     // Strip quoted reply history. Without this, every reply in a long thread

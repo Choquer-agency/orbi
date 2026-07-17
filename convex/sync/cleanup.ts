@@ -70,7 +70,7 @@ export const _purgeBatch = internalMutation({
       const body = await ctx.db
         .query("emailBodies")
         .withIndex("by_email", (q) => q.eq("emailId", email._id))
-        .unique();
+        .first();
       if (body) await ctx.db.delete(body._id);
 
       const attachments = await ctx.db

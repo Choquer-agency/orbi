@@ -894,7 +894,7 @@ export const discardFailedSend = mutation({
     const body = await ctx.db
       .query("emailBodies")
       .withIndex("by_email", (q) => q.eq("emailId", emailId))
-      .unique();
+      .first();
     if (body) await ctx.db.delete(body._id);
     await ctx.db.delete(emailId);
     return { data: { success: true } };
@@ -1139,7 +1139,7 @@ export const _loadForSend = internalQuery({
       const bodyRow = await ctx.db
         .query("emailBodies")
         .withIndex("by_email", (q) => q.eq("emailId", emailId))
-        .unique();
+        .first();
       if (bodyRow) {
         email = {
           ...email,

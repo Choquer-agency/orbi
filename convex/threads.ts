@@ -890,7 +890,7 @@ export const get = query({
           ctx.db
             .query("emailBodies")
             .withIndex("by_email", (q) => q.eq("emailId", e._id))
-            .unique(),
+            .first(),
         ]);
         const cls = null as { category: string; confidence?: number; urgency?: string; summary?: string } | null;
         const attachments = await Promise.all(

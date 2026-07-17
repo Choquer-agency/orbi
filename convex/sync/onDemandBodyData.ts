@@ -43,7 +43,7 @@ export const _lookupForBodyFetch = internalQuery({
     const existingBody = await ctx.db
       .query("emailBodies")
       .withIndex("by_email", (q) => q.eq("emailId", emailId))
-      .unique();
+      .first();
     return {
       authorized,
       email: {
@@ -119,7 +119,7 @@ export const _persistBody = internalMutation({
     const existing = await ctx.db
       .query("emailBodies")
       .withIndex("by_email", (q) => q.eq("emailId", args.emailId))
-      .unique();
+      .first();
     if (existing) {
       await ctx.db.patch(existing._id, {
         bodyText: args.bodyText,

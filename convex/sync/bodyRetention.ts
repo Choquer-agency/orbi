@@ -111,7 +111,7 @@ export const _stripBatch = internalMutation({
       const body = await ctx.db
         .query("emailBodies")
         .withIndex("by_email", (q) => q.eq("emailId", email._id))
-        .unique();
+        .first();
       if (body) {
         // Last chance to distill the searchable text before the HTML goes.
         await upsertEmailSearchText(ctx, {

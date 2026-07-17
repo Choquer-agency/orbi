@@ -96,7 +96,7 @@ export const _sweepBodyBatch = internalMutation({
         const existingBody = await ctx.db
           .query("emailBodies")
           .withIndex("by_email", (q) => q.eq("emailId", e._id))
-          .unique();
+          .first();
         if (!existingBody) {
           await ctx.db.insert("emailBodies", {
             emailId: e._id,

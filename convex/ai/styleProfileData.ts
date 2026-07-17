@@ -78,7 +78,7 @@ export const _getBody = internalQuery({
     const body = await ctx.db
       .query("emailBodies")
       .withIndex("by_email", (q) => q.eq("emailId", emailId))
-      .unique();
+      .first();
     if (!body) return null;
     return {
       bodyText: (body.bodyText ?? "").slice(0, MAX_BODY_CHARS),
