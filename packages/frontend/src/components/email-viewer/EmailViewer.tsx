@@ -3145,14 +3145,10 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                 : undefined
             }
             replyRecipients={(() => {
-              // AI-created drafts carry an explicit To value. In reply mode the
-              // composer renders recipient chips from `replyRecipients`, not
-              // `initialDraft.to`, so honor the AI draft recipient here instead
-              // of recomputing recipients from the latest email in the thread.
-              if (pendingDraft?.to) return parseAddressString(pendingDraft.to);
-
               const emails = thread.emails ?? [];
-              if (emails.length === 0) return [];
+              if (emails.length === 0) {
+                return pendingDraft?.to ? parseAddressString(pendingDraft.to) : [];
+              }
 
               // The set of the user's own addresses (receiving account + its
               // send-as aliases), so we can tell which messages were genuinely
@@ -3196,6 +3192,23 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               for (const addr of [...asAddressArray(lastEmail.toAddresses), ...asAddressArray(lastEmail.ccAddresses)]) {
                 if (addr?.email && !excluded.has(addr.email.toLowerCase()) && !all.some((a) => a.email === addr.email)) {
                   all.push({ email: addr.email, name: addr.name || undefined });
+                }
+              }
+
+              // AI-created drafts: default to the full reply-all set above
+              // (the model's `to` usually names only the sender — Bryce
+              // 2026-07-23: "it should default to reply all"), then merge in
+              // any EXTRA addresses the AI/user explicitly asked for
+              // ("...and add Lauren") so nothing it named gets dropped.
+              if (pendingDraft?.to && pendingDraft.threadId === thread.id) {
+                for (const a of parseAddressString(pendingDraft.to)) {
+                  if (
+                    a?.email &&
+                    !excluded.has(a.email.toLowerCase()) &&
+                    !all.some((m) => m.email.toLowerCase() === a.email.toLowerCase())
+                  ) {
+                    all.push(a);
+                  }
                 }
               }
               return all;
