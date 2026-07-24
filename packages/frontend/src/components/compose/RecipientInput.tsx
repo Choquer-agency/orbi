@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { usePersonAutocomplete } from '../../hooks/usePersons';
+import { useInstantContactSearch } from '../../lib/contactDirectory';
 import { useAnyHistoricalSyncInProgress } from '../../hooks/useHistoricalSync';
 import { getAvatarColor } from '../../lib/constants';
 import { cn, getInitials } from '../../lib/utils';
@@ -39,7 +39,7 @@ export function ChipRecipientInput({
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   const term = inputValue.trim();
-  const { data } = usePersonAutocomplete(term);
+  const { data } = useInstantContactSearch(term);
   const suggestions = data?.data ?? [];
 
   // Flat list for keyboard navigation: persons + their expanded emails.
@@ -241,7 +241,7 @@ export function RecipientInput({ value, onChange, placeholder }: RecipientInputP
   const parts = value.split(',');
   const currentSegment = parts[parts.length - 1]?.trim() || '';
 
-  const { data } = usePersonAutocomplete(currentSegment);
+  const { data } = useInstantContactSearch(currentSegment);
   const suggestions = data?.data ?? [];
   const importStatus = useAnyHistoricalSyncInProgress();
   // Show the "still indexing" hint when the user is typing but we don't yet

@@ -1,6 +1,7 @@
-import { Suspense, lazy, useCallback, useRef } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence, useReducedMotion } from 'framer-motion';
 import { useUiStore } from '../../stores/uiStore';
+import { ensureContactDirectory } from '../../lib/contactDirectory';
 import { ThreadList } from '../thread-list/ThreadList';
 
 import { HeaderIcons } from './Header';
@@ -78,6 +79,11 @@ const mobileSlideTransition = { type: 'spring' as const, stiffness: 500, damping
 const reducedMotionTransition = { duration: 0.15 };
 
 export function AppLayout() {
+  // Warm the in-memory contact directory so To/Cc autocomplete is instant
+  // from the first keystroke (background-refreshes itself).
+  useEffect(() => {
+    ensureContactDirectory();
+  }, []);
   const { threadListWidth, setThreadListWidth, aiChatWidth, selectedFolder, selectedContactId, selectedPersonId, settingsOpen, setSettingsOpen, composingNew, mobileActiveView, setMobileActiveView, mobileTransitionDirection, teamViewUserId, teamViewUserName, exitTeamView } =
     useUiStore();
   const hasContactOrPerson = !!(selectedContactId || selectedPersonId);

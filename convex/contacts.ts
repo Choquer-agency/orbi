@@ -61,6 +61,49 @@ function ciIncludes(haystack: string | undefined | null, needle: string): boolea
 // Public queries / mutations
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Compact whole-directory snapshot for the client-side instant autocomplete
+// (2026-07-23 speed sprint). Fetched IMPERATIVELY once per session + slow
+// background refresh — never useQuery-subscribed, because contacts are
+// upserted on every synced email and a subscription would re-read the whole
+// table per write (the exact cost pattern from the 07-10 incident). The
+// client filters this list in memory, so keystrokes cost zero reads.
+// ─────────────────────────────────────────────────────────────────────────────
+export const directory = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUser(ctx);
+    const [contacts, persons, own] = await Promise.all([
+      ctx.db
+        .query("contacts")
+        .withIndex("by_user_email", (q) => q.eq("userId", userId))
+        .collect(),
+      ctx.db
+        .query("persons")
+        .withIndex("by_user_updatedAt", (q) => q.eq("userId", userId))
+        .collect(),
+      getUserOwnEmails(ctx, userId),
+    ]);
+    const personName = new Map<string, string>();
+    for (const p of persons) {
+      if (p.displayName) personName.set(String(p._id), p.displayName);
+    }
+    const ownSet = new Set(own.emails);
+    return contacts
+      .filter((c) => !ownSet.has(c.email.toLowerCase()))
+      .map((c) => ({
+        email: c.email,
+        name:
+          c.name ||
+          (c.personId ? personName.get(String(c.personId)) : undefined) ||
+          undefined,
+        personId: c.personId ? String(c.personId) : undefined,
+        emailCount: c.emailCount ?? 0,
+        lastEmailed: c.lastEmailed ?? 0,
+      }));
+  },
+});
+
 export const list = query({
   args: {
     q: v.optional(v.string()),

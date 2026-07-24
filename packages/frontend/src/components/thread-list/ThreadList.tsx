@@ -4,7 +4,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import { Search, Check, Plus, X, Archive, Star, Trash2, Loader2, Mail, MailOpen, MailSearch, User, Inbox, Calendar, Paperclip, Tag, RefreshCw } from 'lucide-react';
 import { useThreads, useUpdateThread, usePrefetchAdjacentThreads, useIdleThreadPrefetch, useThreadHoverPrefetch } from '../../hooks/useThreads';
 import { useAccounts } from '../../hooks/useAccounts';
-import { useContactAutocomplete } from '../../hooks/useContacts';
+import { useInstantContactSearch } from '../../lib/contactDirectory';
 import { useAnyHistoricalSyncInProgress } from '../../hooks/useHistoricalSync';
 import { useUiStore } from '../../stores/uiStore';
 import { cn, groupByDate } from '../../lib/utils';
@@ -81,9 +81,16 @@ export function ThreadList() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const suggestionsRef = useRef<HTMLDivElement>(null);
 
-  // Contact autocomplete for suggestions dropdown
-  const { data: autocompleteData } = useContactAutocomplete(searchQuery);
-  const suggestions = autocompleteData?.data ?? [];
+  // Contact suggestions from the in-memory directory — instant (<1ms), zero
+  // server reads per keystroke. Flattened to the {email,name,emailCount}
+  // shape this dropdown has always rendered.
+  const { data: autocompleteData } = useInstantContactSearch(searchQuery);
+  const suggestions = (autocompleteData?.data ?? []).map((g: any) => ({
+    email: g.primaryEmail,
+    name: g.displayName,
+    company: null,
+    emailCount: g.totalEmailCount,
+  })).filter((c: any) => !!c.email);
 
   // Suggestions are visible as long as there's input, matches exist, and user hasn't dismissed
   const showSuggestions = searchQuery.length >= 1 && suggestions.length > 0 && !suggestionsDismissed;
@@ -131,10 +138,11 @@ export function ThreadList() {
     return parts.join(' ');
   }, [searchPills, searchQuery]);
 
-  // Debounce search input by 300ms (react to query text or pill changes)
+  // Debounce deep (server) search by 120ms — people suggestions above are
+  // instant, so this delay only gates the full-mailbox query.
   useEffect(() => {
     const full = buildSearchString();
-    const timer = setTimeout(() => setDebouncedSearch(full), 300);
+    const timer = setTimeout(() => setDebouncedSearch(full), 120);
     return () => clearTimeout(timer);
   }, [searchQuery, searchPills, buildSearchString]);
 
