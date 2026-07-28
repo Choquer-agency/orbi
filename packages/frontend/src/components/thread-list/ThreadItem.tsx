@@ -224,8 +224,11 @@ function ThreadItemImpl({ thread, isSelected, isMultiSelected, onSelect, onShift
           >
             {thread.subject}
           </p>
+          {/* Conversation size (total messages), NOT an unread count — the old
+              orange treatment read as "needs attention" and never cleared,
+              which looked like a stuck unread badge (Bryce 2026-07-28). */}
           {thread.messageCount > 1 && (
-            <span className="shrink-0 rounded-full bg-orange-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white">
+            <span className="shrink-0 rounded-full bg-surface-strong px-1.5 py-0.5 text-[10px] font-semibold leading-none text-text-secondary">
               {thread.messageCount}
             </span>
           )}
