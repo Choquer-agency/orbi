@@ -1238,6 +1238,80 @@ export const _trashProviderMessage = internalAction({
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Push trash / archive up to Gmail. Best-effort, same contract as the
+// read-state push. WITHOUT these, a local delete or archive lived only in
+// Orbi — the next incremental sync re-imported Gmail's labels and the thread
+// popped back within seconds (Bryce 2026-07-28: "deleting these and they
+// came back after a second").
+// ─────────────────────────────────────────────────────────────────────────────
+export const _pushThreadTrashState = internalAction({
+  args: {
+    accountId: v.id("mailAccounts"),
+    providerThreadId: v.string(),
+    isTrashed: v.boolean(),
+  },
+  handler: async (ctx, { accountId, providerThreadId, isTrashed }) => {
+    try {
+      await withRefreshOn401(ctx, accountId, async (token) => {
+        const verb = isTrashed ? "trash" : "untrash";
+        const res = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(providerThreadId)}/${verb}`,
+          { method: "POST", headers: { Authorization: `Bearer ${token}` } },
+        );
+        if (!res.ok && res.status !== 404) {
+          const text = await res.text();
+          const err = new Error(
+            `Gmail thread ${verb} failed (${res.status}): ${text.slice(0, 200)}`,
+          ) as Error & { status: number };
+          err.status = res.status;
+          throw err;
+        }
+      });
+    } catch (err) {
+      console.error("[gmail-sync] push trash-state failed:", err);
+    }
+  },
+});
+
+export const _pushThreadArchiveState = internalAction({
+  args: {
+    accountId: v.id("mailAccounts"),
+    providerThreadId: v.string(),
+    isArchived: v.boolean(),
+  },
+  handler: async (ctx, { accountId, providerThreadId, isArchived }) => {
+    try {
+      await withRefreshOn401(ctx, accountId, async (token) => {
+        const body = isArchived
+          ? { removeLabelIds: ["INBOX"] }
+          : { addLabelIds: ["INBOX"] };
+        const res = await fetch(
+          `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(providerThreadId)}/modify`,
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(body),
+          },
+        );
+        if (!res.ok && res.status !== 404) {
+          const text = await res.text();
+          const err = new Error(
+            `Gmail archive modify failed (${res.status}): ${text.slice(0, 200)}`,
+          ) as Error & { status: number };
+          err.status = res.status;
+          throw err;
+        }
+      });
+    } catch (err) {
+      console.error("[gmail-sync] push archive-state failed:", err);
+    }
+  },
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Push a spam verdict up to Gmail: mark spam = add SPAM + drop INBOX (the
 // thread moves to Gmail's Spam folder); un-spam = the reverse. Best-effort,
 // same contract as _pushThreadReadState — local DB is already updated and

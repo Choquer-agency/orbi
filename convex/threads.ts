@@ -1111,6 +1111,28 @@ export const update = mutation({
         rest.isRead,
       );
     }
+    // Mirror trash/archive to the provider — local-only flags get reverted
+    // by the next incremental sync (resurrection bug). Gmail only; the
+    // Microsoft twin is on the deferred parity list.
+    const account = await ctx.db.get(thread.accountId);
+    const isRealGmailThread =
+      account?.provider === "GMAIL" &&
+      !thread.providerThreadId.startsWith("local-thread-") &&
+      !thread.providerThreadId.startsWith("draft-thread-");
+    if (isRealGmailThread && rest.isTrashed !== undefined) {
+      await ctx.scheduler.runAfter(0, internal.sync.gmail._pushThreadTrashState, {
+        accountId: thread.accountId,
+        providerThreadId: thread.providerThreadId.split("::")[0],
+        isTrashed: rest.isTrashed,
+      });
+    }
+    if (isRealGmailThread && rest.isArchived !== undefined && rest.isTrashed === undefined) {
+      await ctx.scheduler.runAfter(0, internal.sync.gmail._pushThreadArchiveState, {
+        accountId: thread.accountId,
+        providerThreadId: thread.providerThreadId.split("::")[0],
+        isArchived: rest.isArchived,
+      });
+    }
     const updated = await ctx.db.get(threadId);
     return { data: updated };
   },
