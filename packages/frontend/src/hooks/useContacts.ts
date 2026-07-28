@@ -38,9 +38,9 @@ export function useContactNameResolver() {
   // 1024-field limit for large address books). Build a lookup Map locally.
   const entries = useQuery(api.contacts.nameMap, isAuthenticated ? {} : 'skip');
   const lookup = useMemo(() => {
-    const m = new Map<string, string>();
+    const m = new Map<string, { name: string; manual?: boolean }>();
     for (const e of entries ?? []) {
-      m.set(e.email, e.name);
+      m.set(e.email, { name: e.name, manual: (e as any).manual });
     }
     return m;
   }, [entries]);
@@ -48,9 +48,14 @@ export function useContactNameResolver() {
   const resolveName = useCallback(
     (fromAddress: string | undefined | null, fromName: string | undefined | null): string => {
       if (!fromAddress) return fromName || 'Unknown';
+      const entry = lookup.get(fromAddress.toLowerCase());
+      // A name the user typed themselves beats whatever the sender's mail
+      // client calls itself ("Century Plaza Hotel" vs the Dorothy the user
+      // KNOWS this address to be). Auto-learned names still defer to a
+      // meaningful header, which protects newsletter/brand senders.
+      if (entry?.manual) return entry.name;
       if (isMeaningfulHeaderName(fromName, fromAddress)) return fromName!.trim();
-      const resolved = lookup.get(fromAddress.toLowerCase());
-      if (resolved) return resolved;
+      if (entry) return entry.name;
       if (fromName && fromName.trim()) return fromName.trim();
       const at = fromAddress.indexOf('@');
       if (at > 0) {

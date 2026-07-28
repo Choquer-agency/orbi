@@ -301,18 +301,23 @@ export const nameMap = query({
       ...new Set(named.map((c) => c.personId).filter(Boolean) as Id<"persons">[]),
     ];
     const persons = await Promise.all(personIds.map((id) => ctx.db.get(id)));
-    const personMap = new Map<string, string>();
+    const personMap = new Map<string, { name: string; manual: boolean }>();
     for (const p of persons) {
-      if (p) personMap.set(p._id, p.displayName);
+      if (p) personMap.set(p._id, { name: p.displayName, manual: !!p.manuallyNamed });
     }
 
-    const entries: Array<{ email: string; name: string }> = [];
+    // manual=true when the user set the name by hand (person rename or contact
+    // edit). The frontend lets manual names OUTRANK the email header's display
+    // name; auto-learned ones still defer to a meaningful header.
+    const entries: Array<{ email: string; name: string; manual: boolean }> = [];
     for (const c of named) {
       const email = c.email.toLowerCase();
-      if (c.personId && personMap.has(c.personId)) {
-        entries.push({ email, name: personMap.get(c.personId)! });
+      const contactManual = c.isAutoLearned === false;
+      const viaPerson = c.personId ? personMap.get(c.personId) : undefined;
+      if (viaPerson) {
+        entries.push({ email, name: viaPerson.name, manual: viaPerson.manual || contactManual });
       } else if (c.name) {
-        entries.push({ email, name: c.name });
+        entries.push({ email, name: c.name, manual: contactManual });
       }
     }
     return entries;

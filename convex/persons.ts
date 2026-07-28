@@ -210,7 +210,10 @@ export const update = mutation({
       throw new Error("Person not found");
     }
     const patch: Partial<Doc<"persons">> = { updatedAt: Date.now() };
-    if (args.displayName !== undefined) patch.displayName = args.displayName;
+    if (args.displayName !== undefined) {
+      patch.displayName = args.displayName;
+      patch.manuallyNamed = true; // user-set names outrank header names
+    }
     if (args.company !== undefined) patch.company = args.company ?? undefined;
     if (args.title !== undefined) patch.title = args.title ?? undefined;
     if (args.phone !== undefined) patch.phone = args.phone ?? undefined;

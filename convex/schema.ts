@@ -885,6 +885,9 @@ export default defineSchema({
   persons: defineTable({
     userId: v.id("users"),
     displayName: v.string(),
+    // True once the user renames this person by hand — manual names outrank
+    // email header display names in the UI (auto-extracted ones do not).
+    manuallyNamed: v.optional(v.boolean()),
     company: v.optional(v.string()),
     title: v.optional(v.string()),
     phone: v.optional(v.string()),
