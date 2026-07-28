@@ -20,9 +20,47 @@ import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
 import Placeholder from '@tiptap/extension-placeholder';
 import Table from '@tiptap/extension-table';
+
+// Preserve each table element's own inline `style` through the editor
+// round-trip (TipTap drops unknown attributes by default — which is why
+// borders used to be force-injected on every cell).
+const keepStyle = {
+  style: {
+    default: null,
+    parseHTML: (el: HTMLElement) => el.getAttribute('style'),
+    renderHTML: (attrs: { style?: string | null }) =>
+      attrs.style ? { style: attrs.style } : {},
+  },
+  width: {
+    default: null,
+    parseHTML: (el: HTMLElement) => el.getAttribute('width'),
+    renderHTML: (attrs: { width?: string | null }) =>
+      attrs.width ? { width: attrs.width } : {},
+  },
+};
+const StyledTable = Table.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...keepStyle };
+  },
+}).configure({ resizable: false, HTMLAttributes: { class: 'my-2' } });
 import TableRow from '@tiptap/extension-table-row';
 import TableHeader from '@tiptap/extension-table-header';
 import TableCell from '@tiptap/extension-table-cell';
+const StyledTableRow = TableRow.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...keepStyle };
+  },
+});
+const StyledTableHeader = TableHeader.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...keepStyle };
+  },
+});
+const StyledTableCell = TableCell.extend({
+  addAttributes() {
+    return { ...this.parent?.(), ...keepStyle };
+  },
+});
 import { marked } from 'marked';
 import { haptic } from '../../lib/haptics';
 import { useIsMobile } from '../../hooks/useIsMobile';
@@ -198,26 +236,16 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         placeholder: 'Write your message...',
       }),
       // Real <table> support so AI-generated tables (e.g. commission
-      // breakdowns) survive into the compose editor instead of being silently
-      // stripped to plain paragraphs by the StarterKit schema.
-      Table.configure({
-        resizable: false,
-        HTMLAttributes: {
-          class: 'border-collapse my-2',
-          style: 'border-collapse:collapse; margin:8px 0;',
-        },
-      }),
-      TableRow,
-      TableHeader.configure({
-        HTMLAttributes: {
-          style: 'border:1px solid #d0d4dc; padding:6px 10px; background:#f4f5f7; font-weight:600; text-align:left;',
-        },
-      }),
-      TableCell.configure({
-        HTMLAttributes: {
-          style: 'border:1px solid #d0d4dc; padding:6px 10px; vertical-align:top;',
-        },
-      }),
+      // breakdowns) survive into the compose editor. Each table keeps the
+      // inline style it ARRIVED with instead of a forced per-cell border:
+      // AI data tables ship their own border styles, while signatures are
+      // borderless LAYOUT tables — the old forced border outlined the
+      // signature's invisible scaffolding on every reply (Bryce 2026-07-28:
+      // "weird load / lines").
+      StyledTable,
+      StyledTableRow,
+      StyledTableHeader,
+      StyledTableCell,
     ],
     content: initialDraft?.bodyHtml
       ? initialDraft.bodyHtml
