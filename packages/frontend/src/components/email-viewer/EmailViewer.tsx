@@ -2183,6 +2183,80 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
     );
   }
 
+  // One-click "Save as PDF" → ~/Downloads, no dialogs (invoices → accountant,
+  // Bryce 2026-07-28). Captures the newest message AS DISPLAYED (the live
+  // iframe has images resolved and quoted history collapsed), inlines
+  // blob-backed images so they survive outside this session, and hands the
+  // HTML to the Electron shell to render + save.
+  const handleSaveAsPdf = async () => {
+    const electronApi = (window as any).electronAPI;
+    if (!electronApi?.saveEmailPdf) {
+      toast.error('PDF export is available in the desktop app');
+      return;
+    }
+    const emails = thread.emails ?? [];
+    const last = emails[emails.length - 1];
+    if (!last) return;
+    let bodyHtml: string = last.bodyHtmlClean || last.bodyHtml || '';
+    try {
+      const iframe = document.querySelector(
+        `[data-email-block="${last.id}"] iframe`,
+      ) as HTMLIFrameElement | null;
+      const root = iframe?.contentDocument?.getElementById('orbi-email-root');
+      if (root) {
+        const clone = root.cloneNode(true) as HTMLElement;
+        await Promise.all(
+          Array.from(clone.querySelectorAll('img')).map(async (img) => {
+            const src = img.getAttribute('src') || '';
+            if (!src.startsWith('blob:')) return;
+            try {
+              const blob = await fetch(src).then((r) => r.blob());
+              const dataUrl: string = await new Promise((resolve) => {
+                const fr = new FileReader();
+                fr.onload = () => resolve(fr.result as string);
+                fr.readAsDataURL(blob);
+              });
+              img.setAttribute('src', dataUrl);
+            } catch {
+              img.removeAttribute('src');
+            }
+          }),
+        );
+        if (clone.innerHTML.trim()) bodyHtml = clone.innerHTML;
+      }
+    } catch {
+      /* stored body fallback already set */
+    }
+    if (!bodyHtml.trim()) {
+      toast.error('Nothing to export yet — wait for the message to load');
+      return;
+    }
+    const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const fromLine = last.fromName
+      ? `${last.fromName} <${last.fromAddress}>`
+      : last.fromAddress;
+    const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+      body{font-family:-apple-system,Helvetica,Arial,sans-serif;color:#111;margin:24px;}
+      .orbi-pdf-hdr{border-bottom:1px solid #ddd;padding-bottom:12px;margin-bottom:16px;}
+      .orbi-pdf-hdr h1{font-size:16px;margin:0 0 6px;}
+      .orbi-pdf-hdr p{font-size:11px;color:#555;margin:2px 0;}
+      img{max-width:100%;height:auto;}
+      [data-orbi-quoted]{display:none;}
+    </style></head><body>
+      <div class="orbi-pdf-hdr">
+        <h1>${esc(thread.subject || '(no subject)')}</h1>
+        <p>From: ${esc(fromLine ?? '')}</p>
+        <p>Date: ${esc(new Date(last.receivedAt).toLocaleString())}</p>
+      </div>
+      ${bodyHtml}
+    </body></html>`;
+    const loadingId = toast.loading('Saving PDF…');
+    const res = await electronApi.saveEmailPdf(html, thread.subject || 'email');
+    toast.dismiss(loadingId);
+    if (res?.ok) toast.success('PDF saved to Downloads');
+    else toast.error('PDF export failed');
+  };
+
   return (
     <div ref={viewerContainerRef} className="flex h-full flex-col bg-surface">
       {/* Thread header toolbar */}
@@ -2202,6 +2276,15 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           </h2>
         </div>
         <div className="flex shrink-0 items-center gap-1">
+          <Tooltip content="Save as PDF to Downloads">
+            <button
+              onClick={() => void handleSaveAsPdf()}
+              className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary"
+              aria-label="Save as PDF to Downloads"
+            >
+              <FileText className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
           <Tooltip content="Add team member">
             <button
               onClick={() => setShowTagMenu(!showTagMenu)}

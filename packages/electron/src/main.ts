@@ -343,6 +343,58 @@ ipcMain.handle('set-auto-launch', (_event, enabled: boolean) => {
 
 ipcMain.handle('get-auto-launch', () => store.get('autoLaunch'));
 
+// One-click "Save email as PDF" (invoices → accountant, Bryce 2026-07-28).
+// Renders the passed HTML in a hidden window and writes the PDF straight to
+// ~/Downloads — no dialogs, dock bounce + notification on completion.
+ipcMain.handle('save-email-pdf', async (_event, html: string, baseName: string) => {
+  const safe = (baseName || 'email')
+    .replace(/[/\\:*?"<>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120) || 'email';
+  const downloadsDir = app.getPath('downloads');
+  let target = path.join(downloadsDir, `${safe}.pdf`);
+  let n = 2;
+  while (fs.existsSync(target)) {
+    target = path.join(downloadsDir, `${safe} ${n}.pdf`);
+    n++;
+  }
+  const tmp = path.join(app.getPath('temp'), `orbi-pdf-${Date.now()}.html`);
+  const win = new BrowserWindow({
+    show: false,
+    webPreferences: { sandbox: true, javascript: false },
+  });
+  try {
+    fs.writeFileSync(tmp, html, 'utf8');
+    await win.loadFile(tmp);
+    // Give remote images a moment to arrive before rasterizing.
+    await new Promise((r) => setTimeout(r, 600));
+    const pdf = await win.webContents.printToPDF({
+      printBackground: true,
+      margins: { top: 0.4, bottom: 0.4, left: 0.4, right: 0.4 },
+    });
+    fs.writeFileSync(target, pdf);
+    if (process.platform === 'darwin') {
+      app.dock?.downloadFinished(target);
+    }
+    if (Notification.isSupported()) {
+      const note = new Notification({
+        title: 'PDF saved to Downloads',
+        body: path.basename(target),
+      });
+      note.on('click', () => shell.showItemInFolder(target));
+      note.show();
+    }
+    return { ok: true, path: target };
+  } catch (err) {
+    console.error('[save-email-pdf] failed', err);
+    return { ok: false, error: String(err) };
+  } finally {
+    win.destroy();
+    try { fs.rmSync(tmp); } catch { /* already gone */ }
+  }
+});
+
 ipcMain.handle('open-external', (_event, url: string) => {
   // Renderer can ask us to bounce a URL out to the system browser. Used for
   // OAuth flows so the provider login page doesn't hijack the main window.

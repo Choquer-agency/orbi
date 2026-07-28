@@ -22,5 +22,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // provider's login page never hijacks the Electron main window.
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
 
+  // Renders HTML to a PDF saved directly to ~/Downloads (no dialogs).
+  saveEmailPdf: (html: string, baseName: string) =>
+    ipcRenderer.invoke('save-email-pdf', html, baseName) as Promise<{
+      ok: boolean;
+      path?: string;
+      error?: string;
+    }>,
+
   isElectron: true,
 });
