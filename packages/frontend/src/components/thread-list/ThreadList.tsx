@@ -146,6 +146,18 @@ export function ThreadList() {
     return () => clearTimeout(timer);
   }, [searchQuery, searchPills, buildSearchString]);
 
+  // Closing the search bar means SHOW EVERYTHING — one rule, every path.
+  // (An earlier leak: a hidden from:-filter could outlive the closed bar.)
+  useEffect(() => {
+    if (!searchOpen) {
+      setSearchQuery('');
+      setDebouncedSearch('');
+      setSearchFrom(undefined);
+      setSearchPills([]);
+      setActiveOperator(null);
+    }
+  }, [searchOpen]);
+
   // Clear search when folder changes
   useEffect(() => {
     setSearchQuery('');
@@ -616,6 +628,11 @@ export function ThreadList() {
                       type="button"
                       onClick={() => {
                         setSearchPills((prev) => prev.filter((_, j) => j !== i));
+                        // The from: pill carries a hidden person-filter —
+                        // removing the pill must remove the filter too, or
+                        // the list stays filtered with nothing on screen
+                        // saying so (Bryce 2026-07-28).
+                        if (pill.operator === 'from:') setSearchFrom(undefined);
                         searchInputRef.current?.focus();
                       }}
                       className="ml-0.5 rounded-full p-0.5 hover:bg-primary/20"
