@@ -22,7 +22,7 @@ import { v } from "convex/values";
 import { internalAction, internalMutation } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { upsertEmailSearchText } from "../lib/searchText";
-import { computeInboxStamp } from "../lib/inboxStamp";
+import { computeInboxStamp, patchThread } from "../lib/inboxStamp";
 
 // Fat rows: keep batches small for the 16MB per-mutation read cap.
 const BODY_BATCH = 20;
@@ -178,6 +178,60 @@ export const _stampBatch = internalMutation({
       stamped,
       nextCursor: rows.length > 0 ? rows[rows.length - 1]._creationTime : undefined,
     };
+  },
+});
+
+// ── lastReceivedAt repair (2026-07-28 alias bug) ────────────────────────────
+// Replies sent from a send-as alias were counted as INBOUND (alias missing
+// from userEmails), stamping lastReceivedAt with the user's own send time and
+// bumping the thread to the inbox top. Recompute recent threads' true last
+// inbound time from their newest emails; only corrects DOWNWARD.
+//   npx convex run sync/legacySweep:repairLastReceived '{}' --prod
+export const repairLastReceived = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const cutoff = Date.now() - 14 * 24 * 60 * 60 * 1000;
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    // userId → all own addresses (primaries + aliases)
+    const ownByUser = new Map<string, Set<string>>();
+    for (const a of accounts) {
+      const set = ownByUser.get(String(a.userId)) ?? new Set<string>();
+      set.add(a.email.toLowerCase());
+      for (const al of (a.aliases ?? []) as string[]) set.add(al.toLowerCase());
+      ownByUser.set(String(a.userId), set);
+    }
+    let repaired = 0;
+    for (const a of accounts) {
+      const own = ownByUser.get(String(a.userId)) ?? new Set<string>();
+      const recent = await ctx.db
+        .query("threads")
+        .withIndex("by_account_lastReceivedAt", (q) =>
+          q.eq("accountId", a._id).gt("lastReceivedAt", cutoff),
+        )
+        .order("desc")
+        .take(300);
+      for (const t of recent) {
+        const newest = await ctx.db
+          .query("emails")
+          .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
+          .order("desc")
+          .take(15);
+        const lastInbound = newest.find(
+          (e) => e.fromAddress && !own.has(e.fromAddress.toLowerCase()),
+        );
+        if (
+          lastInbound &&
+          t.lastReceivedAt !== undefined &&
+          lastInbound.receivedAt < t.lastReceivedAt
+        ) {
+          await patchThread(ctx, t._id, {
+            lastReceivedAt: lastInbound.receivedAt,
+          });
+          repaired++;
+        }
+      }
+    }
+    return { repaired };
   },
 });
 

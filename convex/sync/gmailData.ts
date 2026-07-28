@@ -107,7 +107,16 @@ export const _getAccountForSync = internalQuery({
       syncCursor: account.syncCursor ?? null,
       historicalSyncStatus: account.historicalSyncStatus,
       historicalSyncProgress: account.historicalSyncProgress ?? null,
-      userEmails: peers.map((p) => p.email.toLowerCase()),
+      // Primary addresses AND send-as aliases: a reply sent from an alias
+      // synced back as "not one of the user's addresses" and got treated as
+      // an inbound message — bumping the thread to the top of the inbox on
+      // the user's own follow-up (Bryce 2026-07-28).
+      userEmails: [
+        ...peers.map((p) => p.email.toLowerCase()),
+        ...peers.flatMap((p) =>
+          ((p.aliases ?? []) as string[]).map((a) => a.toLowerCase()),
+        ),
+      ],
     };
   },
 });
@@ -867,7 +876,16 @@ export const _getThreadForRefresh = internalQuery({
       accountId: thread.accountId,
       ownerUserId: account.userId,
       provider: account.provider,
-      userEmails: peers.map((p) => p.email.toLowerCase()),
+      // Primary addresses AND send-as aliases: a reply sent from an alias
+      // synced back as "not one of the user's addresses" and got treated as
+      // an inbound message — bumping the thread to the top of the inbox on
+      // the user's own follow-up (Bryce 2026-07-28).
+      userEmails: [
+        ...peers.map((p) => p.email.toLowerCase()),
+        ...peers.flatMap((p) =>
+          ((p.aliases ?? []) as string[]).map((a) => a.toLowerCase()),
+        ),
+      ],
     };
   },
 });
