@@ -684,7 +684,7 @@ export const chat = action({
     ),
     threadId: v.optional(v.id("threads")),
     accountId: v.optional(v.id("mailAccounts")),
-    scope: v.optional(v.union(v.literal("thread"), v.literal("all"))),
+    scope: v.optional(v.union(v.literal("thread"), v.literal("all"), v.literal("compose"))),
     composeContext: v.optional(
       v.object({
         to: v.string(),

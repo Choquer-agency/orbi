@@ -65,7 +65,7 @@ export function useAiChat() {
     useAiChatStore();
 
   const sendMessage = useCallback(
-    async (content: string, scope: 'thread' | 'all' = 'thread') => {
+    async (content: string, scope: 'thread' | 'all' | 'compose' = 'thread') => {
       if (!content.trim() || isLoading) return;
 
       const { selectedThreadId, selectedAccountId, composeContext } =
@@ -117,7 +117,9 @@ export function useAiChat() {
       const requestBody = JSON.stringify({
         message: content.trim(),
         messages: history.slice(0, -1),
-        threadId: selectedThreadId || undefined,
+        // Compose mode: a brand-new email — no thread context, so the model
+        // can't anchor the draft to whatever conversation happens to be open.
+        threadId: scope === 'compose' ? undefined : selectedThreadId || undefined,
         accountId: selectedAccountId || undefined,
         scope,
         conversationId: conversationId || undefined,

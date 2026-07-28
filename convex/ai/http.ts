@@ -10,7 +10,7 @@
 //     messages?: { role: "user"|"assistant", content: string }[],
 //     threadId?: string,
 //     accountId?: string,
-//     scope?: "thread" | "all",
+//     scope?: "thread" | "all" | "compose",
 //     composeContext?: { to, subject, body, mode, threadId? },
 //     conversationId?: Id<"chatConversations">  // optional, for persistence
 //   }
@@ -86,7 +86,7 @@ interface StreamBody {
   messages?: { role: "user" | "assistant"; content: string }[];
   threadId?: string;
   accountId?: string;
-  scope?: "thread" | "all";
+  scope?: "thread" | "all" | "compose";
   composeContext?: {
     to: string;
     subject: string;

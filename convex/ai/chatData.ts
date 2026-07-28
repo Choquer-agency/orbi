@@ -151,7 +151,7 @@ export const buildContext = internalQuery({
     threadId: v.optional(v.id("threads")),
     accountId: v.optional(v.id("mailAccounts")),
     userId: v.id("users"),
-    scope: v.optional(v.union(v.literal("thread"), v.literal("all"))),
+    scope: v.optional(v.union(v.literal("thread"), v.literal("all"), v.literal("compose"))),
     composeContext: v.optional(
       v.object({
         to: v.string(),
@@ -199,7 +199,11 @@ export const buildContext = internalQuery({
       }
     }
 
-    if (args.scope === "all" && args.threadId) {
+    if (args.scope === "compose") {
+      systemParts.push(
+        "\n\n## Mode: Compose New Email\nThe user wants a BRAND-NEW standalone email — NOT a reply. Rules for this mode:\n- NEVER set thread_id on generate_draft, even if a thread context appears above; the draft must open as a fresh email.\n- Resolve the recipient with lookup_contact from the name the user gives (pick the most-emailed match). Only ask for clarification if there are zero or hopelessly ambiguous matches.\n- Always propose a subject line.\n- You may still use search/thread tools to gather background facts the user references, but the OUTPUT is always a new email.",
+      );
+    } else if (args.scope === "all" && args.threadId) {
       systemParts.push(
         "\n\n## Mode: All Emails (with thread context)\nThe user is searching across ALL their emails but is currently viewing a specific thread (context above). IMPORTANT: Check the thread context first — the answer may already be there. If the question is about the current thread, answer directly from the context. Only use search tools if the question is about OTHER emails not in the current thread.",
       );

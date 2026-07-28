@@ -11,6 +11,7 @@ import {
   FileText,
   Mail,
   MailSearch,
+  SquarePen,
   AlertCircle,
   Clock,
   CheckCircle2,
@@ -52,8 +53,13 @@ const ALL_EMAILS_PILLS = [
   'What deadlines do I have this week?',
   'Search for a topic',
 ];
+const COMPOSE_PILLS = [
+  'Write an email to …',
+  'Intro email connecting two people',
+  'Follow-up email about an invoice',
+];
 
-export type AiChatScope = 'thread' | 'all';
+export type AiChatScope = 'thread' | 'all' | 'compose';
 
 /** Lightweight markdown → HTML for chat messages (bold, bullets, line breaks) */
 function renderMarkdown(text: string): string {
@@ -124,6 +130,7 @@ export function AiChatPanel() {
   }, [selectedThreadId]);
 
   const suggestionPills = useMemo(() => {
+    if (scope === 'compose') return COMPOSE_PILLS;
     if (scope === 'all') return selectedThreadId ? ALL_EMAILS_PILLS : DEFAULT_PILLS;
     return selectedThreadId ? THREAD_PILLS : DEFAULT_PILLS;
   }, [scope, selectedThreadId]);
@@ -606,6 +613,18 @@ export function AiChatPanel() {
               >
                 <MailSearch className="h-3 w-3" />
                 {scope === 'all' && 'All emails'}
+              </button>
+              <button
+                onClick={() => setScope('compose')}
+                title="Write a brand-new email (ignores the open thread)"
+                className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] transition-colors ${
+                  scope === 'compose'
+                    ? 'bg-secondary/15 text-secondary'
+                    : 'bg-surface text-text-tertiary hover:text-text-secondary'
+                }`}
+              >
+                <SquarePen className="h-3 w-3" />
+                {scope === 'compose' && 'New email'}
               </button>
             </div>
 
