@@ -23,6 +23,18 @@ import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
 import { DRAFTING_JUDGMENT } from "./promptGuidelines";
 
+// Anthropic billing failures should reach the user as instructions, not a
+// masked "Server Error" (2026-08-04: credits ran dry and the UI said
+// "check that the backend is running").
+export function billingFriendly(err: unknown): string | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/credit balance is too low/i.test(msg)) {
+    return "Orbi's AI is out of Anthropic API credits — top up at console.anthropic.com (Plans & Billing), then try again. Everything else in Orbi keeps working.";
+  }
+  return null;
+}
+
+
 const MODEL = "claude-sonnet-4-6";
 // 3 rounds is required because the system prompt instructs the model to
 // chain `search_emails -> get_thread_detail -> answer`. Two rounds drops the

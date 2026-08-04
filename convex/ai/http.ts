@@ -39,6 +39,18 @@ import {
   OUTPUT_TOOL_NAMES,
 } from "./chat";
 
+// Anthropic billing failures should reach the user as instructions, not a
+// masked "Server Error" (2026-08-04: credits ran dry and the UI said
+// "check that the backend is running").
+function billingFriendly(err: unknown): string | null {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/credit balance is too low/i.test(msg)) {
+    return "Orbi's AI is out of Anthropic API credits — top up at console.anthropic.com (Plans & Billing), then try again. Everything else in Orbi keeps working.";
+  }
+  return null;
+}
+
+
 const MODEL = "claude-sonnet-4-6";
 // 3 rounds is required because the system prompt instructs the model to
 // chain `search_emails -> get_thread_detail -> answer`. Two rounds drops the
@@ -504,9 +516,13 @@ const streamChat = httpAction(async (ctx, req) => {
       // Log server-side — the client only shows a generic banner, and
       // without this line failures were completely invisible in the logs.
       console.error("[ai-chat] stream failed:", err);
+      const friendly = billingFriendly(err);
       await send({
         type: "error",
-        data: { message: err instanceof Error ? err.message : String(err) },
+        data: {
+          message: friendly ?? (err instanceof Error ? err.message : String(err)),
+          ...(friendly ? { code: "billing" } : {}),
+        },
       });
     } finally {
       await writer.close();
