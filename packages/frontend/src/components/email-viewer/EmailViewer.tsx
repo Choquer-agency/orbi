@@ -1171,6 +1171,20 @@ function EmailBodyIframe({
   function post(payload) {
     try { parent.postMessage(Object.assign({ nonce: NONCE }, payload), '*'); } catch (e) {}
   }
+  // First Cmd+A selects this email (native). A second Cmd+A within 1.5s
+  // escalates: ask the parent to copy the ENTIRE thread (selection cannot
+  // span iframes, so "select all messages" is delivered as copy-to-clipboard).
+  var lastSelectAllAt = 0;
+  document.addEventListener('keydown', function (e) {
+    if ((e.metaKey || e.ctrlKey) && String(e.key).toLowerCase() === 'a') {
+      var now = Date.now();
+      if (now - lastSelectAllAt < 1500) {
+        e.preventDefault();
+        try { parent.postMessage({ type: 'orbi-thread-select-all' }, '*'); } catch (err) {}
+      }
+      lastSelectAllAt = now;
+    }
+  }, true);
   function measure() {
     var root = document.getElementById('orbi-email-root');
     // Preserve fixed-width newsletter layouts (typically 600px tables) and
@@ -1778,6 +1792,81 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       container.removeEventListener('touchend', onTouchEnd);
     };
   }, [isMobile, onBack, replyMode]);
+
+  // Whole-thread copy (Bryce 2026-08-04): browser selections cannot cross
+  // iframe boundaries, and each message body is its own iframe — so "select
+  // the entire thread" is delivered as copy-to-clipboard. Triggered by a
+  // second Cmd+A (inside a message body via the bootstrap postMessage, or
+  // anywhere in the viewer chrome via the window listener below).
+  const lastSelectAllAtRef = useRef(0);
+  const copyWholeThread = useCallback(() => {
+    const emails = (data?.data?.emails ?? []) as any[];
+    if (emails.length === 0) return;
+    const parts: string[] = [];
+    for (const e of emails) {
+      let text = '';
+      try {
+        const ifr = document.querySelector(
+          `[data-email-block="${e.id}"] iframe`,
+        ) as HTMLIFrameElement | null;
+        text = ifr?.contentDocument?.body?.innerText ?? '';
+      } catch {
+        /* collapsed/unmounted message — fall through to stored body */
+      }
+      if (!text.trim()) {
+        text =
+          e.bodyText ||
+          (e.bodyHtmlClean
+            ? new DOMParser().parseFromString(e.bodyHtmlClean, 'text/html').body
+                .textContent ?? ''
+            : '') ||
+          e.snippet ||
+          '';
+      }
+      const from = e.fromName ? `${e.fromName} <${e.fromAddress}>` : e.fromAddress;
+      parts.push(
+        `From: ${from}\nDate: ${new Date(e.receivedAt).toLocaleString()}\n\n${text.trim()}`,
+      );
+    }
+    const full = `${data?.data?.subject ?? ''}\n\n${parts.join(
+      '\n\n────────────────\n\n',
+    )}`;
+    navigator.clipboard
+      .writeText(full)
+      .then(() =>
+        toast.success(
+          `Copied all ${emails.length} message${emails.length === 1 ? '' : 's'} in this thread`,
+        ),
+      )
+      .catch(() => toast.error('Copy failed'));
+  }, [data?.data?.emails, data?.data?.subject]);
+
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      if (e.data?.type === 'orbi-thread-select-all') copyWholeThread();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'a') return;
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)
+      )
+        return;
+      const now = Date.now();
+      if (now - lastSelectAllAtRef.current < 1500) {
+        e.preventDefault();
+        copyWholeThread();
+      }
+      lastSelectAllAtRef.current = now;
+    };
+    window.addEventListener('message', onMsg);
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      window.removeEventListener('message', onMsg);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [copyWholeThread]);
 
   // Mark thread and any linked notifications as read when opened.
   // Team Hub: NEVER while browsing a teammate's mailbox — a manager reading

@@ -141,7 +141,15 @@ export function useAiChat() {
         });
 
         if (!response.ok || !response.body) {
-          throw new Error('Stream unavailable');
+          let detail = '';
+          try {
+            detail = (await response.text()).slice(0, 200);
+          } catch {
+            /* body unreadable */
+          }
+          throw new Error(
+            `AI request failed (${response.status}${detail ? `: ${detail}` : ''})`,
+          );
         }
 
         const {
@@ -356,18 +364,21 @@ export function useAiChat() {
             });
             syncOpenDraftFromAi(result.draft);
           }
-        } catch {
+        } catch (err) {
+          // Never swallow the real reason — a budget cap, expired session, or
+          // server error each need a DIFFERENT user action than "check that
+          // the backend is running".
+          console.error('[ai-chat] request failed:', err);
+          const reason = err instanceof Error ? err.message : String(err);
+          const friendly = /401|403/.test(reason)
+            ? "Your session needs a refresh — reload the app (Cmd+R) and try again."
+            : `That request didn't go through (${reason}). Try again — if it repeats, tell Claude the exact time it happened.`;
           if (streamingMsgId) {
             const { finalizeStreamingMessage } = useAiChatStore.getState();
-            finalizeStreamingMessage(streamingMsgId, {
-              replaceContent:
-                "I'm not able to process that request right now. Please check that the backend is running and try again.",
-            });
+            finalizeStreamingMessage(streamingMsgId, { replaceContent: friendly });
           } else {
             const { addAssistantMessage } = useAiChatStore.getState();
-            addAssistantMessage(
-              "I'm not able to process that request right now. Please check that the backend is running and try again.",
-            );
+            addAssistantMessage(friendly);
           }
         }
       } finally {
