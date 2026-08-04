@@ -1799,35 +1799,72 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   // second Cmd+A (inside a message body via the bootstrap postMessage, or
   // anywhere in the viewer chrome via the window listener below).
   const lastSelectAllAtRef = useRef(0);
-  const copyWholeThread = useCallback(() => {
-    const emails = (data?.data?.emails ?? []) as any[];
-    if (emails.length === 0) return;
-    const parts: string[] = [];
-    for (const e of emails) {
-      let text = '';
+  const copyWholeThread = useCallback(async () => {
+    const initialEmails = (data?.data?.emails ?? []) as any[];
+    if (initialEmails.length === 0) return;
+
+    // Convert stored HTML to readable plain text (decodes entities, keeps
+    // paragraph breaks — DOMParser alone collapses block elements).
+    const htmlToPlain = (html: string): string => {
+      const withBreaks = html
+        .replace(/<\/?(p|div|br|tr|h[1-6]|li|blockquote)[^>]*>/gi, '\n')
+        .replace(/<\/?(td|th)[^>]*>/gi, ' ');
+      const text =
+        new DOMParser().parseFromString(withBreaks, 'text/html').body
+          .textContent ?? '';
+      return text.replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+    };
+    const decodeEntities = (t: string): string =>
+      new DOMParser().parseFromString(t, 'text/html').body.textContent ?? t;
+
+    const textFor = (e: any): string => {
       try {
         const ifr = document.querySelector(
           `[data-email-block="${e.id}"] iframe`,
         ) as HTMLIFrameElement | null;
-        text = ifr?.contentDocument?.body?.innerText ?? '';
+        const live = ifr?.contentDocument?.body?.innerText ?? '';
+        if (live.trim()) return live.trim();
       } catch {
-        /* collapsed/unmounted message — fall through to stored body */
+        /* not mounted */
       }
-      if (!text.trim()) {
-        text =
-          e.bodyText ||
-          (e.bodyHtmlClean
-            ? new DOMParser().parseFromString(e.bodyHtmlClean, 'text/html').body
-                .textContent ?? ''
-            : '') ||
-          e.snippet ||
-          '';
-      }
-      const from = e.fromName ? `${e.fromName} <${e.fromAddress}>` : e.fromAddress;
-      parts.push(
-        `From: ${from}\nDate: ${new Date(e.receivedAt).toLocaleString()}\n\n${text.trim()}`,
+      const html = e.bodyHtmlClean || e.bodyHtml;
+      if (html) return htmlToPlain(html);
+      if (e.bodyText) return String(e.bodyText).trim();
+      return '';
+    };
+
+    // Messages older than the 90-day body window have no stored body — pull
+    // them from the provider first so the copy is COMPLETE, not snippets.
+    let emails = initialEmails;
+    const missing = initialEmails.filter((e) => !textFor(e));
+    if (missing.length > 0 && selectedThreadId) {
+      const loadingId = toast.loading(
+        `Fetching full text of ${missing.length} older message${missing.length === 1 ? '' : 's'}…`,
       );
+      try {
+        await Promise.all(
+          missing.map((e) =>
+            convex
+              .action(convexApi.sync.onDemandBody.ensureEmailBody, {
+                emailId: e.id as Id<'emails'>,
+              })
+              .catch(() => null),
+          ),
+        );
+        const fresh: any = await convex.query(convexApi.threads.get, {
+          threadId: selectedThreadId as Id<'threads'>,
+        });
+        if (fresh?.data?.emails?.length) emails = fresh.data.emails;
+      } finally {
+        toast.dismiss(loadingId);
+      }
     }
+
+    const parts = emails.map((e: any) => {
+      const from = e.fromName ? `${e.fromName} <${e.fromAddress}>` : e.fromAddress;
+      const body = textFor(e) || decodeEntities(e.snippet || '(no content available)');
+      return `From: ${from}\nDate: ${new Date(e.receivedAt).toLocaleString()}\n\n${body}`;
+    });
     const full = `${data?.data?.subject ?? ''}\n\n${parts.join(
       '\n\n────────────────\n\n',
     )}`;
@@ -1839,11 +1876,11 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
         ),
       )
       .catch(() => toast.error('Copy failed'));
-  }, [data?.data?.emails, data?.data?.subject]);
+  }, [data?.data?.emails, data?.data?.subject, selectedThreadId]);
 
   useEffect(() => {
     const onMsg = (e: MessageEvent) => {
-      if (e.data?.type === 'orbi-thread-select-all') copyWholeThread();
+      if (e.data?.type === 'orbi-thread-select-all') void copyWholeThread();
     };
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'a') return;
@@ -1856,7 +1893,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       const now = Date.now();
       if (now - lastSelectAllAtRef.current < 1500) {
         e.preventDefault();
-        copyWholeThread();
+        void copyWholeThread();
       }
       lastSelectAllAtRef.current = now;
     };
