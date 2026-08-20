@@ -510,9 +510,11 @@ app.whenReady().then(() => {
   // it via assets/icon.icns).
   if (process.platform === 'darwin') {
     try {
-      app.dock?.setIcon(nativeImage.createFromPath(resolveAsset('icon-1024.png')));
-    } catch {
-      /* asset missing — default icon stands */
+      const dockIcon = nativeImage.createFromPath(resolveAsset('icon-1024.png'));
+      console.log('[dock-icon] path:', resolveAsset('icon-1024.png'), 'empty:', dockIcon.isEmpty());
+      app.dock?.setIcon(dockIcon);
+    } catch (err) {
+      console.error('[dock-icon] failed:', err);
     }
   }
   installContentSecurityPolicy();
