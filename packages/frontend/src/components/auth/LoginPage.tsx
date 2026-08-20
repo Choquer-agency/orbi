@@ -46,9 +46,9 @@ export function LoginPage() {
         {/* Brand */}
         <div className="mb-8 flex flex-col items-center">
           <img
-            src="/favicon.svg"
+            src="/orbi-logo.svg"
             alt="Orbi"
-            className="h-16 w-16 drop-shadow-[0_6px_16px_rgba(255,140,0,0.35)]"
+            className="h-16 w-16 object-contain drop-shadow-[0_6px_16px_rgba(255,126,22,0.35)]"
             draggable={false}
           />
           <h1 className="mt-5 text-[26px] font-bold tracking-tight text-text-primary">
