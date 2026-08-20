@@ -34,6 +34,7 @@ import {
   ArrowRightLeft,
   ChevronUp,
   MoreHorizontal,
+  Paperclip,
 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -2851,6 +2852,12 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                       <span className="min-w-0 flex-1 truncate text-[12px] text-text-tertiary">
                         {email.snippet || ''}
                       </span>
+                      {/* Attachment marker: collapsed rows hid the fact that a
+                          message carried files (Bryce 2026-08-20) — the clip
+                          says "expand me, the attachment is in here". */}
+                      {(email.hasAttachments || (email.attachments?.length ?? 0) > 0) && (
+                        <Paperclip className="h-3 w-3 shrink-0 text-text-tertiary" />
+                      )}
                       <span className="shrink-0 text-[11px] text-text-tertiary">
                         {new Date(email.receivedAt).toLocaleDateString('en-US', {
                           month: 'short',
