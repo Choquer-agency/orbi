@@ -497,6 +497,16 @@ function installDownloadHandler() {
 }
 
 app.whenReady().then(() => {
+  // Dev-mode Electron ships its own dock icon; replace it with the Orbi
+  // logo tile so the dock shows the brand in dev too (packaged builds get
+  // it via assets/icon.icns).
+  if (process.platform === 'darwin') {
+    try {
+      app.dock?.setIcon(nativeImage.createFromPath(resolveAsset('icon-1024.png')));
+    } catch {
+      /* asset missing — default icon stands */
+    }
+  }
   installContentSecurityPolicy();
   installDownloadHandler();
   createWindow();
