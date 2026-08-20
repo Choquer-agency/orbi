@@ -3059,15 +3059,18 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                     />
                     {/* Attachments — hide inline/embedded images (CID or signature-like) */}
                     {email.attachments?.filter((att: any) => {
-                      if (att.contentId) return false;
-                      // Hide small images with generic names (likely signature images)
+                      // Hide inline/signature IMAGES only. Some mail clients
+                      // stamp a contentId on REAL files too (Kent's PDF,
+                      // 2026-08-20) — a document is never signature clutter,
+                      // so non-images always show.
+                      if (att.contentId && att.mimeType?.startsWith('image/')) return false;
                       if (/^image\d{3}\.(jpg|jpeg|png|gif)$/i.test(att.filename) && att.size < 30000) return false;
                       return true;
                     }).length > 0 && (
                       <div className="mt-3 flex flex-wrap gap-2">
                         {email.attachments
                           .filter((att: any) => {
-                            if (att.contentId) return false;
+                            if (att.contentId && att.mimeType?.startsWith('image/')) return false;
                             if (/^image\d{3}\.(jpg|jpeg|png|gif)$/i.test(att.filename) && att.size < 30000) return false;
                             return true;
                           })

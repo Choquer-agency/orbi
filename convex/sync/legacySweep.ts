@@ -19,7 +19,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { v } from "convex/values";
-import { internalAction, internalMutation } from "../_generated/server";
+import { internalAction, internalMutation, internalQuery } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { upsertEmailSearchText } from "../lib/searchText";
 import { computeInboxStamp, patchThread } from "../lib/inboxStamp";
@@ -368,5 +368,42 @@ export const _backfillClsBatch = internalMutation({
       stamped,
       nextCursor: rows.length > 0 ? rows[rows.length - 1]._creationTime : undefined,
     };
+  },
+});
+
+// Debug probe (2026-08-20): full attachment state for emails matching a
+// search phrase. npx convex run sync/legacySweep:_debugAttachmentState '{"text":"..."}'
+export const _debugAttachmentState = internalQuery({
+  args: { text: v.string() },
+  handler: async (ctx, { text }) => {
+    const hits = await ctx.db
+      .query("emailSearchText")
+      .withSearchIndex("search_text", (q) => q.search("text", text))
+      .take(5);
+    const out: any[] = [];
+    for (const h of hits) {
+      const email = await ctx.db.get(h.emailId);
+      if (!email) continue;
+      const atts = await ctx.db
+        .query("attachments")
+        .withIndex("by_email", (q) => q.eq("emailId", h.emailId))
+        .collect();
+      out.push({
+        emailId: h.emailId,
+        subject: email.subject,
+        from: email.fromAddress,
+        receivedAt: new Date(email.receivedAt).toISOString(),
+        hasAttachments: email.hasAttachments ?? null,
+        attachmentRows: atts.map((a) => ({
+          filename: a.filename,
+          mimeType: a.mimeType,
+          size: a.size,
+          contentId: a.contentId ?? null,
+          providerAttachmentId: a.providerAttachmentId ? "yes" : null,
+          storageId: a.storageId ? "yes" : null,
+        })),
+      });
+    }
+    return out;
   },
 });
