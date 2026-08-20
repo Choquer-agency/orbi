@@ -768,6 +768,17 @@ function BodyLoadingFallback({ emailId }: { emailId: string }) {
   );
 }
 
+// A "real" attachment is worth a paperclip: not an inline/signature image,
+// not a tiny generic-named image. Shared by the collapsed-row clip and the
+// expanded card so the clip never promises what the card won't show.
+function realAttachments(email: any): any[] {
+  return (email.attachments ?? []).filter((att: any) => {
+    if (att.contentId && att.mimeType?.startsWith('image/')) return false;
+    if (/^image\d{3}\.(jpg|jpeg|png|gif)$/i.test(att.filename) && att.size < 30000) return false;
+    return true;
+  });
+}
+
 // Older messages can be flagged hasAttachments with no attachment rows
 // synced (metadata-only historical sync). Mounted inside an expanded card,
 // this quietly asks the backend to backfill them; Convex reactivity then
@@ -2870,10 +2881,13 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                       <span className="min-w-0 flex-1 truncate text-[12px] text-text-tertiary">
                         {email.snippet || ''}
                       </span>
-                      {/* Attachment marker: collapsed rows hid the fact that a
-                          message carried files (Bryce 2026-08-20) — the clip
-                          says "expand me, the attachment is in here". */}
-                      {(email.hasAttachments || (email.attachments?.length ?? 0) > 0) && (
+                      {/* Attachment marker — only for REAL files (same filter
+                          as the card, else signature images produce clips that
+                          lead nowhere). Unknown state (rows not synced yet)
+                          falls back to the provider flag; expanding backfills
+                          and the row corrects itself. */}
+                      {(realAttachments(email).length > 0 ||
+                        ((email.attachments?.length ?? 0) === 0 && email.hasAttachments)) && (
                         <Paperclip className="h-3 w-3 shrink-0 text-text-tertiary" />
                       )}
                       <span className="shrink-0 text-[11px] text-text-tertiary">
@@ -3058,22 +3072,9 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                       needed={!!email.hasAttachments && (email.attachments?.length ?? 0) === 0}
                     />
                     {/* Attachments — hide inline/embedded images (CID or signature-like) */}
-                    {email.attachments?.filter((att: any) => {
-                      // Hide inline/signature IMAGES only. Some mail clients
-                      // stamp a contentId on REAL files too (Kent's PDF,
-                      // 2026-08-20) — a document is never signature clutter,
-                      // so non-images always show.
-                      if (att.contentId && att.mimeType?.startsWith('image/')) return false;
-                      if (/^image\d{3}\.(jpg|jpeg|png|gif)$/i.test(att.filename) && att.size < 30000) return false;
-                      return true;
-                    }).length > 0 && (
+                    {realAttachments(email).length > 0 && (
                       <div className="mt-3 flex flex-wrap gap-2">
-                        {email.attachments
-                          .filter((att: any) => {
-                            if (att.contentId && att.mimeType?.startsWith('image/')) return false;
-                            if (/^image\d{3}\.(jpg|jpeg|png|gif)$/i.test(att.filename) && att.size < 30000) return false;
-                            return true;
-                          })
+                        {realAttachments(email)
                           .map((att: any) => {
                             const { icon: Icon, color, bgColor } = getFileTypeInfo(att.filename, att.mimeType);
                             const canPreview = isPreviewable(att.mimeType, att.filename);
