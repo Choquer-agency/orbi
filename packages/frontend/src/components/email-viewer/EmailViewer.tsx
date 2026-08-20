@@ -768,6 +768,24 @@ function BodyLoadingFallback({ emailId }: { emailId: string }) {
   );
 }
 
+// Older messages can be flagged hasAttachments with no attachment rows
+// synced (metadata-only historical sync). Mounted inside an expanded card,
+// this quietly asks the backend to backfill them; Convex reactivity then
+// pops the attachment chips into the open card.
+function EnsureAttachmentMeta({ emailId, needed }: { emailId: string; needed: boolean }) {
+  useEffect(() => {
+    if (!needed) return;
+    convex
+      .action(convexApi.sync.onDemandBody.ensureEmailBody, {
+        emailId: emailId as Id<'emails'>,
+      })
+      .catch(() => {
+        /* transient — the clip stays, user can reopen */
+      });
+  }, [emailId, needed]);
+  return null;
+}
+
 // Stable identity for the no-attachments case — a fresh [] per render
 // invalidated CollapsedEmailBody's sanitize memo, re-running DOMPurify + the
 // full autoLinkify DOM walk on EVERY EmailViewer render (each keystroke in
@@ -3035,6 +3053,10 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                       (a: any) => a.email?.toLowerCase() === email.fromAddress?.toLowerCase(),
                     ) && <TrackingInfo emailId={email.id} />}
 
+                    <EnsureAttachmentMeta
+                      emailId={email.id}
+                      needed={!!email.hasAttachments && (email.attachments?.length ?? 0) === 0}
+                    />
                     {/* Attachments — hide inline/embedded images (CID or signature-like) */}
                     {email.attachments?.filter((att: any) => {
                       if (att.contentId) return false;

@@ -504,7 +504,7 @@ export const ensureEmailBody = action({
     if (!lookup.authorized) {
       throw new Error("Email not found");
     }
-    if (lookup.hasBody) {
+    if (lookup.hasBody && !lookup.needsAttachments) {
       return { status: "already_present" as const };
     }
 

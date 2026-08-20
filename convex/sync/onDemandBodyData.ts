@@ -44,8 +44,19 @@ export const _lookupForBodyFetch = internalQuery({
       .query("emailBodies")
       .withIndex("by_email", (q) => q.eq("emailId", emailId))
       .first();
+    // Older metadata-only synced mail can be FLAGGED hasAttachments without
+    // any attachment rows — the viewer then shows a clip but nothing to
+    // download. Report it so ensureEmailBody refetches even when the body
+    // itself is already cached.
+    const existingAttachment = email.hasAttachments
+      ? await ctx.db
+          .query("attachments")
+          .withIndex("by_email", (q) => q.eq("emailId", emailId))
+          .first()
+      : null;
     return {
       authorized,
+      needsAttachments: !!email.hasAttachments && !existingAttachment,
       email: {
         _id: email._id,
         accountId: email.accountId,
