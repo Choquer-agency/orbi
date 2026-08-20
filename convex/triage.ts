@@ -318,6 +318,7 @@ export const submitFeedback = mutation({
               ...(hasSpamLabel ? [] : ["SPAM"]),
             ],
             isSpam: true,
+            folderStateLocalAt: Date.now(),
           });
         } else if (hasSpamLabel || thread.isSpam) {
           await patchThread(ctx, args.threadId, {

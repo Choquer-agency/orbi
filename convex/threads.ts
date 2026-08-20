@@ -1092,6 +1092,9 @@ export const update = mutation({
       }
     }
     if (rest.isTrashed !== undefined) patch.isTrashed = rest.isTrashed;
+    if (rest.isTrashed !== undefined || rest.isArchived !== undefined) {
+      patch.folderStateLocalAt = Date.now();
+    }
     if (rest.labels !== undefined) patch.labels = rest.labels;
     await patchThread(ctx, threadId, patch);
     // Archiving or trashing resolves any open "Needs Response" signal on

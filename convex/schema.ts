@@ -340,6 +340,11 @@ export default defineSchema({
     // lastReceivedAt while the thread qualifies, undefined otherwise.
     inboxAt: v.optional(v.number()),
     unreadInboxAt: v.optional(v.number()),
+    // Set when the USER trashes/archives/spams locally. Sync suppresses
+    // provider-state regressions of those flags within a short window —
+    // Gmail's push often races our own trash/archive call, briefly
+    // resurrecting the thread (delete → pop back → delete again).
+    folderStateLocalAt: v.optional(v.number()),
 })
     .index("by_account_providerThreadId", ["accountId", "providerThreadId"])
     .index("by_account_lastMessageAt", ["accountId", "lastMessageAt"])

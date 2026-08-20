@@ -277,6 +277,27 @@ export const _upsertThread = internalMutation({
         patch.isRead = true;
       }
 
+      // Local-folder-action lock: the user just trashed/archived/spammed
+      // in-app. Provider pushes often race our own provider-side call and
+      // would briefly revert the flag (delete → thread pops back → deletes
+      // again). Within the window, the user's verdict wins; a genuinely new
+      // message still comes through (noNewMessage=false bypasses).
+      const FOLDER_LOCK_MS = 60 * 1000;
+      const localFolderRecent =
+        existing.folderStateLocalAt !== undefined &&
+        Date.now() - existing.folderStateLocalAt < FOLDER_LOCK_MS;
+      if (localFolderRecent && noNewMessage) {
+        if (existing.isTrashed && patch.isTrashed === false) {
+          patch.isTrashed = true;
+        }
+        if (existing.isArchived && patch.isArchived === false) {
+          patch.isArchived = true;
+        }
+        if (existing.isSpam && patch.isSpam === undefined) {
+          patch.isSpam = true;
+        }
+      }
+
       // Skip the patch entirely when nothing meaningful changed — Gmail's
       // history.list surfaces no-op delta events (importance recalcs, anti-spam
       // tagging, etc.). Avoiding the write keeps live-query re-fires minimal.
