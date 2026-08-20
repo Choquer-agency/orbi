@@ -345,3 +345,17 @@ html, body {
 /* Hide scrollbar for horizontal scroll containers */
 .no-scrollbar::-webkit-scrollbar { display: none; }
 .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Brand wordmark font — self-hosted (packaged-app CSP allows only font-src
+   'self', so Google Fonts CDN would silently fail there; local file works
+   everywhere, offline included). */
+@font-face {
+  font-family: 'Doppio One';
+  src: url('/fonts/DoppioOne-Regular.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+.font-brand {
+  font-family: 'Doppio One', var(--font-sans), sans-serif;
+}

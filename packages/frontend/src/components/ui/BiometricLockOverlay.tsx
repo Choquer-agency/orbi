@@ -21,7 +21,7 @@ export function BiometricLockOverlay({ isAuthenticating, onUnlock }: BiometricLo
           <span className="text-3xl font-bold text-primary">O</span>
         </div>
 
-        <h1 className="text-lg font-semibold text-text-primary">Orbi Mail</h1>
+        <h1 className="font-brand text-lg text-text-primary">Orbi Mail</h1>
 
         <button
           onClick={onUnlock}

@@ -51,7 +51,7 @@ export function LoginPage() {
             className="h-16 w-16 object-contain drop-shadow-[0_6px_16px_rgba(255,126,22,0.35)]"
             draggable={false}
           />
-          <h1 className="mt-5 text-[26px] font-bold tracking-tight text-text-primary">
+          <h1 className="font-brand mt-5 text-[26px] tracking-tight text-text-primary">
             Orbi&nbsp;Mail
           </h1>
           <p className="mt-1 text-[13px] text-text-tertiary">
