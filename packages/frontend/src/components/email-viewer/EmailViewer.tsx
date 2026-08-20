@@ -995,7 +995,11 @@ html, body {
    Force auto height so our measurement wrapper can grow freely. */
 html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow: hidden !important; }
 body { padding: 0 2px; max-width: 100%; }
-img, video, canvas, svg { border: 0; max-width: 100%; height: auto; }
+img, video, canvas, svg { border: 0; max-width: 100%; }
+/* height:auto only for images WITHOUT an explicit height — logos are often
+   sized by height alone, and forcing auto exploded them to natural size
+   (the giant VISA, Bryce 2026-08-20). */
+img:not([height]) { height: auto; }
 a { color: #1a73e8; text-decoration: underline; overflow-wrap: anywhere; word-break: break-word; }
 pre { white-space: pre-wrap; }
 table { border-collapse: collapse; }
@@ -1006,6 +1010,29 @@ table { border-collapse: collapse; }
 
 /* Override CSS appended AFTER the email body so any inline <style> blocks
    the author shipped lose the cascade. Same set of height rules. */
+// Spark/Gmail-style typographic normalization for SIMPLE conversational
+// emails: mail clients ship random defaults (Helvetica 16px, 1.8em gaps…),
+// making three plain emails render like three different apps. Designed
+// emails (tables, backgrounds, image-heavy) keep their own styling.
+const SIMPLE_EMAIL_NORMALIZE_CSS = `
+body, body * {
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif !important;
+  font-size: 14px !important;
+  line-height: 1.5 !important;
+}
+p, div { margin: 0 0 10px !important; }
+p:empty, div:empty { margin: 0 !important; }
+a { font-size: inherit !important; }
+`;
+
+function isSimpleEmail(html: string): boolean {
+  if (html.length > 20000) return false;
+  if (/<table/i.test(html)) return false;
+  if (/background(?:-color)?\s*:/i.test(html) || /bgcolor=/i.test(html)) return false;
+  if (((html.match(/<img/gi) ?? []).length) > 4) return false;
+  return true;
+}
+
 const EMAIL_IFRAME_OVERRIDE_CSS = `
 html, body { height: auto !important; min-height: 0 !important; max-height: none !important; overflow: hidden !important; }
 /* Reply-chain quotes: stop cumulative indentation. Deep chains (reply on a
@@ -1019,7 +1046,8 @@ blockquote { margin: 0.5em 0 !important; padding: 0 0 0 0.75em !important; borde
 blockquote blockquote { margin: 0.25em 0 !important; padding: 0 !important; border-left: none !important; }
 div.gmail_quote, div.gmail_extra { margin: 0 !important; padding: 0 !important; }
 #orbi-email-root { display: block !important; height: auto !important; min-height: 0 !important; transform-origin: top left !important; }
-img, video, canvas, svg { max-width: 100%; height: auto; }
+img, video, canvas, svg { max-width: 100%; }
+img:not([height]) { height: auto; }
 a, pre { overflow-wrap: anywhere; word-break: break-word; }
 .orbi-image-hover-target { cursor: zoom-in !important; }
 .orbi-image-toolbar {
@@ -1348,7 +1376,7 @@ function EmailBodyIframe({
   // Wrap the author's HTML in a measurement div, and append the override
   // <style> AFTER the content so any inline author CSS rules for
   // html/body/height lose the cascade.
-  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${EMAIL_IFRAME_BASE_CSS}</style></head><body><div id="orbi-email-root">${html}</div><style>${EMAIL_IFRAME_OVERRIDE_CSS}</style>${bootstrap}</body></html>`;
+  const srcDoc = `<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><meta name="viewport" content="width=device-width,initial-scale=1"><style>${EMAIL_IFRAME_BASE_CSS}</style></head><body><div id="orbi-email-root">${html}</div><style>${EMAIL_IFRAME_OVERRIDE_CSS}${isSimpleEmail(html) ? SIMPLE_EMAIL_NORMALIZE_CSS : ''}</style>${bootstrap}</body></html>`;
 
   return (
     <iframe
