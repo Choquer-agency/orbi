@@ -3330,7 +3330,13 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
         {replyMode ? (
           <Suspense fallback={<div className="h-16 animate-pulse bg-surface" />}>
             <ComposeInline
-            key={`${pendingDraft?.draftId ?? pendingDraft?.threadId ?? savedDraftEmail?.id ?? 'compose'}-${pendingDraft?.to ?? ''}-${replyMode}`}
+            key={
+              // NOTE: savedDraftEmail.id is deliberately NOT part of this key.
+              // The autosave creates the draft row seconds after typing starts
+              // — keying on it destroyed and rebuilt the live composer mid-
+              // sentence (text loss on app-switch, Bryce 2026-08-20).
+              `${pendingDraft?.draftId ?? pendingDraft?.threadId ?? 'compose'}-${thread.id}-${pendingDraft?.to ?? ''}-${replyMode}`
+            }
             threadId={thread.id}
             lastEmailId={thread.emails?.[thread.emails.length - 1]?.id}
             accountId={(() => {

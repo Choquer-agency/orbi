@@ -406,7 +406,16 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     onClose();
   }, [onClose]);
 
+  const clearComposeStash = useCallback(() => {
+    try {
+      sessionStorage.removeItem(`orbi-compose-stash-${threadId ?? 'new'}`);
+    } catch {
+      /* ignore */
+    }
+  }, [threadId]);
+
   const handleDeleteDraft = useCallback(async () => {
+    clearComposeStash();
     setCloseMenuOpen(false);
     try {
       await deleteDraftFn();
@@ -470,13 +479,46 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     };
   }, [editor, subject, to, recipients, mode, saveDraftFn]);
 
-  // Trigger auto-save on editor content changes
+  // Trigger auto-save on editor content changes + keep a local crash-net
+  // copy: whatever destroys the composer (remount, crash, reload), the
+  // typed text survives in sessionStorage and is restored on next mount.
+  const stashKey = `orbi-compose-stash-${threadId ?? 'new'}`;
   useEffect(() => {
     if (!editor) return;
-    const handler = () => triggerAutoSave();
+    const handler = () => {
+      triggerAutoSave();
+      try {
+        sessionStorage.setItem(
+          stashKey,
+          JSON.stringify({ at: Date.now(), bodyHtml: editor.getHTML(), bodyText: editor.getText(), subject }),
+        );
+      } catch {
+        /* storage full — autosave still covers us */
+      }
+    };
     editor.on('update', handler);
     return () => { editor.off('update', handler); };
-  }, [editor, triggerAutoSave]);
+  }, [editor, triggerAutoSave, stashKey, subject]);
+
+  // Restore the crash-net stash if it's meaningfully richer than what this
+  // mount started with (draft row may lag several seconds behind typing).
+  const stashRestoredRef = useRef(false);
+  useEffect(() => {
+    if (!editor || stashRestoredRef.current) return;
+    stashRestoredRef.current = true;
+    try {
+      const raw = sessionStorage.getItem(stashKey);
+      if (!raw) return;
+      const stash = JSON.parse(raw) as { at: number; bodyHtml: string; bodyText: string };
+      if (Date.now() - stash.at > 24 * 60 * 60 * 1000) return;
+      const current = editor.getText().trim();
+      if ((stash.bodyText ?? '').trim().length > current.length + 5) {
+        editor.commands.setContent(stash.bodyHtml);
+      }
+    } catch {
+      /* corrupt stash — ignore */
+    }
+  }, [editor, stashKey]);
 
   // Close account menu on outside click
   useEffect(() => {
@@ -654,6 +696,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         // otherwise it lingers and reopens pre-filled, one Cmd+Enter from a
         // duplicate send.
         markSent();
+        clearComposeStash();
         onClose();
         return;
       }
@@ -684,6 +727,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
             });
             if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
             markSent();
+        clearComposeStash();
             haptic.success();
             registerUndo(res);
             onClose();
@@ -745,6 +789,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       }
 
       markSent();
+        clearComposeStash();
       haptic.success();
       registerUndo(res!);
       onClose();
