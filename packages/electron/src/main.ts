@@ -5,6 +5,11 @@ import { store } from './store';
 
 const isDev = !app.isPackaged;
 const VITE_DEV_SERVER_URL = 'http://localhost:5173';
+// Jotter-style fluid updates (2026-08-20): the PACKAGED app loads the UI from
+// Vercel, so Cmd+R pulls the latest deploy for every teammate instantly — no
+// re-download, no version lag. The bundled renderer is only the offline
+// fallback (see did-fail-load).
+const REMOTE_UI_URL = 'https://orbi-mail.vercel.app';
 const PROTOCOL = 'orbi-mail';
 const DEFAULT_UPDATE_BASE_URL = 'https://pub-85d769e6aabd49f98c7cb117f4091639.r2.dev';
 
@@ -29,7 +34,7 @@ function loadApp(window: BrowserWindow) {
   if (isDev) {
     window.loadURL(VITE_DEV_SERVER_URL);
   } else {
-    window.loadFile(resolveFrontendIndex());
+    window.loadURL(REMOTE_UI_URL);
   }
 }
 
@@ -76,10 +81,12 @@ function createWindow() {
     loadApp(mainWindow);
   });
 
-  mainWindow.webContents.on('did-fail-load', (_event, _code, _description, validatedURL) => {
-    if (!mainWindow) return;
-    if (!isDev && validatedURL !== `file://${resolveFrontendIndex()}`) {
-      loadApp(mainWindow);
+  // Remote UI unreachable (no internet, Vercel outage) → bundled fallback.
+  // errorCode -3 is ABORTED (normal during reload) — not a failure.
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, _description, _url, isMainFrame) => {
+    if (!mainWindow || isDev || !isMainFrame || errorCode === -3) return;
+    if (!mainWindow.webContents.getURL().startsWith('file:')) {
+      mainWindow.loadFile(resolveFrontendIndex());
     }
   });
 
@@ -114,6 +121,7 @@ function createWindow() {
         target.hostname === 'localhost' ||
         target.hostname === '127.0.0.1' ||
         target.protocol === 'file:' ||
+        url.startsWith(REMOTE_UI_URL) ||
         (current ? new URL(current).origin === target.origin : false);
       if (!allowed) {
         event.preventDefault();
@@ -427,8 +435,8 @@ if (!gotTheLock) {
 function installContentSecurityPolicy() {
   if (isDev) return;
   // Convex deployment URLs: .convex.cloud for WebSocket queries, .convex.site for HTTP actions.
-  const convexCloud = process.env.CONVEX_URL || 'https://careful-warbler-543.convex.cloud';
-  const convexSite = process.env.CONVEX_SITE_URL || 'https://careful-warbler-543.convex.site';
+  const convexCloud = process.env.CONVEX_URL || 'https://hallowed-shepherd-316.convex.cloud';
+  const convexSite = process.env.CONVEX_SITE_URL || 'https://hallowed-shepherd-316.convex.site';
   const cloudHost = convexCloud.replace(/^https?:\/\//, '');
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     callback({
