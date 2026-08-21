@@ -15,7 +15,7 @@ import { action } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
-import { DRAFTING_JUDGMENT } from "./promptGuidelines";
+import { DRAFTING_JUDGMENT, ANTI_SLOP_RULES } from "./promptGuidelines";
 
 const MODEL = "claude-sonnet-4-6";
 const DRAFT_MAX_TOKENS = 1536;
@@ -36,7 +36,9 @@ Rules:
 - If you don't have enough context, write the best draft you can and note what might need adjustment.
 - Follow the user's writing style preferences provided below.
 
-${DRAFTING_JUDGMENT}`;
+${DRAFTING_JUDGMENT}
+
+${ANTI_SLOP_RULES}`;
 
 export const generateDraft = action({
   args: {

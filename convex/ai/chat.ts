@@ -21,7 +21,7 @@ import { action, internalAction } from "../_generated/server";
 import { api, internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
-import { DRAFTING_JUDGMENT } from "./promptGuidelines";
+import { DRAFTING_JUDGMENT, ANTI_SLOP_RULES } from "./promptGuidelines";
 
 // Anthropic billing failures should reach the user as instructions, not a
 // masked "Server Error" (2026-08-04: credits ran dry and the UI said
@@ -111,7 +111,9 @@ Rules:
 - If the user asks about the thread, refer to emails by sender name and date for clarity.
 - This is an agency with multiple team members and shared threads. Be aware of team context.
 
-${DRAFTING_JUDGMENT}`;
+${DRAFTING_JUDGMENT}
+
+${ANTI_SLOP_RULES}`;
 
 // ── Tool definitions ────────────────────────────────────────────────────────
 
