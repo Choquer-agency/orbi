@@ -32,3 +32,16 @@ export const ANTI_SLOP_RULES = `Anti-slop rules (apply to every email you write 
 - Vary sentence length. Three same-length sentences in a row is a tell; break one. Two list items often beat three.
 - Trust the reader: no "as you know", no restating what they said back to them, no explaining why your point matters after making it.
 - End like a person: a concrete next step or a plain sign-off line — never a summary of the email they just read.`;
+
+// Deterministic cleanup for model habits that survive prompt rules. Em/en
+// dashes are Claude's strongest tell and slip through even explicit bans
+// (caught in a live draft 2026-08-21) — so code removes them, not hope.
+export function deSlopText(text: string): string {
+  return text
+    // " — " / " – " mid-sentence → comma
+    .replace(/\s+[—–]\s+/g, ", ")
+    // dash glued to words ("site—one") → comma
+    .replace(/([^\s])[—–]([^\s])/g, "$1, $2")
+    // any stragglers
+    .replace(/[—–]/g, ", ");
+}

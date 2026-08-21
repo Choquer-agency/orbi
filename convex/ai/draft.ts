@@ -15,7 +15,7 @@ import { action } from "../_generated/server";
 import { internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
-import { DRAFTING_JUDGMENT, ANTI_SLOP_RULES } from "./promptGuidelines";
+import { DRAFTING_JUDGMENT, ANTI_SLOP_RULES, deSlopText } from "./promptGuidelines";
 
 const MODEL = "claude-sonnet-4-6";
 const DRAFT_MAX_TOKENS = 1536;
@@ -109,7 +109,7 @@ export const generateDraft = action({
     }
 
     const textBlock = response.content.find((b) => b.type === "text");
-    const draftHtml = textBlock && textBlock.type === "text" ? textBlock.text : "";
+    const draftHtml = deSlopText(textBlock && textBlock.type === "text" ? textBlock.text : "");
     const draftText = draftHtml.replace(/<[^>]+>/g, "").trim();
 
     const suggestedSubject = args.threadId ? null : extractSubject(draftText);

@@ -34,6 +34,7 @@ import { getAuthUserId } from "@convex-dev/auth/server";
 import type { HttpRouter } from "convex/server";
 import type { Id } from "../_generated/dataModel";
 import {
+import { deSlopText } from "./promptGuidelines";
   TOOLS,
   DATA_TOOL_NAMES,
   OUTPUT_TOOL_NAMES,
@@ -327,7 +328,7 @@ const streamChat = httpAction(async (ctx, req) => {
                         ctxResult.primaryRecipient ||
                         undefined,
                       subject: input.subject,
-                      body: input.body,
+                      body: deSlopText(String(input.body ?? "")),
                       threadId: aiThreadId || body.threadId,
                       greetingUsed: input.greeting_used,
                       signoffUsed: input.signoff_used,

@@ -21,7 +21,7 @@ import { action, internalAction } from "../_generated/server";
 import { api, internal } from "../_generated/api";
 import { requireUser } from "../lib/auth";
 import type { Id } from "../_generated/dataModel";
-import { DRAFTING_JUDGMENT, ANTI_SLOP_RULES } from "./promptGuidelines";
+import { DRAFTING_JUDGMENT, ANTI_SLOP_RULES, deSlopText } from "./promptGuidelines";
 
 // Anthropic billing failures should reach the user as instructions, not a
 // masked "Server Error" (2026-08-04: credits ran dry and the UI said
@@ -143,7 +143,7 @@ export const TOOLS: Anthropic.Tool[] = [
         body: {
           type: "string",
           description:
-            "The email body in HTML format. Follow the user's style preferences.",
+            "The email body in HTML format. Follow the user's style preferences. Plain human prose: NEVER use em dashes, no adverbs (really/just/actually), no 'not X but Y' constructions, no throat-clearing openers.",
         },
         greeting_used: {
           type: "string",
@@ -641,7 +641,7 @@ function processOutputTool(
       draft: {
         to: (input.to as string) || primaryRecipient || undefined,
         subject: input.subject as string | undefined,
-        body: input.body as string,
+        body: deSlopText(String(input.body as string ?? "")),
         threadId: aiThreadId || threadId || undefined,
         greetingUsed: input.greeting_used as string | undefined,
         signoffUsed: input.signoff_used as string | undefined,
