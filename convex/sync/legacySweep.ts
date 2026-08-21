@@ -407,3 +407,42 @@ export const _debugAttachmentState = internalQuery({
     return out;
   },
 });
+
+// One-time ghost-draft purge (2026-08-21): reply autosave used to count the
+// auto-filled recipients as content, minting EMPTY drafts that force-open
+// the composer on every thread visit. Deletes Orbi-created drafts
+// (providerMessageId "draft-*") with no body text and no subject-worthy
+// content. Provider-synced drafts are never touched.
+//   npx convex run sync/legacySweep:purgeGhostDrafts '{}'
+export const purgeGhostDrafts = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    let deleted = 0;
+    for (const a of accounts) {
+      const drafts = await ctx.db
+        .query("emails")
+        .withIndex("by_account_isDraft_receivedAt", (q) =>
+          q.eq("accountId", a._id).eq("isDraft", true),
+        )
+        .collect();
+      for (const d of drafts) {
+        if (!d.providerMessageId?.startsWith("draft-")) continue; // Orbi-created only
+        const bodyRow = await ctx.db
+          .query("emailBodies")
+          .withIndex("by_email", (q) => q.eq("emailId", d._id))
+          .first();
+        const text = (d.bodyText ?? bodyRow?.bodyText ?? "").trim();
+        const html = (d.bodyHtml ?? bodyRow?.bodyHtml ?? "")
+          .replace(/<[^>]+>/g, "")
+          .trim();
+        if (text === "" && html === "") {
+          if (bodyRow) await ctx.db.delete(bodyRow._id);
+          await ctx.db.delete(d._id);
+          deleted++;
+        }
+      }
+    }
+    return { deleted };
+  },
+});

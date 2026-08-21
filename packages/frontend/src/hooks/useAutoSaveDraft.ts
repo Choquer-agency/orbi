@@ -49,11 +49,16 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
       if (!enabled || !accountId) return;
       if (sentRef.current) return;
 
-      // Skip if nothing meaningful to save
+      // Skip if nothing meaningful to save. In REPLY mode the recipients
+      // are auto-filled on open, so they must NOT count as content — that
+      // was minting empty "ghost drafts" on every opened-then-abandoned
+      // reply, which then force-opened the composer on each thread visit
+      // (Bryce 2026-08-21). Only the user's own typing counts there.
       const hasContent =
         (fields.bodyText?.trim() || '') !== '' ||
-        (fields.subject?.trim() || '') !== '' ||
-        (fields.toAddresses?.length ?? 0) > 0;
+        (mode !== 'reply' &&
+          ((fields.subject?.trim() || '') !== '' ||
+            (fields.toAddresses?.length ?? 0) > 0));
       if (!hasContent) return;
 
       lastFieldsRef.current = fields;
