@@ -33,8 +33,8 @@ import { internal } from "../_generated/api";
 import { getAuthUserId } from "@convex-dev/auth/server";
 import type { HttpRouter } from "convex/server";
 import type { Id } from "../_generated/dataModel";
-import {
 import { deSlopText } from "./promptGuidelines";
+import {
   TOOLS,
   DATA_TOOL_NAMES,
   OUTPUT_TOOL_NAMES,
