@@ -138,11 +138,15 @@ export function ThreadList() {
     return parts.join(' ');
   }, [searchPills, searchQuery]);
 
-  // Debounce deep (server) search by 120ms — people suggestions above are
-  // instant, so this delay only gates the full-mailbox query.
+  // Debounce deep (server) search by 250ms — people suggestions above are
+  // instant, so this delay only gates the full-mailbox query. A lone
+  // character never hits the server: "B" would search every subject/body
+  // in the mailbox for nothing useful; wait for "Be".
   useEffect(() => {
     const full = buildSearchString();
-    const timer = setTimeout(() => setDebouncedSearch(full), 120);
+    const freeText = searchQuery.trim();
+    const tooShort = searchPills.length === 0 && freeText.length > 0 && freeText.length < 2;
+    const timer = setTimeout(() => setDebouncedSearch(tooShort ? '' : full), 250);
     return () => clearTimeout(timer);
   }, [searchQuery, searchPills, buildSearchString]);
 
@@ -931,8 +935,11 @@ export function ThreadList() {
         <NeedsResponseList />
       ) : /* Thread list */
       isLoading ? (
-        <div className="flex flex-1 items-center justify-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-2">
           <div className="h-5 w-5 animate-spin rounded-full border-2 border-border border-t-primary" />
+          {isSearching && (
+            <p className="text-xs text-text-tertiary">Searching your mailbox…</p>
+          )}
         </div>
       ) : isError ? (
         <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">

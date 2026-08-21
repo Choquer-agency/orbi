@@ -489,6 +489,74 @@ export const list = query({
           threadIdSet.add(hit.threadId);
         }
       }
+
+      // People match: a bare name like "Beth" should surface every thread
+      // where Beth is the SENDER, not just the handful where "Beth" happens
+      // to appear in a subject/body. Resolve the query against the user's
+      // contact directory (name prefix via search_name, email prefix via
+      // by_user_email), then pull that person's mail through the indexed
+      // emails.by_account_fromAddress path. Operator-free queries only —
+      // "from:x" already has its own filter.
+      const hasOperators = !!(
+        parsed && (parsed.from || parsed.to || parsed.cc || parsed.label ||
+          parsed.before !== undefined || parsed.after !== undefined ||
+          parsed.hasAttachment || parsed.isUnread || parsed.isRead ||
+          parsed.isStarred)
+      );
+      if (!hasOperators && tokens.length > 0) {
+        const PEOPLE_MAX = 6;
+        const EMAILS_PER_PERSON_PER_ACCOUNT = 120;
+        const termLower = freeText.trim().toLowerCase();
+        const nameHits = await ctx.db
+          .query("contacts")
+          .withSearchIndex("search_name", (q) =>
+            q.search("name", freeText.trim()).eq("userId", effectiveUserId),
+          )
+          .take(PEOPLE_MAX);
+        const emailHits = await ctx.db
+          .query("contacts")
+          .withIndex("by_user_email", (q) =>
+            q
+              .eq("userId", effectiveUserId)
+              .gte("email", termLower)
+              .lt("email", `${termLower}\uffff`),
+          )
+          .take(PEOPLE_MAX);
+        // Tighten the name hits the same way as text: every token the user
+        // typed must appear in the contact's name (search_name is BM25 and
+        // prefix-matches the last token, so "beth" → "Bethany Jones" is in).
+        const people = new Map<string, Doc<"contacts">>();
+        for (const c of nameHits) {
+          if (allTokensIn(c.name)) people.set(c.email.toLowerCase(), c);
+        }
+        for (const c of emailHits) people.set(c.email.toLowerCase(), c);
+        // fromAddress is stored as the provider sent it (casing varies), so
+        // probe both the lowercase key and the contact's stored spelling.
+        const personEmails = Array.from(
+          new Set(
+            Array.from(people.values())
+              .slice(0, PEOPLE_MAX)
+              .flatMap((c) => [c.email.toLowerCase(), c.email]),
+          ),
+        );
+        if (personEmails.length > 0) {
+          const fromArrays = await Promise.all(
+            accountIds.flatMap((aid) =>
+              personEmails.map((pe) =>
+                ctx.db
+                  .query("emails")
+                  .withIndex("by_account_fromAddress", (q) =>
+                    q.eq("accountId", aid).eq("fromAddress", pe),
+                  )
+                  .order("desc")
+                  .take(EMAILS_PER_PERSON_PER_ACCOUNT),
+              ),
+            ),
+          );
+          for (const e of fromArrays.flat()) threadIdSet.add(e.threadId);
+        }
+      }
+
       const merged = await Promise.all(
         Array.from(threadIdSet).map((id) => ctx.db.get(id)),
       );

@@ -99,10 +99,19 @@ export function useThreads(params: ThreadListParams = {}) {
   // when the user changes filter/split/folder.
   const [stalePages, setStalePages] = useState<ThreadListResponse[] | null>(null);
 
+  const isSearchView = !!(params.search || params.from);
+  const prevWasSearch = useRef(isSearchView);
   useEffect(() => {
     // Snapshot the current pages so we can keep them on screen until the new
     // view resolves. Then reset paging state.
-    setStalePages((prev) => (pages.length > 0 ? pages : prev));
+    //
+    // Exception: crossing a search boundary. Entering a search must NOT keep
+    // the inbox on screen (it reads as "nothing is happening"), and closing a
+    // search must NOT keep the six filtered results on screen — fall through
+    // to the cached inbox snapshot instead so the close is instant.
+    const crossingSearch = prevWasSearch.current !== isSearchView;
+    prevWasSearch.current = isSearchView;
+    setStalePages((prev) => (crossingSearch ? null : pages.length > 0 ? pages : prev));
     setPage(1);
     setPages([]);
     const inMem = getCachedPageSync<ThreadListResponse>(paramsKey);
@@ -116,7 +125,8 @@ export function useThreads(params: ThreadListParams = {}) {
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paramsKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paramsKey, isSearchView]);
 
   const queryArgs = useMemo(
     () => ({
