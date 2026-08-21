@@ -2991,6 +2991,18 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                                   className="text-[13px] font-semibold text-text-primary transition-colors hover:text-primary"
                                   onClick={(e) => {
                                     e.stopPropagation();
+                                    // Copy first (Bryce 2026-08-21: the #1 reason
+                                    // for clicking a name is grabbing the address),
+                                    // then open the card for everything else.
+                                    navigator.clipboard
+                                      .writeText(email.fromAddress)
+                                      .then(() =>
+                                        toast.success(`Copied ${email.fromAddress}`, {
+                                          duration: 1500,
+                                          style: { fontSize: '12px', padding: '6px 12px' },
+                                        }),
+                                      )
+                                      .catch(() => {});
                                     setContactCardEmail(email.fromAddress);
                                     setContactCardAnchor((e.currentTarget as HTMLElement).getBoundingClientRect());
                                   }}
