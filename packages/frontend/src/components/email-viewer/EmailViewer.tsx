@@ -2998,9 +2998,16 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                                   {senderName}
                                 </button>
                                 <span className="ml-2 text-[11px] text-text-tertiary">
-                                  to{' '}
-                                  {toList.map((a: any) => a.name || a.email).join(', ') || '—'}
+                                  to {toList[0]?.name || toList[0]?.email || '—'}
                                 </span>
+                                {/* Everyone else (extra To + all Cc) at a
+                                    glance — "+4" says the whole group got it
+                                    without opening the dropdown. */}
+                                {toList.length - 1 + ccList.length > 0 && (
+                                  <span className="ml-1.5 text-[11px] font-semibold text-primary">
+                                    +{toList.length - 1 + ccList.length}
+                                  </span>
+                                )}
                                 <ChevronDown
                                   className={cn(
                                     'ml-1 inline-block h-3 w-3 align-middle text-text-tertiary transition-transform',
