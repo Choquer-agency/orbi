@@ -446,3 +446,31 @@ export const purgeGhostDrafts = internalMutation({
     return { deleted };
   },
 });
+
+// Debug (2026-08-21): list all current draft rows with provenance.
+export const _debugListDrafts = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    const out: any[] = [];
+    for (const a of accounts) {
+      const drafts = await ctx.db
+        .query("emails")
+        .withIndex("by_account_isDraft_receivedAt", (q) =>
+          q.eq("accountId", a._id).eq("isDraft", true),
+        )
+        .collect();
+      for (const d of drafts) {
+        out.push({
+          account: a.email,
+          emailId: d._id,
+          subject: (d.subject ?? "").slice(0, 60),
+          providerMessageId: d.providerMessageId?.slice(0, 24),
+          labels: d.labels ?? null,
+          created: new Date(d._creationTime).toISOString(),
+        });
+      }
+    }
+    return out;
+  },
+});

@@ -947,3 +947,31 @@ export const _patchEmailBodyAndFrom = internalMutation({
     }
   },
 });
+
+// Remove a local email row (and its body/searchText) when the provider says
+// the message is a trashed draft — i.e., the user deleted it. No-op if absent.
+export const _deleteEmailIfExists = internalMutation({
+  args: { accountId: v.id("mailAccounts"), providerMessageId: v.string() },
+  handler: async (ctx, { accountId, providerMessageId }) => {
+    const email = await ctx.db
+      .query("emails")
+      .withIndex("by_providerMessageId", (q) =>
+        q.eq("providerMessageId", providerMessageId),
+      )
+      .filter((q) => q.eq(q.field("accountId"), accountId))
+      .first();
+    if (!email) return { deleted: false };
+    const bodyRow = await ctx.db
+      .query("emailBodies")
+      .withIndex("by_email", (q) => q.eq("emailId", email._id))
+      .first();
+    if (bodyRow) await ctx.db.delete(bodyRow._id);
+    const search = await ctx.db
+      .query("emailSearchText")
+      .withIndex("by_email", (q) => q.eq("emailId", email._id))
+      .first();
+    if (search) await ctx.db.delete(search._id);
+    await ctx.db.delete(email._id);
+    return { deleted: true };
+  },
+});

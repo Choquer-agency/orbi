@@ -383,6 +383,19 @@ async function persistGmailThread(
       const body = msg.payload ? getBody(msg.payload) : { text: "", html: "" };
       const attachments = msg.payload ? getAttachments(msg.payload) : [];
       const labels = msg.labelIds ?? [];
+
+      // A TRASHED draft is a DELETED draft. Without this, discarding a
+      // Gmail-synced draft (local delete + provider trash) got undone by the
+      // next thread sync re-importing the message — Gmail keeps the DRAFT
+      // label on trashed drafts, so it resurrected as a live draft forever
+      // (Bryce 2026-08-21: "I click yes and it's still there").
+      if (labels.includes("TRASH") && labels.includes("DRAFT")) {
+        await ctx.runMutation(internal.sync.gmailData._deleteEmailIfExists, {
+          accountId,
+          providerMessageId: msgId,
+        });
+        continue;
+      }
       const receivedAt = msg.internalDate
         ? Number(msg.internalDate)
         : Date.now();
