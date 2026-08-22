@@ -162,6 +162,7 @@ export const messagesForParticipant = internalQuery({
       if (!email || email.isDraft) continue;
       messages.push({
         id: email._id,
+        messageId: email.internetMessageId ?? null,
         threadId: email.threadId,
         subject: email.subject ?? "",
         snippet: email.snippet ?? "",
