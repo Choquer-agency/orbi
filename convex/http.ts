@@ -1,4 +1,5 @@
 import { httpRouter } from "convex/server";
+import type { Id } from "./_generated/dataModel";
 import { httpAction } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { auth } from "./auth";
@@ -32,6 +33,16 @@ http.route({
       });
     }
     const url = new URL(req.url);
+    const messageId = url.searchParams.get("messageId");
+    if (messageId) {
+      const message = await ctx.runQuery(internal.erp.messageText, {
+        emailId: messageId as Id<"emails">,
+      });
+      return new Response(JSON.stringify({ message }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     const address = url.searchParams.get("participant") ?? undefined;
     const domain = url.searchParams.get("domain") ?? undefined;
     const limit = Number(url.searchParams.get("limit") ?? "50");

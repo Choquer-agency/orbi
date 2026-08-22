@@ -110,6 +110,28 @@ export const indexParticipants = internalMutation({
   },
 });
 
+// Full permanent text (subject + body) for one message — powers the
+// expand-an-email view in the ERP Activity Log.
+export const messageText = internalQuery({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, args) => {
+    const email = await ctx.db.get(args.emailId);
+    if (!email) return null;
+    const searchRow = await ctx.db
+      .query("emailSearchText")
+      .withIndex("by_email", (q) => q.eq("emailId", args.emailId))
+      .unique();
+    return {
+      id: email._id,
+      subject: email.subject ?? "",
+      from: { address: email.fromAddress, name: email.fromName ?? null },
+      to: Array.isArray(email.toAddresses) ? email.toAddresses : [],
+      date: email.receivedAt ?? email.sentAt ?? email._creationTime,
+      text: searchRow?.text ?? email.snippet ?? "",
+    };
+  },
+});
+
 // Ops tool: wipe the cursor so the next indexParticipants run re-walks the
 // whole emails table (rows are rewritten idempotently).
 export const resetParticipantCursor = internalMutation({
