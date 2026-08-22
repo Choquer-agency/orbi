@@ -49,6 +49,7 @@ import type * as dashboard from "../dashboard.js";
 import type * as devices from "../devices.js";
 import type * as drafts from "../drafts.js";
 import type * as emails from "../emails.js";
+import type * as erp from "../erp.js";
 import type * as followUps from "../followUps.js";
 import type * as handoffs from "../handoffs.js";
 import type * as http from "../http.js";
@@ -164,6 +165,7 @@ declare const fullApi: ApiFromModules<{
   devices: typeof devices;
   drafts: typeof drafts;
   emails: typeof emails;
+  erp: typeof erp;
   followUps: typeof followUps;
   handoffs: typeof handoffs;
   http: typeof http;

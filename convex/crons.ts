@@ -174,4 +174,15 @@ crons.daily(
   {},
 );
 
+// ── ERP participant index ───────────────────────────────────────────────────
+// Every 5 min: index new emails into emailParticipants (self-chains through
+// backlog, so this also performs the one-time backfill). Powers the Choquer
+// ERP client Vault email feed.
+crons.interval(
+  "erp-participant-index",
+  { minutes: 5 },
+  internal.erp.indexParticipants,
+  {},
+);
+
 export default crons;

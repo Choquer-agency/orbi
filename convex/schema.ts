@@ -476,6 +476,33 @@ export default defineSchema({
     }),
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Participant index — one row per (email, address) so external consumers
+  // (the Choquer ERP client Vault) can answer "every message to/from X" with
+  // an indexed range scan instead of scanning threads. Maintained by the
+  // erp.indexParticipants walker (cron), including domain for org-wide match.
+  // ───────────────────────────────────────────────────────────────────────────
+  emailParticipants: defineTable({
+    emailId: v.id("emails"),
+    threadId: v.id("threads"),
+    accountId: v.id("mailAccounts"),
+    address: v.string(), // lowercased
+    domain: v.string(), // part after @, lowercased
+    name: v.optional(v.string()),
+    role: v.string(), // "from" | "to" | "cc" | "bcc"
+    direction: v.string(), // "in" | "out" (from the mailbox's perspective)
+    receivedAt: v.number(),
+  })
+    .index("by_email", ["emailId"])
+    .index("by_address_receivedAt", ["address", "receivedAt"])
+    .index("by_domain_receivedAt", ["domain", "receivedAt"]),
+
+  // Cursor state for the participant walker (key = "participantCursor").
+  erpState: defineTable({
+    key: v.string(),
+    value: v.any(),
+  }).index("by_key", ["key"]),
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Attachments — Bytes dropped; binary lives in Convex `_storage`.
   // ───────────────────────────────────────────────────────────────────────────
   attachments: defineTable({

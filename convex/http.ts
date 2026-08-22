@@ -15,6 +15,38 @@ addOAuthHttpRoutes(http);
 addTrackingHttpRoutes(http);
 addAttachmentHttpRoutes(http);
 
+// ── ERP messages feed ────────────────────────────────────────────────────────
+// The Choquer ERP client Vault asks "every message to/from this address or
+// domain". Auth: Authorization: Bearer <ERP_API_KEY> (shared secret set on
+// this deployment). Read-only; backed by the emailParticipants index.
+http.route({
+  path: "/erp/messages",
+  method: "GET",
+  handler: httpAction(async (ctx, req) => {
+    const expected = process.env.ERP_API_KEY;
+    const got = req.headers.get("authorization") ?? "";
+    if (!expected || got !== `Bearer ${expected}`) {
+      return new Response(JSON.stringify({ error: "unauthorized" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const url = new URL(req.url);
+    const address = url.searchParams.get("participant") ?? undefined;
+    const domain = url.searchParams.get("domain") ?? undefined;
+    const limit = Number(url.searchParams.get("limit") ?? "50");
+    const messages = await ctx.runQuery(internal.erp.messagesForParticipant, {
+      address,
+      domain,
+      limit: Number.isFinite(limit) ? limit : 50,
+    });
+    return new Response(JSON.stringify({ messages }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }),
+});
+
 // ── Gmail push webhook ───────────────────────────────────────────────────────
 // Cloud Pub/Sub push subscription target. Gmail publishes {emailAddress,
 // historyId} the instant a watched mailbox changes; we kick the normal
