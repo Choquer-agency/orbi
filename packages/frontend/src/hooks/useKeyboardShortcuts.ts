@@ -1,5 +1,8 @@
 import { useEffect } from 'react';
+import toast from 'react-hot-toast';
 import { useUiStore } from '../stores/uiStore';
+import { useUndoStore } from '../stores/undoStore';
+import type { Id } from '../../../../convex/_generated/dataModel';
 import { useUpdateThread } from './useThreads';
 import { getVisibleThreadNavigationRows } from '../lib/threadNavigationState';
 
@@ -28,6 +31,32 @@ export function useKeyboardShortcuts() {
         target.getAttribute('role') === 'combobox' ||
         target.getAttribute('role') === 'textbox' ||
         target.closest('[role="dialog"]') !== null;
+
+      // Cmd+Z: undo the last delete/archive. Inside a text field we do
+      // nothing at all — the editor's own history (TipTap / native input
+      // undo) owns the shortcut there.
+      if ((e.key === 'z' || e.key === 'Z') && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
+        if (isEditable) return;
+        const entry = useUndoStore.getState().pop();
+        if (!entry) {
+          toast('Nothing to undo', { id: 'undo-toast' });
+          return;
+        }
+        e.preventDefault();
+        for (const t of entry.threads) {
+          const inverse: { isTrashed?: boolean; isArchived?: boolean } = {};
+          if (t.patch.isTrashed !== undefined) inverse.isTrashed = !t.patch.isTrashed;
+          if (t.patch.isArchived !== undefined) inverse.isArchived = !t.patch.isArchived;
+          updateThread.mutate({ id: t.id as Id<'threads'>, ...inverse, isUndo: true });
+        }
+        const n = entry.threads.length;
+        const what = n === 1 ? 'conversation' : `${n} conversations`;
+        toast.success(
+          entry.action === 'trash' ? `Restored ${what} from Trash` : `Unarchived ${what}`,
+          { id: 'undo-toast' },
+        );
+        return;
+      }
 
       // Cmd+/: toggle nav dropdown
       if (e.key === '/' && (e.metaKey || e.ctrlKey)) {

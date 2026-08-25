@@ -18,6 +18,7 @@ const SHORTCUT_GROUPS = [
       { keys: ['E'], desc: 'Archive' },
       { keys: ['S'], desc: 'Star / unstar' },
       { keys: ['\u232B'], desc: 'Delete' },
+      { keys: ['\u2318', 'Z'], desc: 'Undo delete / archive' },
       { keys: ['X'], desc: 'Toggle select' },
       { keys: ['Shift', 'Click'], desc: 'Select range' },
     ],

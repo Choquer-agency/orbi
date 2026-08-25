@@ -9,6 +9,7 @@ import {
 } from '../lib/threadListCache';
 import { reportMutationError } from '../lib/mutationErrors';
 import { useUiStore } from '../stores/uiStore';
+import { useUndoStore } from '../stores/undoStore';
 import {
   getCachedThreadSync,
   loadCachedThread,
@@ -462,10 +463,22 @@ export function useUpdateThread() {
     isArchived?: boolean;
     isTrashed?: boolean;
     labels?: string[];
+    /** Set when this mutation IS an undo — don't record it on the stack. */
+    isUndo?: boolean;
   }) => {
     setIsPending(true);
     try {
-      const { id, ...rest } = args;
+      const { id, isUndo, ...rest } = args;
+      // Record destructive folder moves so ⌘Z can reverse them. Applying
+      // `false` later walks back through the exact same mutation (provider
+      // push + folder-action lock included), so Gmail un-trashes too.
+      if (!isUndo) {
+        if (rest.isTrashed === true) {
+          useUndoStore.getState().push({ id: id as string, patch: { isTrashed: true } }, 'trash');
+        } else if (rest.isArchived === true) {
+          useUndoStore.getState().push({ id: id as string, patch: { isArchived: true } }, 'archive');
+        }
+      }
       // Trash/archive removes the thread from the current view — if it was
       // the selected one, hop to the next visible thread BEFORE the list
       // reflows (covers toolbar, hover, swipe, context menu, keyboard, bulk).
