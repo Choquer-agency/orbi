@@ -559,3 +559,61 @@ export const _unTrashThread = internalMutation({
     return { isTrashed: t?.isTrashed, inboxAt: t?.inboxAt ?? null };
   },
 });
+
+// Bulk draft purge (2026-08-25, Bryce: "remove all drafts"). Scope: ONLY the
+// named user's own accounts — never teammates'. Deletes local rows and
+// trashes provider-synced drafts Gmail-side (recoverable from Gmail trash
+// for 30 days; without the provider trash they would just resync back).
+export const purgeAllDraftsForUser = internalMutation({
+  args: { ownerEmail: v.string() },
+  handler: async (ctx, { ownerEmail }) => {
+    const owner = (await ctx.db.query("mailAccounts").collect()).find(
+      (a) => a.email.toLowerCase() === ownerEmail.toLowerCase(),
+    );
+    if (!owner) throw new Error("owner account not found");
+    const accounts = await ctx.db
+      .query("mailAccounts")
+      .withIndex("by_user", (q) => q.eq("userId", owner.userId))
+      .collect();
+    let deleted = 0;
+    let providerTrashed = 0;
+    const byAccount: Record<string, number> = {};
+    for (const a of accounts) {
+      const drafts = await ctx.db
+        .query("emails")
+        .withIndex("by_account_isDraft_receivedAt", (q) =>
+          q.eq("accountId", a._id).eq("isDraft", true),
+        )
+        .collect();
+      byAccount[a.email] = drafts.length;
+      for (const d of drafts) {
+        const pmid = d.providerMessageId ?? "";
+        if (
+          a.provider === "GMAIL" &&
+          pmid &&
+          !pmid.startsWith("local-") &&
+          !pmid.startsWith("draft-")
+        ) {
+          await ctx.scheduler.runAfter(0, internal.sync.gmail._trashProviderMessage, {
+            accountId: a._id,
+            providerMessageId: pmid,
+          });
+          providerTrashed++;
+        }
+        const bodyRow = await ctx.db
+          .query("emailBodies")
+          .withIndex("by_email", (q) => q.eq("emailId", d._id))
+          .first();
+        if (bodyRow) await ctx.db.delete(bodyRow._id);
+        const search = await ctx.db
+          .query("emailSearchText")
+          .withIndex("by_email", (q) => q.eq("emailId", d._id))
+          .first();
+        if (search) await ctx.db.delete(search._id);
+        await ctx.db.delete(d._id);
+        deleted++;
+      }
+    }
+    return { deleted, providerTrashed, byAccount };
+  },
+});
