@@ -307,7 +307,12 @@ async function persistGmailThread(
     const tIsStarred = threadLabels.includes("STARRED");
     const tIsArchived =
       !threadLabels.includes("INBOX") && !threadLabels.includes("SENT");
-    const tIsTrashed = threadLabels.includes("TRASH");
+    // TRASH on the label union only means SOME message is trashed (e.g. a
+    // discarded draft) — if Gmail still stamps INBOX, the conversation is
+    // alive. Treating any TRASH as thread-trashed vanished a live thread
+    // when its deleted draft got (correctly) trashed (Bryce 2026-08-25).
+    const tIsTrashed =
+      threadLabels.includes("TRASH") && !threadLabels.includes("INBOX");
     const tParticipants = [...participants];
     const tSnippet = lastSnippet || undefined;
     const tFp = (await ctx.runQuery(

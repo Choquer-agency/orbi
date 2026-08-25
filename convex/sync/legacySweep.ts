@@ -474,3 +474,88 @@ export const _debugListDrafts = internalQuery({
     return out;
   },
 });
+
+// Debug (2026-08-25): counts of states that can hide threads.
+export const _debugSyncHealth = internalQuery({
+  args: {},
+  handler: async (ctx) => {
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    const out: any[] = [];
+    for (const a of accounts) {
+      const orphans = await ctx.db
+        .query("threads")
+        .withIndex("by_account_needsRepair", (q) =>
+          q.eq("accountId", a._id).eq("needsRepair", true),
+        )
+        .collect();
+      out.push({
+        account: a.email,
+        isActive: a.isActive,
+        needsReauth: (a as any).needsReauth ?? null,
+        syncCursor: a.syncCursor ? "set" : "MISSING",
+        watchExpiration: (a as any).watchExpiration
+          ? new Date((a as any).watchExpiration).toISOString()
+          : null,
+        orphanThreads: orphans.length,
+        orphanSample: orphans.slice(0, 3).map((t) => ({
+          subject: (t.subject ?? "").slice(0, 50),
+          created: new Date(t._creationTime).toISOString(),
+        })),
+      });
+    }
+    return out;
+  },
+});
+
+// Debug (2026-08-25): full trace of one sender across blocks, threads, emails.
+export const _debugTraceSender = internalQuery({
+  args: { senderEmail: v.string() },
+  handler: async (ctx, { senderEmail }) => {
+    const target = senderEmail.toLowerCase();
+    const blocks = (await ctx.db.query("blockedSenders").collect()).filter(
+      (b: any) =>
+        (b.email && b.email.toLowerCase() === target) ||
+        (b.domain && target.endsWith(b.domain.toLowerCase())),
+    );
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    const threads: any[] = [];
+    for (const a of accounts) {
+      const recent = await ctx.db
+        .query("threads")
+        .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", a._id))
+        .order("desc")
+        .take(1500);
+      for (const t of recent) {
+        if (t.participantEmails?.some((e: string) => e.toLowerCase() === target)) {
+          threads.push({
+            account: a.email,
+            threadId: t._id,
+            subject: (t.subject ?? "").slice(0, 60),
+            lastMessageAt: new Date(t.lastMessageAt).toISOString(),
+            isTrashed: t.isTrashed,
+            isArchived: t.isArchived,
+            isSpam: t.isSpam ?? null,
+            snoozedUntil: t.snoozedUntil ?? null,
+            inboxAt: t.inboxAt ? "set" : null,
+            lastReceivedAt: t.lastReceivedAt
+              ? new Date(t.lastReceivedAt).toISOString()
+              : null,
+            labels: t.labels,
+            needsRepair: t.needsRepair ?? null,
+          });
+        }
+      }
+    }
+    return { blocks, threads };
+  },
+});
+
+// One-off repair: clear a wrongly-trashed thread (restamps inbox sticker).
+export const _unTrashThread = internalMutation({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, { threadId }) => {
+    await patchThread(ctx, threadId, { isTrashed: false });
+    const t = await ctx.db.get(threadId);
+    return { isTrashed: t?.isTrashed, inboxAt: t?.inboxAt ?? null };
+  },
+});
