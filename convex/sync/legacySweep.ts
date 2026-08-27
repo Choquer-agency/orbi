@@ -617,3 +617,76 @@ export const purgeAllDraftsForUser = internalMutation({
     return { deleted, providerTrashed, byAccount };
   },
 });
+
+// Debug (2026-08-27): find emails by search phrase, with full thread state.
+export const _debugFindThread = internalQuery({
+  args: { text: v.string() },
+  handler: async (ctx, { text }) => {
+    const hits = await ctx.db
+      .query("emailSearchText")
+      .withSearchIndex("search_text", (q) => q.search("text", text))
+      .take(8);
+    const out: any[] = [];
+    for (const h of hits) {
+      const email = await ctx.db.get(h.emailId);
+      if (!email) continue;
+      const t = await ctx.db.get(email.threadId);
+      const account = await ctx.db.get(email.accountId);
+      out.push({
+        subject: (email.subject ?? "").slice(0, 70),
+        from: email.fromAddress,
+        receivedAt: new Date(email.receivedAt).toISOString(),
+        account: account?.email,
+        thread: t
+          ? {
+              id: t._id,
+              isTrashed: t.isTrashed,
+              isArchived: t.isArchived,
+              isSpam: t.isSpam ?? null,
+              snoozedUntil: t.snoozedUntil
+                ? new Date(t.snoozedUntil).toISOString()
+                : null,
+              inboxAt: t.inboxAt ? "set" : null,
+              labels: t.labels,
+              lastReceivedAt: t.lastReceivedAt
+                ? new Date(t.lastReceivedAt).toISOString()
+                : null,
+            }
+          : "THREAD MISSING",
+      });
+    }
+    return out;
+  },
+});
+
+// Repair (2026-08-27): threads poisoned into isTrashed by a trashed draft
+// BEFORE the 08-25 rule fix. Signature is exact: locally trashed, but labels
+// still carry INBOX + DRAFT + TRASH (a live conversation with a discarded
+// draft). Genuinely user-deleted threads lose INBOX on their next sync, and
+// rarely carry DRAFT — the triple signature keeps this surgical.
+export const repairPoisonedTrash = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    const repaired: any[] = [];
+    for (const a of accounts) {
+      const recent = await ctx.db
+        .query("threads")
+        .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", a._id))
+        .order("desc")
+        .take(2000);
+      for (const t of recent) {
+        if (
+          t.isTrashed &&
+          t.labels.includes("INBOX") &&
+          t.labels.includes("DRAFT") &&
+          t.labels.includes("TRASH")
+        ) {
+          await patchThread(ctx, t._id, { isTrashed: false });
+          repaired.push({ account: a.email, subject: (t.subject ?? "").slice(0, 50) });
+        }
+      }
+    }
+    return { count: repaired.length, repaired };
+  },
+});
