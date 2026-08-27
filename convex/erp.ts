@@ -7,7 +7,7 @@
 //  2. An internal query the /erp/messages HTTP route uses to answer
 //     "every message where <address|domain> was a participant".
 
-import { internalMutation, internalQuery } from "./_generated/server";
+import { internalMutation, internalQuery, action } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
 import type { Doc } from "./_generated/dataModel";
@@ -196,5 +196,80 @@ export const messagesForParticipant = internalQuery({
       if (messages.length >= limit) break;
     }
     return messages;
+  },
+});
+
+// ── Choquer ERP project intake (the "$" button) ─────────────────────────────
+// From an open email, kick off a project intake in the Choquer ERP: the ERP
+// pulls this sender's full history through /erp/messages, drafts a client
+// profile + latest agreed package with AI, and Bryce approves everything in
+// the ERP wizard before anything is created. This action only identifies
+// the client-side sender and rings the ERP's doorbell.
+
+const AGENCY_MAIL_DOMAINS = new Set([
+  "choquer.agency",
+  "choquercreative.com",
+  "choquer.app",
+]);
+
+export const threadClientSender = internalQuery({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, args) => {
+    const emails = await ctx.db
+      .query("emails")
+      .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", args.threadId))
+      .order("desc")
+      .take(30);
+    const domainOf = (a: string) => a.split("@")[1]?.toLowerCase() ?? "";
+    // Latest inbound sender that isn't us
+    for (const e of emails) {
+      const addr = e.fromAddress.toLowerCase();
+      if (!AGENCY_MAIL_DOMAINS.has(domainOf(addr))) {
+        return { email: addr, name: e.fromName ?? null, subject: e.subject };
+      }
+    }
+    // Outbound-only thread: first external recipient
+    for (const e of emails) {
+      const tos: Array<{ address?: string; name?: string } | string> = Array.isArray(e.toAddresses)
+        ? e.toAddresses
+        : [];
+      for (const t of tos) {
+        const addr = (typeof t === "string" ? t : t.address ?? "").toLowerCase();
+        if (addr && !AGENCY_MAIL_DOMAINS.has(domainOf(addr))) {
+          return {
+            email: addr,
+            name: typeof t === "string" ? null : (t.name ?? null),
+            subject: e.subject,
+          };
+        }
+      }
+    }
+    return null;
+  },
+});
+
+export const startProject = action({
+  args: { threadId: v.id("threads") },
+  handler: async (ctx, args): Promise<{ url: string } | { error: string }> => {
+    const sender = await ctx.runQuery(internal.erp.threadClientSender, {
+      threadId: args.threadId,
+    });
+    if (!sender) return { error: "Couldn't find a client sender on this thread" };
+
+    const key = process.env.CHOQUER_INTAKE_KEY;
+    if (!key) return { error: "CHOQUER_INTAKE_KEY is not configured" };
+    const res = await fetch("https://choquer.app/api/external/orbi/start-project", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        senderEmail: sender.email,
+        senderName: sender.name,
+        subject: sender.subject,
+        requestedBy: "Orbi",
+      }),
+    });
+    if (!res.ok) return { error: `ERP intake failed (${res.status})` };
+    const data = (await res.json()) as { url: string };
+    return { url: data.url };
   },
 });

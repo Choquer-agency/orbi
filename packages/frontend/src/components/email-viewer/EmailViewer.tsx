@@ -35,6 +35,7 @@ import {
   ChevronUp,
   MoreHorizontal,
   Paperclip,
+  DollarSign,
 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
 import * as Dialog from '@radix-ui/react-dialog';
@@ -70,7 +71,7 @@ import { HandoffDialog } from '../handoff/HandoffDialog';
 import { HandoffBanner } from '../handoff/HandoffBanner';
 import { useHandoffs } from '../../hooks/useHandoffs';
 import DOMPurify from 'dompurify';
-import { useMutation as useConvexMutation, useQuery as useConvexQuery } from 'convex/react';
+import { useMutation as useConvexMutation, useQuery as useConvexQuery, useAction } from 'convex/react';
 import { useAuthToken } from '@convex-dev/auth/react';
 import { convex } from '../../lib/convex';
 import { api } from '../../../../../convex/_generated/api';
@@ -1701,6 +1702,28 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const [tagSearch, setTagSearch] = useState('');
   const [taggedMembers, setTaggedMembers] = useState<TeamMember[]>([]);
   const [handoffOpen, setHandoffOpen] = useState(false);
+
+  // "$" — start a project intake in the Choquer ERP from this thread's
+  // client sender. The ERP does the heavy lifting; we just open the wizard.
+  const startErpProject = useAction(api.erp.startProject);
+  const [startingProject, setStartingProject] = useState(false);
+  const handleStartProject = async () => {
+    if (startingProject) return;
+    setStartingProject(true);
+    try {
+      if (!thread) return;
+      const res = await startErpProject({ threadId: thread.id as never });
+      if (res && 'url' in res && res.url) {
+        window.open(res.url, '_blank');
+      } else {
+        console.error('Start project failed:', res);
+      }
+    } catch (e) {
+      console.error('Start project failed:', e);
+    } finally {
+      setStartingProject(false);
+    }
+  };
   const teamData = useConvexQuery(convexApi.team.listMembers, {});
   const teamMembers: TeamMember[] = useMemo(
     () =>
@@ -2517,6 +2540,19 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               aria-label="Hand off to teammate"
             >
               <ArrowRightLeft className="h-3.5 w-3.5" />
+            </button>
+          </Tooltip>
+          <Tooltip content="Start project in Choquer ERP">
+            <button
+              onClick={() => void handleStartProject()}
+              disabled={startingProject}
+              className={cn(
+                'rounded-lg p-1.5 transition-colors hover:bg-surface',
+                startingProject ? 'animate-pulse text-primary' : 'text-text-tertiary hover:text-text-primary',
+              )}
+              aria-label="Start project in Choquer ERP"
+            >
+              <DollarSign className="h-3.5 w-3.5" />
             </button>
           </Tooltip>
           <Tooltip content="Archive">
