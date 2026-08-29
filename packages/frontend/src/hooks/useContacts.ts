@@ -12,20 +12,6 @@ function shapeContact(c: any) {
   };
 }
 
-function looksLikeEmailLocalPart(value: string, email: string): boolean {
-  const local = email.split('@')[0]?.toLowerCase().replace(/[._+\-0-9]/g, '') ?? '';
-  const normalized = value.toLowerCase().replace(/[._+\-0-9\s]/g, '');
-  return normalized.length > 0 && (normalized === local || local.includes(normalized) || normalized.includes(local));
-}
-
-function isMeaningfulHeaderName(fromName: string | undefined | null, fromAddress: string): boolean {
-  const name = fromName?.trim();
-  if (!name) return false;
-  if (name.includes('@')) return false;
-  if (looksLikeEmailLocalPart(name, fromAddress)) return false;
-  return true;
-}
-
 /**
  * Returns a function that resolves an email address to a display name.
  * Prefer the current message's From display name when it is meaningful; cached
@@ -49,12 +35,16 @@ export function useContactNameResolver() {
     (fromAddress: string | undefined | null, fromName: string | undefined | null): string => {
       if (!fromAddress) return fromName || 'Unknown';
       const entry = lookup.get(fromAddress.toLowerCase());
-      // A name the user typed themselves beats whatever the sender's mail
-      // client calls itself ("Century Plaza Hotel" vs the Dorothy the user
-      // KNOWS this address to be). Auto-learned names still defer to a
-      // meaningful header, which protects newsletter/brand senders.
+      // Precedence (2026-08-29, after "NASCAR" showed on a Flic email):
+      // 1. A name the user typed themselves beats everything.
+      // 2. The sender's own header name beats AUTO-learned names — even when
+      //    it matches the address local-part ("Flic" from flic@...): a brand
+      //    naming itself after its address is normal, while auto-learned
+      //    names can be mis-merged garbage from shared ESP infrastructure.
+      // 3. Auto-learned names only fill a VOID (no header name at all).
       if (entry?.manual) return entry.name;
-      if (isMeaningfulHeaderName(fromName, fromAddress)) return fromName!.trim();
+      const headerName = fromName?.trim();
+      if (headerName && !headerName.includes('@')) return headerName;
       if (entry) return entry.name;
       if (fromName && fromName.trim()) return fromName.trim();
       const at = fromAddress.indexOf('@');
