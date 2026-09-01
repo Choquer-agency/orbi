@@ -46,9 +46,18 @@ export function useContactNameResolver() {
       const headerName = fromName?.trim();
       if (headerName && !headerName.includes('@')) return headerName;
       if (entry) return entry.name;
-      if (fromName && fromName.trim()) return fromName.trim();
+      // No usable name anywhere: humanize the address instead of printing it
+      // ("johnny@choquer.agency" → "Johnny"). Dots/underscores read as word
+      // breaks ("jane.doe" → "Jane Doe").
       const at = fromAddress.indexOf('@');
       if (at > 0) {
+        const local = fromAddress.slice(0, at);
+        const pretty = local
+          .split(/[._\-]+/)
+          .filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(' ');
+        if (pretty && !/^\d+$/.test(pretty)) return pretty;
         const domain = fromAddress.slice(at + 1).split('.')[0];
         if (domain) return domain.charAt(0).toUpperCase() + domain.slice(1);
       }

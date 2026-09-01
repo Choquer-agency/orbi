@@ -1230,6 +1230,16 @@ function EmailBodyIframe({
   function post(payload) {
     try { parent.postMessage(Object.assign({ nonce: NONCE }, payload), '*'); } catch (e) {}
   }
+  // Broken/unfetchable images (Outlook cid refs, dead remote hosts) keep
+  // their reserved box and leave a giant blank hole in the email. Collapse
+  // them and re-report height.
+  document.addEventListener('error', function (e) {
+    var t = e.target;
+    if (t && t.tagName === 'IMG') {
+      t.style.display = 'none';
+      try { post({ type: 'height', height: document.documentElement.scrollHeight }); } catch (err) {}
+    }
+  }, true);
   // First Cmd+A selects this email (native). A second Cmd+A within 1.5s
   // escalates: ask the parent to copy the ENTIRE thread (selection cannot
   // span iframes, so "select all messages" is delivered as copy-to-clipboard).
