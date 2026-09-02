@@ -105,6 +105,41 @@ function createWindow() {
     mainWindow = null;
   });
 
+  // Right-click menu with spelling corrections (Bryce 2026-09-01: squiggles
+  // showed but right-click did nothing — Electron ships no default context
+  // menu). macOS's native spellchecker supplies the suggestions.
+  mainWindow.webContents.on('context-menu', (_event, params) => {
+    const items: Electron.MenuItemConstructorOptions[] = [];
+    if (params.misspelledWord) {
+      const suggestions = params.dictionarySuggestions.slice(0, 6);
+      if (suggestions.length === 0) {
+        items.push({ label: 'No spelling suggestions', enabled: false });
+      }
+      for (const s of suggestions) {
+        items.push({
+          label: s,
+          click: () => mainWindow?.webContents.replaceMisspelling(s),
+        });
+      }
+      items.push({ type: 'separator' });
+      items.push({
+        label: `Add “${params.misspelledWord}” to dictionary`,
+        click: () =>
+          mainWindow?.webContents.session.spellCheckerEnabled &&
+          mainWindow.webContents.session.addWordToSpellCheckerDictionary(params.misspelledWord),
+      });
+      items.push({ type: 'separator' });
+    }
+    if (params.isEditable) {
+      items.push({ role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { type: 'separator' }, { role: 'selectAll' });
+    } else if (params.selectionText) {
+      items.push({ role: 'copy' });
+    }
+    if (items.length > 0) {
+      Menu.buildFromTemplate(items).popup();
+    }
+  });
+
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
