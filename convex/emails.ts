@@ -989,7 +989,11 @@ export const actuallySend = internalAction({
     let outgoingHtml = email.bodyHtml ?? "";
     if (outgoingHtml) {
       try {
-        const siteUrl = process.env.CONVEX_SITE_URL;
+        // Prefer the branded tracking host (t.choquer.agency) so rewritten
+        // links look like ours — bare *.convex.site links are a spam signal.
+        const siteUrl =
+          process.env.TRACKING_BASE_URL?.replace(/\/+$/, "") ||
+          process.env.CONVEX_SITE_URL;
         if (siteUrl) {
           const trackingId = crypto.randomUUID().replace(/-/g, "");
           const injected = injectTracking(outgoingHtml, trackingId, siteUrl);
