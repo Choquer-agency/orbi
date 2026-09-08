@@ -110,12 +110,34 @@ interface StreamBody {
   conversationId?: string;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CORS. The UI is served from Vercel (or localhost in dev) while this endpoint
+// lives on *.convex.site, so every chat request is cross-origin. Because it
+// carries an Authorization header the browser sends a preflight first — and
+// with no OPTIONS route that preflight 404'd, so the POST never left the
+// browser and the AI chat failed with a bare "Failed to fetch"
+// (found in session telemetry, 2026-09-08).
+// ─────────────────────────────────────────────────────────────────────────────
+function chatCorsHeaders(req: Request): Record<string, string> {
+  return {
+    "Access-Control-Allow-Origin": req.headers.get("Origin") || "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Max-Age": "86400",
+    Vary: "Origin",
+  };
+}
+
+const streamChatOptions = httpAction(async (_ctx, req) => {
+  return new Response(null, { status: 204, headers: chatCorsHeaders(req) });
+});
+
 const streamChat = httpAction(async (ctx, req) => {
   const userId = await getAuthUserId(ctx);
   if (!userId) {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
-      headers: { "Content-Type": "application/json" },
+      headers: { ...chatCorsHeaders(req), "Content-Type": "application/json" },
     });
   }
 
@@ -125,14 +147,14 @@ const streamChat = httpAction(async (ctx, req) => {
   } catch {
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { ...chatCorsHeaders(req), "Content-Type": "application/json" },
     });
   }
 
   if (!body.message?.trim()) {
     return new Response(JSON.stringify({ error: "Message is required" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { ...chatCorsHeaders(req), "Content-Type": "application/json" },
     });
   }
 
@@ -532,6 +554,7 @@ const streamChat = httpAction(async (ctx, req) => {
 
   return new Response(readable, {
     headers: {
+      ...chatCorsHeaders(req),
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
@@ -540,5 +563,6 @@ const streamChat = httpAction(async (ctx, req) => {
 });
 
 export function addAiHttpRoutes(http: HttpRouter) {
+  http.route({ path: "/ai/chat/stream", method: "OPTIONS", handler: streamChatOptions });
   http.route({ path: "/ai/chat/stream", method: "POST", handler: streamChat });
 }
