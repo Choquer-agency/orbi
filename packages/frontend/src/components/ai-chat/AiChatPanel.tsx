@@ -597,10 +597,10 @@ export function AiChatPanel() {
                 }`}
               >
                 <Mail className="h-3 w-3" />
-                {scope === 'thread' && selectedThread && (
+                {scope === 'thread' && selectedThread?.data && (
                   <span className="max-w-[120px] truncate">{selectedThread.data.subject}</span>
                 )}
-                {scope === 'thread' && !selectedThread && 'Thread'}
+                {scope === 'thread' && !selectedThread?.data && 'Thread'}
               </button>
               <button
                 onClick={() => setScope('all')}

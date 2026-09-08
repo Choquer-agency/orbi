@@ -52,11 +52,15 @@ async function bumpReactionCount(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const list = query({
-  args: { threadId: v.id("threads") },
-  handler: async (ctx, { threadId }) => {
+  // v.string() + normalizeId — see the note on threads.get. A foreign id must
+  // degrade to "nothing here", never to an app-wide crash.
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId: rawThreadId }) => {
     const userId = await requireUser(ctx);
+    const threadId = ctx.db.normalizeId("threads", rawThreadId);
+    if (!threadId) return [];
     const thread = await ctx.db.get(threadId);
-    if (!thread) throw new Error("Thread not found");
+    if (!thread) return [];
     // Internal comments are private to the mailbox owner + explicit
     // collaborators — requireUser alone let any teammate read them by id.
     if (!(await canAccessThread(ctx, userId, thread))) {

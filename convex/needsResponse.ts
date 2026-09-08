@@ -27,9 +27,13 @@ function effectiveScore(s: Doc<"needsResponseSignals">): number {
 // needsResponseSignal right now? Drives the "Done" button visibility in
 // the email viewer toolbar.
 export const hasOpenForThread = query({
-  args: { threadId: v.id("threads") },
-  handler: async (ctx, { threadId }) => {
+  // v.string() + normalizeId — see the note on threads.get. A foreign id must
+  // degrade to "nothing here", never to an app-wide crash.
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId: rawThreadId }) => {
     const userId = await requireUser(ctx);
+    const threadId = ctx.db.normalizeId("threads", rawThreadId);
+    if (!threadId) return { open: false };
     const sig = await ctx.db
       .query("needsResponseSignals")
       .withIndex("by_thread", (q) => q.eq("threadId", threadId))

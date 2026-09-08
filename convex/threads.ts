@@ -899,11 +899,19 @@ export const list = query({
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const get = query({
-  args: { threadId: v.id("threads") },
-  handler: async (ctx, { threadId }) => {
+  // Deliberately v.string(), not v.id("threads"): an id can reach us from a
+  // pasted link, an old notification, another app entirely (an ERP invoice id
+  // did exactly this on 2026-09-08) or a different deployment. With v.id the
+  // request failed ARGUMENT VALIDATION before the handler ran, which surfaced
+  // as an unrecoverable "Something went wrong" over the whole app. normalizeId
+  // lets us reject it politely instead — the viewer just shows an empty state.
+  args: { threadId: v.string() },
+  handler: async (ctx, { threadId: rawThreadId }) => {
     const userId = await requireUser(ctx);
+    const threadId = ctx.db.normalizeId("threads", rawThreadId);
+    if (!threadId) return { data: null };
     const thread = await ctx.db.get(threadId);
-    if (!thread) throw new Error("Thread not found");
+    if (!thread) return { data: null };
 
     if (!(await userOwnsThread(ctx, userId, thread))) {
       throw new Error("Access denied");
