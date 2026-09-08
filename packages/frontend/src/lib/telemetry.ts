@@ -167,7 +167,13 @@ export function startTelemetry(): void {
   const originalConsoleError = console.error.bind(console);
   console.error = (...args: unknown[]) => {
     try {
-      track('console-error', { message: args.map((a) => clip(a)).join(' ') });
+      const message = args.map((a) => clip(a)).join(' ');
+      // Never report on ourselves. A failing telemetry write logs an error,
+      // which would be recorded, re-sent, fail again — a feedback loop that
+      // grows with every cycle.
+      if (!message.includes('telemetry:record')) {
+        track('console-error', { message });
+      }
     } catch {
       /* ignore */
     }
@@ -181,7 +187,9 @@ export function startTelemetry(): void {
     const url = typeof args[0] === 'string' ? args[0] : (args[0] as Request)?.url ?? '';
     try {
       const res = await originalFetch(...args);
-      if (!res.ok) {
+      // Skip the update-check poll — a 404 there is expected offline and would
+      // otherwise fill the log with noise.
+      if (!res.ok && !url.includes('/index.html?v=')) {
         track('net-fail', { url, status: res.status, ms: Date.now() - started });
       }
       return res;
