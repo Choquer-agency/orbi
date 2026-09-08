@@ -690,3 +690,304 @@ export const repairPoisonedTrash = internalMutation({
     return { count: repaired.length, repaired };
   },
 });
+
+// Debug (2026-09-07): peek at one email row + its body — image srcs, draft
+// content length — for the "images missing in Instagram mail" and
+// "composer auto-opens on empty Gmail drafts" investigations.
+//   npx convex run sync/legacySweep:_debugEmailPeek '{"emailId":"..."}'
+export const _debugEmailPeek = internalQuery({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }) => {
+    const e = await ctx.db.get(emailId);
+    if (!e) return null;
+    const body = await ctx.db
+      .query("emailBodies")
+      .withIndex("by_email", (q) => q.eq("emailId", emailId))
+      .first();
+    const html = body?.bodyHtml ?? e.bodyHtml ?? "";
+    const clean = body?.bodyHtmlClean ?? e.bodyHtmlClean ?? "";
+    const imgs: string[] = [];
+    for (const m of html.matchAll(/<img\b[^>]*?\bsrc=["']([^"']+)["']/gi)) {
+      if (imgs.length < 15) imgs.push(m[1].slice(0, 700));
+    }
+    const cleanImgs = (clean.match(/<img\b/gi) ?? []).length;
+    return {
+      subject: e.subject,
+      from: e.fromAddress,
+      isDraft: e.isDraft ?? false,
+      providerMessageId: e.providerMessageId,
+      snippet: (e as any).snippet ?? null,
+      bodyTextLen: (body?.bodyText ?? e.bodyText ?? "").length,
+      bodyTextHead: (body?.bodyText ?? e.bodyText ?? "").slice(0, 200),
+      bodyHtmlLen: html.length,
+      bodyHtmlCleanLen: clean.length,
+      imgCountRaw: (html.match(/<img\b/gi) ?? []).length,
+      imgCountClean: cleanImgs,
+      imgSrcs: imgs,
+      trimmedLen: (body?.bodyHtmlTrimmed ?? e.bodyHtmlTrimmed ?? "").length,
+      doubleEscapedAmp: {
+        raw: (html.match(/&amp;amp;/g) ?? []).length,
+        clean: (clean.match(/&amp;amp;/g) ?? []).length,
+        trimmed: ((body?.bodyHtmlTrimmed ?? e.bodyHtmlTrimmed ?? "").match(/&amp;amp;/g) ?? []).length,
+      },
+      trimmedFirstImg: ((body?.bodyHtmlTrimmed ?? e.bodyHtmlTrimmed ?? "").match(/<img\b[^>]*>/i)?.[0] ?? "").slice(0, 300),
+      imgTags: Array.from(html.matchAll(/<img\b[^>]*>/gi)).slice(0, 4).map((m) => m[0].replace(/src="[^"]*"/, 'src="…"').slice(0, 500)),
+      firstImgContext: (() => {
+        const i = html.search(/<img\b/i);
+        return i < 0 ? "" : html.slice(Math.max(0, i - 700), i + 900).replace(/src="[^"]*"/g, 'src="…"');
+      })(),
+      styleHideRules: Array.from(html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/gi))
+        .map((m) => m[1])
+        .join("\n")
+        .split("}")
+        .filter((r) => /display\s*:\s*none|visibility\s*:\s*hidden|max-height\s*:\s*0/i.test(r))
+        .slice(0, 8)
+        .map((r) => r.replace(/\s+/g, " ").trim().slice(0, 200)),
+    };
+  },
+});
+
+// Debug: raw stored HTML of one email (for offline pipeline repros).
+export const _debugEmailHtml = internalQuery({
+  args: { emailId: v.id("emails") },
+  handler: async (ctx, { emailId }) => {
+    const e = await ctx.db.get(emailId);
+    if (!e) return null;
+    const body = await ctx.db
+      .query("emailBodies")
+      .withIndex("by_email", (q) => q.eq("emailId", emailId))
+      .first();
+    return body?.bodyHtml ?? e.bodyHtml ?? "";
+  },
+});
+
+// Debug (2026-09-07): trace every thread whose participants include a domain,
+// with the flags that decide whether it shows in the Inbox. For the
+// "Amazon mail disappears" report.
+//   npx convex run sync/legacySweep:_debugTraceDomain '{"domain":"amazon"}'
+export const _debugTraceDomain = internalQuery({
+  args: { domain: v.string(), limit: v.optional(v.number()) },
+  handler: async (ctx, { domain, limit }) => {
+    const needle = domain.toLowerCase();
+    const cap = limit ?? 40;
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    const out: any[] = [];
+    for (const a of accounts) {
+      const recent = await ctx.db
+        .query("threads")
+        .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", a._id))
+        .order("desc")
+        .take(3000);
+      for (const t of recent) {
+        if (!t.participantEmails?.some((e: string) => e.toLowerCase().includes(needle))) continue;
+        out.push({
+          account: a.email,
+          threadId: t._id,
+          subject: (t.subject ?? "").slice(0, 60),
+          from: t.participantEmails.filter((e: string) => e.toLowerCase().includes(needle)).slice(0, 2),
+          lastMessageAt: new Date(t.lastMessageAt).toISOString(),
+          isTrashed: t.isTrashed,
+          isArchived: t.isArchived,
+          isSpam: t.isSpam ?? null,
+          inboxAt: t.inboxAt ? new Date(t.inboxAt).toISOString() : null,
+          snoozedUntil: t.snoozedUntil ? new Date(t.snoozedUntil).toISOString() : null,
+          labels: t.labels,
+          needsRepair: (t as any).needsRepair ?? null,
+          messageCount: t.messageCount,
+        });
+        if (out.length >= cap) return out;
+      }
+    }
+    return out;
+  },
+});
+
+// Debug (2026-09-07): find threads that SHOULD be in the inbox but aren't
+// reachable through the by_account_inbox sticker index (or vice-versa).
+// A mismatch = a thread that silently vanished from the Inbox view.
+//   npx convex run sync/legacySweep:_debugInboxStampDrift '{}'
+export const _debugInboxStampDrift = internalQuery({
+  args: { perAccount: v.optional(v.number()) },
+  handler: async (ctx, { perAccount }) => {
+    const cap = perAccount ?? 2000;
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    const out: any[] = [];
+    const counts: Record<string, any> = {};
+    for (const a of accounts) {
+      const recent = await ctx.db
+        .query("threads")
+        .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", a._id))
+        .order("desc")
+        .take(cap);
+      let drift = 0;
+      let inboxLabelNoReceived = 0;
+      for (const t of recent) {
+        const shouldBeInInbox =
+          !t.isTrashed &&
+          !t.isArchived &&
+          !t.snoozedUntil &&
+          !t.isSpam &&
+          !(t.labels ?? []).includes("SPAM") &&
+          t.lastReceivedAt !== undefined;
+        const stamped = t.inboxAt !== undefined && t.inboxAt !== null;
+        // Threads Gmail still labels INBOX but that we dropped from the view.
+        const gmailSaysInbox =
+          (t.labels ?? []).includes("INBOX") && !t.isTrashed && !t.snoozedUntil;
+        if (gmailSaysInbox && t.lastReceivedAt === undefined) inboxLabelNoReceived++;
+        if (shouldBeInInbox !== stamped || (gmailSaysInbox && !stamped)) {
+          drift++;
+          if (out.length < 25) {
+            out.push({
+              account: a.email,
+              threadId: t._id,
+              subject: (t.subject ?? "").slice(0, 55),
+              participants: (t.participantEmails ?? []).slice(0, 2),
+              labels: t.labels,
+              isTrashed: t.isTrashed,
+              isArchived: t.isArchived,
+              isSpam: t.isSpam ?? null,
+              lastReceivedAt: t.lastReceivedAt
+                ? new Date(t.lastReceivedAt).toISOString()
+                : null,
+              lastMessageAt: new Date(t.lastMessageAt).toISOString(),
+              inboxAt: t.inboxAt ? new Date(t.inboxAt).toISOString() : null,
+              reason:
+                shouldBeInInbox !== stamped ? "stamp-mismatch" : "gmail-inbox-not-stamped",
+            });
+          }
+        }
+      }
+      counts[a.email] = {
+        scanned: recent.length,
+        drift,
+        gmailInboxButNoLastReceived: inboxLabelNoReceived,
+      };
+    }
+    return { counts, samples: out };
+  },
+});
+
+// Debug (2026-09-07): threads Gmail labels INBOX, not trashed/spam, that are
+// INVISIBLE in Orbi's inbox because lastReceivedAt never got computed — and
+// that genuinely have an outside sender (so "self-sent only" is excluded).
+//   npx convex run sync/legacySweep:_debugInvisibleInbox '{}'
+export const _debugInvisibleInbox = internalQuery({
+  args: { perAccount: v.optional(v.number()) },
+  handler: async (ctx, { perAccount }) => {
+    const cap = perAccount ?? 2500;
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    const out: any[] = [];
+    for (const a of accounts) {
+      const own = a.email.toLowerCase();
+      const recent = await ctx.db
+        .query("threads")
+        .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", a._id))
+        .order("desc")
+        .take(cap);
+      for (const t of recent) {
+        if (t.isTrashed || t.isSpam || t.snoozedUntil) continue;
+        if (!(t.labels ?? []).includes("INBOX")) continue;
+        if (t.inboxAt !== undefined && t.inboxAt !== null) continue;
+        // Who actually sent the newest message?
+        const newest = await ctx.db
+          .query("emails")
+          .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
+          .order("desc")
+          .take(3);
+        const senders = newest.map((e) => (e.fromAddress ?? "").toLowerCase());
+        const hasOutsideSender = senders.some(
+          (s) => s && s !== own && !s.endsWith("@choquer.agency"),
+        );
+        out.push({
+          account: a.email,
+          threadId: t._id,
+          subject: (t.subject ?? "").slice(0, 55),
+          senders: senders.slice(0, 2),
+          hasOutsideSender,
+          lastMessageAt: new Date(t.lastMessageAt).toISOString(),
+          lastReceivedAt: t.lastReceivedAt
+            ? new Date(t.lastReceivedAt).toISOString()
+            : null,
+          isArchived: t.isArchived,
+          emailCount: newest.length,
+        });
+        if (out.length >= 60) return out;
+      }
+    }
+    return out;
+  },
+});
+
+// Debug (2026-09-07): for a set of threads, show WHO trashed them —
+// folderStateLocalAt is stamped only when the change came from an Orbi UI
+// action, so its absence means the state was mirrored in from the provider.
+export const _debugThreadProvenance = internalQuery({
+  args: { threadIds: v.array(v.id("threads")) },
+  handler: async (ctx, { threadIds }) => {
+    const out: any[] = [];
+    for (const id of threadIds) {
+      const t = await ctx.db.get(id);
+      if (!t) {
+        out.push({ threadId: id, missing: true });
+        continue;
+      }
+      out.push({
+        threadId: id,
+        subject: (t.subject ?? "").slice(0, 50),
+        isTrashed: t.isTrashed,
+        isArchived: t.isArchived,
+        labels: t.labels,
+        providerThreadId: t.providerThreadId,
+        rowCreated: new Date(t._creationTime).toISOString(),
+        lastMessageAt: new Date(t.lastMessageAt).toISOString(),
+        folderStateLocalAt: (t as any).folderStateLocalAt
+          ? new Date((t as any).folderStateLocalAt).toISOString()
+          : null,
+        readStateLocalAt: (t as any).readStateLocalAt
+          ? new Date((t as any).readStateLocalAt).toISOString()
+          : null,
+      });
+    }
+    return out;
+  },
+});
+
+// Debug (2026-09-07): how many threads carry a split sub-thread id ("::"),
+// broken down per account, plus samples for one domain.
+export const _debugSplitThreads = internalQuery({
+  args: { domain: v.optional(v.string()) },
+  handler: async (ctx, { domain }) => {
+    const needle = (domain ?? "").toLowerCase();
+    const accounts = await ctx.db.query("mailAccounts").collect();
+    const counts: Record<string, { scanned: number; split: number }> = {};
+    const samples: any[] = [];
+    for (const a of accounts) {
+      const recent = await ctx.db
+        .query("threads")
+        .withIndex("by_account_lastMessageAt", (q) => q.eq("accountId", a._id))
+        .order("desc")
+        .take(2500);
+      let split = 0;
+      for (const t of recent) {
+        if (!t.providerThreadId.includes("::")) continue;
+        split++;
+        if (
+          needle &&
+          samples.length < 12 &&
+          t.participantEmails?.some((e: string) => e.toLowerCase().includes(needle))
+        ) {
+          samples.push({
+            account: a.email,
+            subject: (t.subject ?? "").slice(0, 50),
+            providerThreadId: t.providerThreadId,
+            lastMessageAt: new Date(t.lastMessageAt).toISOString(),
+            inboxAt: t.inboxAt ? "set" : null,
+            isTrashed: t.isTrashed,
+          });
+        }
+      }
+      counts[a.email] = { scanned: recent.length, split };
+    }
+    return { counts, samples };
+  },
+});

@@ -29,7 +29,9 @@
     "package:mac": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin",
     "package:mac:arm64": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=arm64",
     "package:mac:x64": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=x64",
-    "package:mac:universal": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=universal"
+    "package:mac:universal": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=universal",
+    "ship": "bash scripts/ship.sh",
+    "typecheck": "tsc -p convex/tsconfig.json --noEmit && cd packages/frontend && tsc -p tsconfig.app.json --noEmit"
   },
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.24.0",

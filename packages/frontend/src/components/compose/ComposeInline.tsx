@@ -99,9 +99,9 @@ function formatScheduleLabel(date: Date): string {
 
   const time = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
 
-  if (date.toDateString() === now.toDateString()) return `today at ${time}`;
-  if (date.toDateString() === tomorrow.toDateString()) return `tomorrow at ${time}`;
-  return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} at ${time}`;
+  if (date.toDateString() === now.toDateString()) return `Today ${time}`;
+  if (date.toDateString() === tomorrow.toDateString()) return `Tomorrow ${time}`;
+  return `${date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${time}`;
 }
 
 export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose, initialDraft, aiOriginal: initialAiOriginal, replyRecipients, fromEmail: _fromEmail, existingDraftId, onExpandedChange }: ComposeInlineProps) {
@@ -1206,23 +1206,29 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       />
 
       {/* Actions */}
-      <div className="shrink-0 flex items-center justify-between border-t border-border px-5 py-2.5">
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-[10px] text-text-tertiary">
-            {editingScheduledId ? 'Cmd+Enter to save' : 'Cmd+Enter to send'}
-          </span>
+      <div className="shrink-0 flex items-center justify-between gap-3 border-t border-border px-5 py-2.5">
+        <div className="flex min-w-0 items-center gap-2 overflow-hidden">
+          {/* Keyboard hint is the first thing to go when the row gets tight —
+              a pending schedule chip is far more useful than a shortcut
+              reminder (Bryce 2026-09-07: "trying to fit so much in a small
+              space"). */}
+          {!scheduledAt && (
+            <span className="hidden whitespace-nowrap font-mono text-[10px] text-text-tertiary lg:inline">
+              {editingScheduledId ? 'Cmd+Enter to save' : 'Cmd+Enter to send'}
+            </span>
+          )}
           {!editingScheduledId && (isDraftSaving ? (
-            <span className="text-[10px] text-text-tertiary">Saving...</span>
+            <span className="whitespace-nowrap text-[10px] text-text-tertiary">Saving...</span>
           ) : lastSavedAt ? (
-            <span className="text-[10px] text-text-tertiary">Draft saved</span>
+            <span className="whitespace-nowrap text-[10px] text-text-tertiary">Draft saved</span>
           ) : null)}
           {/* Attach file button */}
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-surface hover:text-text-secondary"
+            className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg px-2 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-surface hover:text-text-secondary"
             title="Attach file"
           >
-            <Paperclip className="h-3 w-3" />
+            <Paperclip className="h-3 w-3 shrink-0" />
             Attach
           </button>
           {/* Signature selector */}
@@ -1230,14 +1236,16 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
             <div className="relative">
               <button
                 onClick={() => setSigMenuOpen((v) => !v)}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-surface hover:text-text-secondary"
+                className="flex min-w-0 items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-text-tertiary transition-colors hover:bg-surface hover:text-text-secondary"
                 title="Select signature"
               >
-                <SignatureIcon className="h-3 w-3" />
-                {selectedSignatureId
-                  ? signatures.find((s) => s.id === selectedSignatureId)?.name ?? 'Signature'
-                  : 'No signature'}
-                <ChevronDown className="h-2.5 w-2.5" />
+                <SignatureIcon className="h-3 w-3 shrink-0" />
+                <span className="max-w-[9rem] truncate">
+                  {selectedSignatureId
+                    ? signatures.find((s) => s.id === selectedSignatureId)?.name ?? 'Signature'
+                    : 'No signature'}
+                </span>
+                <ChevronDown className="h-2.5 w-2.5 shrink-0" />
               </button>
               {sigMenuOpen && (
                 <div className="absolute bottom-full left-0 mb-1 w-44 rounded-lg border border-border bg-white py-1 shadow-lg z-10">
@@ -1302,7 +1310,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
             </div>
           )}
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           {editingScheduledId ? (
             <>
               <button
@@ -1339,18 +1347,24 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>
               )}
-              {/* Schedule date indicator — clearable */}
-              {scheduledAt && (
-                <button
-                  onClick={() => setScheduledAt(null)}
-                  className="flex items-center gap-1 rounded-lg bg-amber-50 px-2 py-1 text-[11px] font-medium text-amber-600 transition-colors hover:bg-amber-100"
-                  title="Clear schedule — click to send immediately instead"
-                >
-                  <CalendarClock className="h-3 w-3" />
+              {/* Scheduled time — shown ONCE. It used to appear in this chip
+                  AND again inside the send button, on a row that then wrapped
+                  every label onto two lines. The chip owns the time (× clears
+                  it) and the button just states the verb. */}
+              {scheduledAt ? (
+                <span className="flex shrink-0 items-center gap-1 whitespace-nowrap rounded-lg bg-amber-50 py-1 pl-2 pr-1 text-[11px] font-medium text-amber-600">
+                  <CalendarClock className="h-3 w-3 shrink-0" />
                   {formatScheduleLabel(scheduledAt)}
-                  <X className="ml-0.5 h-2.5 w-2.5" />
-                </button>
-              )}
+                  <button
+                    onClick={() => setScheduledAt(null)}
+                    className="rounded p-0.5 transition-colors hover:bg-amber-100"
+                    title="Clear schedule — send immediately instead"
+                    aria-label="Clear scheduled send"
+                  >
+                    <X className="h-2.5 w-2.5" />
+                  </button>
+                </span>
+              ) : null}
               <ScheduleSendMenu
                 onSchedule={(date) => setScheduledAt(date)}
                 disabled={!body.trim() || sending}
@@ -1358,13 +1372,10 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
               <button
                 onClick={handleSend}
                 disabled={!body.trim() || sending}
-                className="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-hover disabled:opacity-50"
+                className="shrink-0 whitespace-nowrap rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-primary-hover disabled:opacity-50"
+                title={scheduledAt ? `Send on ${formatScheduleLabel(scheduledAt)}` : undefined}
               >
-                {sending
-                  ? 'Sending...'
-                  : scheduledAt
-                    ? `Send on ${formatScheduleLabel(scheduledAt)}`
-                    : 'Send'}
+                {sending ? 'Sending...' : scheduledAt ? 'Schedule' : 'Send'}
               </button>
             </>
           )}

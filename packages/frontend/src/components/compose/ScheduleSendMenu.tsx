@@ -61,7 +61,7 @@ export function ScheduleSendMenu({ onSchedule, disabled }: ScheduleSendMenuProps
     <DropdownMenu.Root onOpenChange={(open) => { if (!open) setView('presets'); }}>
       <DropdownMenu.Trigger asChild disabled={disabled}>
         <button
-          className="rounded-lg p-1.5 text-amber-500 transition-colors hover:bg-amber-50 hover:text-amber-600 disabled:opacity-50"
+          className="shrink-0 rounded-lg p-1.5 text-amber-500 transition-colors hover:bg-amber-50 hover:text-amber-600 disabled:opacity-50"
           title="Schedule send"
         >
           <CalendarClock className="h-4 w-4" />

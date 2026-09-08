@@ -477,6 +477,42 @@ export function stripQuotedText(text: string): { body: string; hasQuoted: boolea
 }
 
 /**
+ * Does a saved draft contain anything the USER wrote? Spark / Gmail mint a
+ * draft the instant you tap Reply — just the signature block and the quoted
+ * history — and those sync in as isDraft rows. Auto-opening the composer
+ * for one of those on first visit looked like "reply-all enabled itself"
+ * (Bryce 2026-09-07). Orbi-authored drafts ("draft-*" ids) always have
+ * content because autosave refuses to mint empty ones.
+ */
+function draftHasUserContent(email: any, userName?: string | null): boolean {
+  const pid: string = email?.providerMessageId ?? '';
+  if (pid.startsWith('draft-')) return true;
+  let text: string = (email?.bodyText ?? '').trim();
+  if (!text) {
+    const html: string = email?.bodyHtmlClean ?? email?.bodyHtmlTrimmed ?? email?.bodyHtml ?? '';
+    if (html) {
+      try {
+        text = (new DOMParser().parseFromString(html, 'text/html').body.textContent ?? '').trim();
+      } catch {
+        text = '';
+      }
+    }
+  }
+  if (!text) text = (email?.snippet ?? '').trim();
+  if (!text) return false;
+  text = stripQuotedText(text).body;
+  // A signature-only draft STARTS with the sender's name line; anything the
+  // user typed sits above it. So content = whatever precedes the first name.
+  for (const candidate of [userName, email?.fromName]) {
+    const name = (candidate ?? '').trim().toLowerCase();
+    if (name.length < 3) continue;
+    const idx = text.toLowerCase().indexOf(name);
+    if (idx >= 0) text = text.slice(0, idx);
+  }
+  return text.replace(/\s+/g, '').length > 0;
+}
+
+/**
  * Replace cid: references with data-cid-ref attributes for later resolution.
  * We can't use direct URLs because the attachment endpoint requires auth.
  */
@@ -1206,6 +1242,12 @@ function EmailBodyIframe({
         }
         return;
       }
+      if (data.type === 'img-error' && typeof data.src === 'string') {
+        // Surfaced so a "pictures don't show" report can be traced to the
+        // exact URL that failed (Instagram avatars, Bryce 2026-09-07).
+        console.error('[email-viewer] remote image failed to load:', data.src);
+        return;
+      }
       if (data.type === 'image' && typeof data.src === 'string' && onImageClick) {
         onImageClick(data.src, data.alt);
       }
@@ -1237,6 +1279,7 @@ function EmailBodyIframe({
     var t = e.target;
     if (t && t.tagName === 'IMG') {
       t.style.display = 'none';
+      try { post({ type: 'img-error', src: String(t.currentSrc || t.src || '').slice(0, 300) }); } catch (err) {}
       try { post({ type: 'height', height: document.documentElement.scrollHeight }); } catch (err) {}
     }
   }, true);
@@ -2140,15 +2183,18 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   // exists + composer closed" and this effect instantly reopened it: an
   // unclosable, frozen-looking draft (Bryce 2026-07-13).
   const savedDraftEmail = data?.data?.emails?.find((e: any) => e.isDraft);
+  const savedDraftHasContent = savedDraftEmail
+    ? draftHasUserContent(savedDraftEmail, user?.name)
+    : false;
   const autoOpenedDraftRef = useRef<string | null>(null);
   useEffect(() => {
-    if (savedDraftEmail && selectedThreadId && !replyMode && !pendingDraft) {
+    if (savedDraftEmail && savedDraftHasContent && selectedThreadId && !replyMode && !pendingDraft) {
       const key = `${selectedThreadId}:${savedDraftEmail.id}`;
       if (autoOpenedDraftRef.current === key) return; // user closed it — respect that
       autoOpenedDraftRef.current = key;
       setReplyMode(savedDraftEmail.inReplyTo ? 'reply' : 'compose');
     }
-  }, [savedDraftEmail?.id, selectedThreadId]);
+  }, [savedDraftEmail?.id, savedDraftHasContent, selectedThreadId]);
 
   // Listen for keyboard shortcut reply event
   useEffect(() => {

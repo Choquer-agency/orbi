@@ -795,6 +795,36 @@ export default defineSchema({
     .index("by_feature_createdAt", ["feature", "createdAt"]),
 
   // ───────────────────────────────────────────────────────────────────────────
+  // Session telemetry (2026-09-08)
+  //
+  // The team is now using Orbi day to day and reports bugs over Slack. This
+  // records what actually happened in their window so a report can be looked
+  // up instead of reconstructed by interview.
+  //
+  // ONE ROW PER FLUSH, not per event: the client buffers and ships ~20s worth
+  // at a time, so an active hour costs ~180 writes rather than thousands.
+  // `events` is a JSON string so adding a new event shape never needs a
+  // schema migration. Rows self-delete after TELEMETRY_RETENTION_DAYS.
+  // ───────────────────────────────────────────────────────────────────────────
+  telemetryBatches: defineTable({
+    userId: v.id("users"),
+    userEmail: v.string(),
+    sessionId: v.string(),
+    uiBuild: v.string(),
+    shellVersion: v.optional(v.string()),
+    platform: v.string(),
+    events: v.string(),
+    eventCount: v.number(),
+    errorCount: v.number(),
+    firstAt: v.number(),
+    lastAt: v.number(),
+  })
+    .index("by_user_lastAt", ["userId", "lastAt"])
+    .index("by_session_firstAt", ["sessionId", "firstAt"])
+    .index("by_lastAt", ["lastAt"])
+    .index("by_errorCount_lastAt", ["errorCount", "lastAt"]),
+
+  // ───────────────────────────────────────────────────────────────────────────
   // Open + link tracking
   // ───────────────────────────────────────────────────────────────────────────
   emailTracking: defineTable({

@@ -430,6 +430,22 @@ export function ThreadList() {
     return desktopRowPositions.filter((row) => row.end >= min && row.start <= max);
   }, [desktopRowPositions, desktopScrollTop, desktopViewportHeight]);
 
+  // Sticky date heading for the virtualized desktop list. Header rows are
+  // ordinary virtual rows, so CSS `position: sticky` can't pin them (the
+  // mobile list gets that for free). Instead: derive the group the viewport
+  // is currently inside from scrollTop and render one pinned copy of its
+  // label above the rows. It hands over to the next group's label the moment
+  // that group's own header scrolls under it (Bryce 2026-09-07).
+  const desktopStickyLabel = useMemo(() => {
+    let label: string | null = null;
+    for (const row of desktopRowPositions) {
+      if (row.type !== 'header') continue;
+      if (row.start <= desktopScrollTop + 1) label = row.label;
+      else break;
+    }
+    return label;
+  }, [desktopRowPositions, desktopScrollTop]);
+
   const handleDesktopScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
     const el = event.currentTarget;
     setDesktopScrollTop(el.scrollTop);
@@ -1057,6 +1073,15 @@ export function ThreadList() {
             className="min-h-0 flex-1 overflow-y-auto"
             onScroll={handleDesktopScroll}
           >
+            {desktopStickyLabel && (
+              <div className="pointer-events-none sticky top-0 z-10 h-0 overflow-visible">
+                <div className="bg-surface px-5 pb-1 pt-3">
+                  <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-text-tertiary">
+                    {desktopStickyLabel}
+                  </span>
+                </div>
+              </div>
+            )}
             <div
               className="relative w-full"
               style={{

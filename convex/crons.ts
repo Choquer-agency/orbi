@@ -185,4 +185,15 @@ crons.interval(
   {},
 );
 
+
+// ── Telemetry purge ────────────────────────────────────────────────────────
+// Session recordings are a debugging aid, not an archive — drop anything past
+// the retention window (7 days) so the table stays small and cheap.
+crons.interval(
+  "purge-telemetry",
+  { hours: 24 },
+  internal.telemetry.purgeOldTelemetry,
+  {},
+);
+
 export default crons;

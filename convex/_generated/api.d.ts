@@ -104,6 +104,7 @@ import type * as sync_onDemandBodyData from "../sync/onDemandBodyData.js";
 import type * as sync_storageSweep from "../sync/storageSweep.js";
 import type * as tasks from "../tasks.js";
 import type * as team from "../team.js";
+import type * as telemetry from "../telemetry.js";
 import type * as threadAccess from "../threadAccess.js";
 import type * as threadComments from "../threadComments.js";
 import type * as threads from "../threads.js";
@@ -220,6 +221,7 @@ declare const fullApi: ApiFromModules<{
   "sync/storageSweep": typeof sync_storageSweep;
   tasks: typeof tasks;
   team: typeof team;
+  telemetry: typeof telemetry;
   threadAccess: typeof threadAccess;
   threadComments: typeof threadComments;
   threads: typeof threads;

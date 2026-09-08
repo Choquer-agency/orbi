@@ -6,6 +6,8 @@ import { ThreadList } from '../thread-list/ThreadList';
 
 import { HeaderIcons } from './Header';
 import { MobileBottomNav } from './MobileBottomNav';
+import { VersionBadge } from './VersionBadge';
+import { startTelemetry, track } from '../../lib/telemetry';
 
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { usePushNotifications } from '../../hooks/usePushNotifications';
@@ -140,6 +142,18 @@ export function AppLayout() {
   const showAiChat = isCompact
     ? mobileActiveView === 'chat'
     : true;
+  // ── Session recording ────────────────────────────────────────────────────
+  // Starts once, here, because AppLayout only renders for a signed-in user —
+  // which is exactly when the telemetry mutation has an identity to attach
+  // rows to. See lib/telemetry.ts for what is (and isn't) captured.
+  useEffect(() => {
+    startTelemetry();
+  }, []);
+
+  useEffect(() => {
+    track('view', { folder: selectedFolder, teamView: !!teamViewUserId });
+  }, [selectedFolder, teamViewUserId]);
+
   const showSettings = isCompact && mobileActiveView === 'settings';
 
   const mobileBack = isCompact ? () => setMobileActiveView('list') : undefined;
@@ -189,6 +203,14 @@ export function AppLayout() {
               Exit
             </button>
           </div>
+        </div>
+      )}
+
+      {/* Build badge — bottom-left, so the whole team can see at a glance that
+          they are on the same build (and reload to the newest one). */}
+      {!isCompact && (
+        <div className="pointer-events-none absolute bottom-1.5 left-3 z-40">
+          <VersionBadge />
         </div>
       )}
 
