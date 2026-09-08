@@ -363,6 +363,19 @@ export function useAiChat() {
               draft: result.draft,
             });
             syncOpenDraftFromAi(result.draft);
+            // Persist it. This branch runs when the stream never started, so
+            // the server-side stream persistence never ran either — without
+            // this the reply shows on screen and then vanishes for good when
+            // the conversation is reopened (Bryce 2026-09-08: "the response
+            // Orbi originally wrote is not there now"). Every assistant
+            // message in the database was missing because of this.
+            const addedMsg = useAiChatStore
+              .getState()
+              .messages.filter((m) => m.role === 'assistant')
+              .at(-1);
+            if (addedMsg && conversationId) {
+              persistAssistantMessage(convex, conversationId, addedMsg);
+            }
           }
         } catch (err) {
           // Never swallow the real reason — a budget cap, expired session, or
@@ -379,6 +392,16 @@ export function useAiChat() {
           } else {
             const { addAssistantMessage } = useAiChatStore.getState();
             addAssistantMessage(friendly);
+          }
+          // Record the failure in the transcript too, so reopening the
+          // conversation shows what happened instead of a question with no
+          // answer at all.
+          const failedMsg = useAiChatStore
+            .getState()
+            .messages.filter((m) => m.role === 'assistant')
+            .at(-1);
+          if (failedMsg && conversationId) {
+            persistAssistantMessage(convex, conversationId, failedMsg);
           }
         }
       } finally {
