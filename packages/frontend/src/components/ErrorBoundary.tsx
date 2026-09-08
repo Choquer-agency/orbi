@@ -1,8 +1,17 @@
 import { Component, type ReactNode } from 'react';
+import { track } from '../lib/telemetry';
 
 interface Props {
   children: ReactNode;
   fallback?: ReactNode;
+  /** Label recorded with the crash so we know WHICH boundary caught it. */
+  name?: string;
+  /**
+   * Called when a caught error looks recoverable by resetting app state
+   * (currently: a selected id the server rejects). Returning true means the
+   * boundary silently retries instead of showing a crash screen.
+   */
+  onRecoverableError?: (error: Error) => boolean;
 }
 
 interface State {
@@ -19,6 +28,22 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: { componentStack?: string }) {
     console.error('Orbi UI crashed', { error, componentStack: info.componentStack });
+    try {
+      track('crash', {
+        boundary: this.props.name ?? 'root',
+        message: error?.message,
+        stack: error?.stack,
+      });
+    } catch {
+      /* never let reporting mask the original error */
+    }
+    // Self-healing path: a stale or foreign id (a link from another app, an
+    // old notification) makes every query for that record fail argument
+    // validation, which used to blank the WHOLE app behind "Something went
+    // wrong". Let the owner clear the bad selection and carry on instead.
+    if (this.props.onRecoverableError?.(error)) {
+      this.setState({ hasError: false, error: null });
+    }
   }
 
   render() {

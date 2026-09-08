@@ -8,6 +8,7 @@ import { HeaderIcons } from './Header';
 import { MobileBottomNav } from './MobileBottomNav';
 import { VersionBadge } from './VersionBadge';
 import { startTelemetry, track } from '../../lib/telemetry';
+import { ErrorBoundary } from '../ErrorBoundary';
 
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { usePushNotifications } from '../../hooks/usePushNotifications';
@@ -86,7 +87,7 @@ export function AppLayout() {
   useEffect(() => {
     ensureContactDirectory();
   }, []);
-  const { threadListWidth, setThreadListWidth, aiChatWidth, selectedFolder, selectedContactId, selectedPersonId, settingsOpen, setSettingsOpen, composingNew, mobileActiveView, setMobileActiveView, mobileTransitionDirection, teamViewUserId, teamViewUserName, exitTeamView } =
+  const { threadListWidth, setThreadListWidth, aiChatWidth, selectedFolder, selectedContactId, selectedPersonId, settingsOpen, setSettingsOpen, composingNew, mobileActiveView, setMobileActiveView, mobileTransitionDirection, teamViewUserId, teamViewUserName, exitTeamView, setSelectedThread } =
     useUiStore();
   const hasContactOrPerson = !!(selectedContactId || selectedPersonId);
   const isDragging = useRef<boolean>(false);
@@ -153,6 +154,26 @@ export function AppLayout() {
   useEffect(() => {
     track('view', { folder: selectedFolder, teamView: !!teamViewUserId });
   }, [selectedFolder, teamViewUserId]);
+
+  // A thread id the server rejects — a link pasted from another app, a stale
+  // notification, an id minted by a different deployment — used to fail
+  // argument validation on every thread query at once and blank the entire
+  // app behind "Something went wrong" (Bryce 2026-09-08, an ERP invoice id
+  // arriving as a thread id). Clear the bad selection and carry on.
+  const recoverFromBadThreadId = useCallback(
+    (error: Error) => {
+      const message = error?.message ?? '';
+      const looksLikeBadId =
+        message.includes('does not match validator') ||
+        message.includes('ArgumentValidationError') ||
+        message.includes('Thread not found');
+      if (!looksLikeBadId) return false;
+      track('bad-thread-id', { message });
+      setSelectedThread(null);
+      return true;
+    },
+    [setSelectedThread],
+  );
 
   const showSettings = isCompact && mobileActiveView === 'settings';
 
@@ -337,11 +358,13 @@ export function AppLayout() {
               {/* Email viewer for selected thread */}
               {(!isCompact || mobileActiveView === 'viewer') && (
                 <div className="min-w-0 flex-1">
-                  <Suspense fallback={<PanelFallback />}>
-                    <EmailViewer
-                      onBack={mobileBack}
-                    />
-                  </Suspense>
+                  <ErrorBoundary name="email-viewer" onRecoverableError={recoverFromBadThreadId}>
+                    <Suspense fallback={<PanelFallback />}>
+                      <EmailViewer
+                        onBack={mobileBack}
+                      />
+                    </Suspense>
+                  </ErrorBoundary>
                 </div>
               )}
             </>
@@ -373,9 +396,11 @@ export function AppLayout() {
                   variants={prefersReducedMotion ? reducedMotionVariants : mobileSlideVariants}
                   transition={prefersReducedMotion ? reducedMotionTransition : mobileSlideTransition}
                 >
-                  <Suspense fallback={<PanelFallback />}>
-                    <EmailViewer onBack={mobileBack} />
-                  </Suspense>
+                  <ErrorBoundary name="email-viewer" onRecoverableError={recoverFromBadThreadId}>
+                    <Suspense fallback={<PanelFallback />}>
+                      <EmailViewer onBack={mobileBack} />
+                    </Suspense>
+                  </ErrorBoundary>
                 </motion.div>
               )}
             </AnimatePresence>
@@ -400,9 +425,11 @@ export function AppLayout() {
               {/* Desktop: Email Viewer */}
               {showEmailViewer && (
                 <div className="min-w-0 flex-1">
-                  <Suspense fallback={<PanelFallback />}>
-                    <EmailViewer onBack={mobileBack} />
-                  </Suspense>
+                  <ErrorBoundary name="email-viewer" onRecoverableError={recoverFromBadThreadId}>
+                    <Suspense fallback={<PanelFallback />}>
+                      <EmailViewer onBack={mobileBack} />
+                    </Suspense>
+                  </ErrorBoundary>
                 </div>
               )}
             </>
