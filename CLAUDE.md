@@ -70,6 +70,34 @@ npm run lint
 
 Thin shell pointing at the bundled frontend. CSP allows `convex.cloud` and `convex.site`. No local backend spawning.
 
+
+## Shipping to the team (2026-09-08)
+
+The packaged Mac app is a thin shell that loads the UI from
+`https://orbi-mail.vercel.app` (`REMOTE_UI_URL` in `packages/electron/src/main.ts`).
+Teammates therefore get changes with **Cmd+R** — no reinstall.
+
+```bash
+npm run ship -- "message"   # typecheck → convex deploy → vercel --prod → commit+push (~90s)
+npm run release             # rebuild the native .dmg (rare — only for packages/electron changes)
+npm run typecheck           # both tsconfigs
+```
+
+- Build identity: `__UI_BUILD__` / `__UI_COMMIT__` are stamped by
+  `packages/frontend/vite.config.ts` and rendered bottom-left by
+  `components/layout/VersionBadge.tsx`, which also polls `index.html` and
+  offers a reload when a newer bundle is deployed.
+- `packages/frontend/.env.production` is COMMITTED and points Vercel builds at
+  prod Convex; the Vercel project itself has no env vars set.
+
+## Session telemetry
+
+`convex/telemetry.ts` + `packages/frontend/src/lib/telemetry.ts`. Records
+clicks, view changes, failed requests and errors — never typed content.
+Batched one row per ~20s flush; purged after 7 days by the `purge-telemetry`
+cron. Read it with `telemetry:_debugSessions` / `telemetry:_debugEvents`
+(see TEAM-SETUP.md for the exact invocations).
+
 ## Key patterns
 
 - **Fan-out for relations**: Convex has no `include`. Replace `prisma.x.findMany({ include: { y } })` with `Promise.all(ids.map(id => ctx.db.get(id)))`.
