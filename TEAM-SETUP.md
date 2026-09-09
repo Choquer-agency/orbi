@@ -21,7 +21,8 @@ The `.dmg` is only reinstalled when the **native shell** changes, which is rare.
 
 ## For the team: installing Orbi (once)
 
-1. Bryce sends you **`Orbi Mail.dmg`**.
+1. Bryce sends you **`Orbi Mail.dmg`**. It is a universal build — it runs on
+   both Apple Silicon and Intel Macs.
 2. Open it and drag **Orbi Mail** into **Applications**.
 3. Open it from Applications.
 4. **First launch only:** macOS may say *"Apple could not verify this app."*

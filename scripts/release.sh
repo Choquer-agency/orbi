@@ -42,8 +42,11 @@ fi
 echo "▸ Type-checking…"
 npm run typecheck
 
-echo "▸ Building the Mac app (arm64)…"
-npm run package:mac:arm64
+# UNIVERSAL, not arm64. Andres's 2019 iMac is Intel and an arm64-only build
+# fails with "not supported on this Mac" (2026-09-08). A universal build runs
+# on both Apple Silicon and Intel, so there is one file for the whole team.
+echo "▸ Building the Mac app (universal — Apple Silicon + Intel)…"
+npm run package:mac:universal
 
 DMG="packages/electron/out/make/Orbi Mail.dmg"
 if [ -f "$DMG" ]; then
