@@ -381,6 +381,7 @@ async function syncConversationMessages(
       threadId: Id<"threads">;
       isRead: boolean;
       isStarred: boolean;
+      isDraft: boolean;
       labels: string[];
     } | null;
     if (
@@ -388,6 +389,7 @@ async function syncConversationMessages(
       fingerprint.threadId === threadId &&
       fingerprint.isRead === isRead &&
       fingerprint.isStarred === isStarred &&
+      fingerprint.isDraft === !!msg.isDraft &&
       fingerprint.labels.length === msgLabelsForCheck.length &&
       fingerprint.labels.every((l, i) => l === msgLabelsForCheck[i])
     ) {

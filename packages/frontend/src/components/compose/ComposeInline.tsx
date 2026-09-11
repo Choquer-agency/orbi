@@ -353,7 +353,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   }, [initialDraftKey, editor]);
 
   // Auto-save drafts
-  const { draftId, saveDraft: saveDraftFn, deleteDraft: deleteDraftFn, markSent, isSaving: isDraftSaving, lastSavedAt } = useAutoSaveDraft({
+  const { draftId, saveDraft: saveDraftFn, deleteDraft: deleteDraftFn, markSent, prepareForSend, resumeAfterSendFailure, isSaving: isDraftSaving, lastSavedAt } = useAutoSaveDraft({
     accountId: sendingAccountId || accountId || '',
     threadId,
     mode,
@@ -616,8 +616,9 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     }
   };
 
+  const sendInFlightRef = useRef(false);
   const handleSend = async () => {
-    if (!body.trim()) return;
+    if (!body.trim() || sendInFlightRef.current) return;
 
     // Validate email addresses for compose/forward mode
     if (mode !== 'reply') {
@@ -646,6 +647,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       ? bccRecipients
       : (showBcc ? bcc.split(',').map((e) => e.trim()).filter(Boolean).map((e) => ({ email: e })) : []);
 
+    sendInFlightRef.current = true;
     // Cancel any pending autosave before we touch the draft row.
     if (autoSaveTimerRef.current) {
       clearTimeout(autoSaveTimerRef.current);
@@ -654,6 +656,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
 
     setSending(true);
     try {
+      const savedDraftId = await prepareForSend();
       await submitAiLearn();
       const selectedSig = selectedSignatureId ? signatures?.find((s) => s.id === selectedSignatureId) : null;
       const messageHtml = editor?.getHTML() || '';
@@ -695,7 +698,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         // Retire the autosaved draft, same as the immediate-send path —
         // otherwise it lingers and reopens pre-filled, one Cmd+Enter from a
         // duplicate send.
-        markSent();
+        if (!(await markSent())) toast.error('Message queued, but its old draft could not be removed.');
         clearComposeStash();
         onClose();
         return;
@@ -703,38 +706,29 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
 
       let res: { data: any };
 
-      // If we have a saved draft, send via draft endpoint. If anything goes
-      // wrong with that path (stale row, already converted, deleted), fall
-      // through to the fresh-send path below — the email must always go out.
-      if (draftId) {
-        const latestHtml = selectedSig
-          ? `${messageHtml}<div class="email-signature" style="margin-top:16px">${selectedSig.bodyHtml}</div>`
-          : messageHtml;
-        try {
-          const upd = await updateDraftMutation({
-            draftId: draftId as Id<'emails'>,
-            subject: subject || '(no subject)',
-            bodyHtml: latestHtml,
-            bodyText: body,
-            toAddresses: mode === 'reply'
-              ? recipients.map((r) => ({ email: r.email, name: r.name }))
-              : to.split(',').map((e) => ({ email: e.trim() })),
-          });
-          if (!(upd as { stale?: boolean } | undefined)?.stale) {
-            res = await sendDraftMutation.mutateAsync({
-              draftId,
-              undoWindowSeconds: UNDO_WINDOW_SECONDS,
-            });
-            if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-            markSent();
-        clearComposeStash();
-            haptic.success();
-            registerUndo(res);
-            onClose();
-            return;
-          }
-        } catch (err) {
-          console.warn('Draft send path failed, falling back to fresh send:', err);
+      // Consume the saved row when this endpoint can carry the complete
+      // message. Attachments/CC/BCC use the fresh-send path and then discard
+      // only this composer's saved draft.
+      if (savedDraftId && attachments.length === 0 && ccArray.length === 0 && bccArray.length === 0) {
+        const upd = await updateDraftMutation({
+          draftId: savedDraftId as Id<'emails'>,
+          subject: subject || '(no subject)', bodyHtml, bodyText: body,
+          toAddresses: mode === 'reply'
+            ? recipients.map((r) => ({ email: r.email, name: r.name }))
+            : to.split(',').map((e) => ({ email: e.trim() })).filter(a => a.email),
+        });
+        if (upd.stale || !upd.data) {
+          throw new Error('This draft was changed or already sent. Reopen the conversation before sending again.');
+        }
+        if (upd.data.accountId === (sendingAccountId || accountId)) {
+          // Do not fall back to a second send after an ambiguous send error.
+          res = await sendDraftMutation.mutateAsync({ draftId: savedDraftId, undoWindowSeconds: UNDO_WINDOW_SECONDS });
+          if (!(await markSent())) toast.error('Message queued, but its old draft could not be removed.');
+          clearComposeStash();
+          haptic.success();
+          registerUndo(res);
+          onClose();
+          return;
         }
       }
 
@@ -788,16 +782,18 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         throw new Error(`Could not send (mode=${mode}, accountId=${activeAccountId ? 'set' : 'missing'}).`);
       }
 
-      markSent();
-        clearComposeStash();
+      if (!(await markSent())) toast.error('Message queued, but its old draft could not be removed.');
+      clearComposeStash();
       haptic.success();
       registerUndo(res!);
       onClose();
     } catch (err: any) {
+      resumeAfterSendFailure();
       console.error('Send failed:', err);
       haptic.error();
       toast.error(err?.message || 'Failed to send');
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
   };

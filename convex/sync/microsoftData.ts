@@ -416,6 +416,7 @@ export const _getEmailFingerprint = internalQuery({
       threadId: e.threadId,
       isRead: e.isRead,
       isStarred: e.isStarred,
+      isDraft: e.isDraft,
       labels: e.labels,
     };
   },
@@ -474,12 +475,14 @@ export const _upsertEmail = internalMutation({
         existing.threadId === args.threadId &&
         existing.isRead === args.isRead &&
         existing.isStarred === args.isStarred &&
+        existing.isDraft === args.isDraft &&
         sameStringArray(existing.labels, args.labels);
       if (same) return { emailId: existing._id, isNew: false };
       await ctx.db.patch(existing._id, {
         threadId: args.threadId,
         isRead: args.isRead,
         isStarred: args.isStarred,
+        isDraft: args.isDraft,
         labels: args.labels,
       });
       return { emailId: existing._id, isNew: false };

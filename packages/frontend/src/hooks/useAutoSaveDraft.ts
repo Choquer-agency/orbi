@@ -40,89 +40,92 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
   // Set once the user has clicked Send. Disarms further autosaves and the
   // unmount cleanup so neither can race with / undo the just-sent email.
   const sentRef = useRef(false);
+  const sendingRef = useRef(false);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   const saveDraftMutation = useSaveDraft();
   const deleteDraftMutation = useDeleteDraft();
 
   const saveDraft = useCallback(
-    async (fields: DraftFields) => {
-      if (!enabled || !accountId) return;
-      if (sentRef.current) return;
-
-      // Skip if nothing meaningful to save. In REPLY mode the recipients
-      // are auto-filled on open, so they must NOT count as content — that
-      // was minting empty "ghost drafts" on every opened-then-abandoned
-      // reply, which then force-opened the composer on each thread visit
-      // (Bryce 2026-08-21). Only the user's own typing counts there.
+    (fields: DraftFields): Promise<void> => {
+      if (!enabled || !accountId || sentRef.current || sendingRef.current) return Promise.resolve();
       const hasContent =
         (fields.bodyText?.trim() || '') !== '' ||
-        (mode !== 'reply' &&
-          ((fields.subject?.trim() || '') !== '' ||
-            (fields.toAddresses?.length ?? 0) > 0));
-      if (!hasContent) return;
+        (mode !== 'reply' && ((fields.subject?.trim() || '') !== '' || (fields.toAddresses?.length ?? 0) > 0));
+      if (!hasContent) return Promise.resolve();
 
       lastFieldsRef.current = fields;
       const version = ++saveVersionRef.current;
       setIsSaving(true);
-
-      try {
-        const result = await saveDraftMutation.mutateAsync({
-          id: draftIdRef.current ?? undefined,
-          accountId,
-          threadId,
-          mode,
-          parentEmailId,
-          ...fields,
-        });
-
-        // Only update state if this is still the latest save
-        if (version === saveVersionRef.current) {
-          // `create` returns { data: { id, threadId } }; `update` returns { data: <doc> }.
-          // Only set draftId on first creation (when ref was empty).
-          if (!draftIdRef.current) {
-            const created = (result as { data?: { id?: string } } | undefined)?.data;
-            const newId = created?.id ? String(created.id) : null;
-            if (newId) {
-              draftIdRef.current = newId;
-              setDraftId(newId);
-            }
+      // Serialize create/update. A second autosave must wait for the first
+      // create's ID, otherwise two draft rows are created for one composer.
+      const save = saveQueueRef.current.then(async () => {
+        if (sentRef.current) return;
+        try {
+          const result = await saveDraftMutation.mutateAsync({
+            id: draftIdRef.current ?? undefined,
+            accountId, threadId, mode, parentEmailId, ...fields,
+          });
+          // Always retain a created ID, even when a newer save is queued.
+          // The version guard only controls the saving indicator.
+          const created = (result as { data?: { id?: string } } | undefined)?.data;
+          if (!draftIdRef.current && created?.id) {
+            draftIdRef.current = String(created.id);
+            setDraftId(String(created.id));
           }
-          setLastSavedAt(new Date());
+          if (version === saveVersionRef.current) setLastSavedAt(new Date());
+        } catch {
+          // Keep the editor and crash-recovery copy available for retry.
+        } finally {
+          if (version === saveVersionRef.current) setIsSaving(false);
         }
-      } catch {
-        // Auto-save failures are non-critical
-      } finally {
-        if (version === saveVersionRef.current) {
-          setIsSaving(false);
-        }
-      }
+      });
+      saveQueueRef.current = save;
+      return save;
     },
     [enabled, accountId, threadId, mode, parentEmailId, saveDraftMutation],
   );
 
+  const prepareForSend = useCallback(async () => {
+    // Disarm timer/background saves BEFORE uploading or sending. A create
+    // already in flight must finish before the caller chooses its send path.
+    sendingRef.current = true;
+    await saveQueueRef.current;
+    return draftIdRef.current;
+  }, []);
+
+  const resumeAfterSendFailure = useCallback(() => {
+    if (!sentRef.current) sendingRef.current = false;
+  }, []);
+
   const deleteDraft = useCallback(async () => {
-    if (draftIdRef.current) {
-      try {
-        await deleteDraftMutation.mutateAsync(draftIdRef.current);
-      } catch {
-        // Ignore delete failures
-      }
-      draftIdRef.current = null;
-      setDraftId(null);
-    }
+    sentRef.current = true;
+    await saveQueueRef.current;
+    const id = draftIdRef.current;
+    if (id) await deleteDraftMutation.mutateAsync(id);
+    draftIdRef.current = null;
+    setDraftId(null);
   }, [deleteDraftMutation]);
 
-  const markSent = useCallback(() => {
-    sentRef.current = true;
-  }, []);
+  const markSent = useCallback(async () => {
+    // discard is a no-op for a converted/sent row. For a fresh or scheduled
+    // send, retire the separate autosaved row so its Draft badge disappears.
+    try {
+      await deleteDraft();
+      return true;
+    } catch {
+      // A cleanup failure must never turn a successful send into a retry.
+      return false;
+    }
+  }, [deleteDraft]);
 
   // Cleanup empty drafts on unmount
   useEffect(() => {
     return () => {
-      if (sentRef.current) return;
+      if (sentRef.current || sendingRef.current) return;
       const id = draftIdRef.current;
       const fields = lastFieldsRef.current;
-      if (id && !fields?.bodyText?.trim()) {
+      if (id && fields && !fields.bodyText?.trim()) {
         // Fire-and-forget delete of empty draft
         deleteDraftMutation.mutate(id);
       }
@@ -130,5 +133,5 @@ export function useAutoSaveDraft(options: AutoSaveOptions) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { draftId, saveDraft, deleteDraft, markSent, isSaving, lastSavedAt };
+  return { draftId, saveDraft, deleteDraft, markSent, prepareForSend, resumeAfterSendFailure, isSaving, lastSavedAt };
 }
