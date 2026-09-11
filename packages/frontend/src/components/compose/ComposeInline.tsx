@@ -61,7 +61,7 @@ const StyledTableCell = TableCell.extend({
     return { ...this.parent?.(), ...keepStyle };
   },
 });
-import { marked } from 'marked';
+import { pasteMarkdown } from '../../lib/composePaste';
 import { haptic } from '../../lib/haptics';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { MobileFormatToolbar } from './MobileFormatToolbar';
@@ -200,20 +200,6 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     };
   }, []);
 
-  // Detect whether pasted plain text actually looks like Markdown (so we
-  // don't surprise the user by transforming a casual paragraph that happens
-  // to contain a stray asterisk).
-  const looksLikeMarkdown = (txt: string): boolean => {
-    if (!txt || txt.length < 4) return false;
-    return (
-      /(^|\n)\s*(?:[-*•]|\d+\.)\s+\S/.test(txt) || // list item
-      /\*\*[^*\n]+\*\*/.test(txt) ||                // **bold**
-      /(^|\n)#{1,6}\s+\S/.test(txt) ||              // # heading
-      /\[[^\]]+\]\([^)]+\)/.test(txt) ||            // [text](url)
-      /(^|\n)>\s+\S/.test(txt)                       // > blockquote
-    );
-  };
-
   // TipTap rich text editor
   const initialDraftKey = `${initialDraft?.to ?? ''}|${initialDraft?.subject ?? ''}|${initialDraft?.bodyHtml ?? ''}|${initialDraft?.body ?? ''}`;
 
@@ -297,33 +283,15 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           }
         }
 
-        // Markdown-only paste (no HTML on the clipboard): when the plaintext
-        // looks like Markdown (typical of pasted LLM output), convert it to
-        // HTML so bold/lists/headings actually render. If real HTML is also
-        // on the clipboard we let Tiptap's default handler use that.
-        if (clipboardText && !clipboardHtml && looksLikeMarkdown(clipboardText)) {
-          try {
-            const html = marked.parse(clipboardText, {
-              async: false,
-              gfm: true,
-              breaks: true,
-            }) as string;
+        // Plain-text LLM output can contain Markdown. Insert the parsed
+        // editor nodes; real clipboard HTML uses Tiptap's default handling.
+        try {
+          if (clipboardText && pasteMarkdown(view, clipboardText, clipboardHtml)) {
             event.preventDefault();
-            const editorAPI = (view as unknown as { editor?: typeof editor }).editor;
-            if (editorAPI) {
-              editorAPI.commands.insertContent(html, { parseOptions: { preserveWhitespace: false } });
-            } else {
-              // Fallback path: write the HTML directly into the doc.
-              const parser = new DOMParser();
-              const doc = parser.parseFromString(html, 'text/html');
-              const fragment = doc.body.innerHTML;
-              const tr = view.state.tr.insertText(fragment);
-              view.dispatch(tr);
-            }
             return true;
-          } catch {
-            // If marked blows up, fall through to default paste.
           }
+        } catch {
+          // Leave the clipboard available to the default paste handler.
         }
 
         return false;
