@@ -6,6 +6,8 @@ import {
 } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
+import { canAccessThread } from "./lib/threadAccessCheck";
+import { canViewUserMailbox } from "./lib/workspace";
 import { materializeScheduledEmail } from "./emails";
 import type { Doc } from "./_generated/dataModel";
 import type { MutationCtx } from "./_generated/server";
@@ -151,10 +153,9 @@ export const listByThread = query({
     if (!threadId) return [];
     const thread = await ctx.db.get(threadId);
     if (!thread) return [];
-    const account = await ctx.db.get(thread.accountId);
-    if (!account || account.userId !== userId) {
-      throw new Error("Thread not found");
-    }
+    // Team reviewers and collaborators also open this timeline. An
+    // inaccessible thread is empty, not an app-wide error.
+    if (!(await canAccessThread(ctx, userId, thread))) return [];
 
     const [scheduled, sending] = await Promise.all([
       ctx.db
@@ -173,7 +174,16 @@ export const listByThread = query({
         .take(20),
     ]);
 
-    const rows = [...scheduled, ...sending].sort((a, b) => a.sendAt - b.sendAt);
+    // A thread can contain scheduled replies from different senders. A
+    // thread grant alone must not expose another sender's unsent message.
+    const visibleRows = await Promise.all(
+      [...scheduled, ...sending].map(async (row) =>
+        (await canViewUserMailbox(ctx, userId, row.userId)) ? row : null,
+      ),
+    );
+    const rows = visibleRows
+      .filter((row): row is NonNullable<typeof row> => row !== null)
+      .sort((a, b) => a.sendAt - b.sendAt);
     const accountIds = Array.from(new Set(rows.map((r) => r.accountId)));
     const accounts = await Promise.all(accountIds.map((id) => ctx.db.get(id)));
     const accountMap = new Map(

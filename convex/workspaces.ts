@@ -154,6 +154,9 @@ export const setManager = mutation({
     if (!member || member.workspaceId !== workspace._id) {
       throw new Error("Member not found");
     }
+    if (memberUserId === workspace.ownerUserId && managerUserId) {
+      throw new Error("The workspace owner cannot report to another member");
+    }
     if (managerUserId) {
       if (managerUserId === memberUserId) {
         throw new Error("A member can't manage themselves");
@@ -170,8 +173,12 @@ export const setManager = mutation({
           throw new Error("That assignment would create a reporting loop");
         }
         const next = (await ctx.db.get(cursor)) as Doc<"users"> | null;
+        if (!next || next.workspaceId !== workspace._id) {
+          throw new Error("Manager must belong to this workspace");
+        }
         cursor = next?.managerUserId;
       }
+      if (cursor) throw new Error("The reporting chain is too deep or contains a loop");
     }
     await ctx.db.patch(memberUserId, { managerUserId: managerUserId ?? undefined });
     return { ok: true };

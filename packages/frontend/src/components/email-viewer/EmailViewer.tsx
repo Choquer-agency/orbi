@@ -3334,8 +3334,8 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                       )}
                     </div>
 
-                    {/* Actions */}
-                    <div className="mt-2.5 flex items-center gap-2">
+                    {/* Reviewers can read scheduled mail; only its sender can change it. */}
+                    {se.userId === user?.id && <div className="mt-2.5 flex items-center gap-2">
                       <button
                         onClick={() => {
                           // Open compose with the scheduled email data for editing
@@ -3389,7 +3389,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                         <X className="h-3 w-3" />
                         Cancel
                       </button>
-                    </div>
+                    </div>}
                   </div>
                 );
               }
