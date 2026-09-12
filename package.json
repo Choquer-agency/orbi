@@ -33,7 +33,9 @@
     "ship": "bash scripts/ship.sh",
     "typecheck": "tsc -p convex/tsconfig.json --noEmit && cd packages/frontend && tsc -p tsconfig.app.json --noEmit",
     "release": "bash scripts/release.sh",
-    "test:search": "vitest run"
+    "test": "vitest run",
+    "test:search": "vitest run",
+    "test:drafts": "vitest run convex/drafts.test.ts packages/frontend/src/hooks/useAutoSaveDraft.test.tsx"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",
