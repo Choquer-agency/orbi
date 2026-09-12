@@ -37,8 +37,10 @@ export function VersionBadge() {
   }, []);
 
   useEffect(() => {
+    // In dev there is no hashed bundle (Vite serves modules directly) and no
+    // deployed build to compare against, so there is nothing to poll for.
+    if (import.meta.env.DEV) return;
     const booted = currentBundleId();
-    // In dev there is no hashed bundle — Vite serves modules directly.
     if (!booted) return;
     let alive = true;
     const check = async () => {
@@ -59,7 +61,14 @@ export function VersionBadge() {
   }, []);
 
   const commit = uiCommit();
-  const label = `${shell ? `v${shell}` : 'web'} · ${uiBuild()}${commit ? ` · ${commit}` : ''}`;
+  // In dev the build stamp is baked when the Vite config is evaluated, so it
+  // freezes at dev-server start and NEVER moves on reload. Showing it looked
+  // exactly like a production build that had stopped updating (Bryce
+  // 2026-09-11: "didn't change"). Say "dev" instead — unambiguous.
+  const isDev = import.meta.env.DEV;
+  const label = isDev
+    ? `${shell ? `v${shell}` : 'web'} · dev (local)`
+    : `${shell ? `v${shell}` : 'web'} · ${uiBuild()}${commit ? ` · ${commit}` : ''}`;
 
   if (updateReady) {
     return (
