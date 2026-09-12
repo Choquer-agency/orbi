@@ -4,7 +4,7 @@ import { query, mutation, internalQuery, internalMutation } from "./_generated/s
 import { internal } from "./_generated/api";
 import { requireUser } from "./lib/auth";
 import { requireTeamHub } from "./lib/workspace";
-import { addresses, matchClient, scheduleClientRefresh } from "./lib/clientQueue";
+import { addresses, matchClient, scheduleClientRefresh, CLIENT_REPLY_START_AT } from "./lib/clientQueue";
 import type { Doc } from "./_generated/dataModel";
 
 export const status = query({ args: {}, handler: async ctx => {
@@ -14,8 +14,9 @@ export const status = query({ args: {}, handler: async ctx => {
   const workspace = await ctx.db.get(user.workspaceId);
   if (!workspace?.features.includes("team_hub")) return null;
   const sync = await ctx.db.query("clientDirectorySync").withIndex("by_workspaceId", q => q.eq("workspaceId", user.workspaceId!)).unique();
-  const pending = await ctx.db.query("clientReplyQueue").withIndex("by_workspaceId_and_pending", q => q.eq("workspaceId", user.workspaceId!).eq("pending", true)).first();
-  return { syncedAt: sync?.syncedAt ?? null, indexing: !!sync?.rebuilding || !!pending, error: sync?.error ?? null };
+  // Do not subscribe this small status query to the workspace's busy scan queue.
+  // Its changing first pending row can hold up every query on the connection.
+  return { syncedAt: sync?.syncedAt ?? null, indexing: !!sync?.rebuilding, error: sync?.error ?? null };
 } });
 export const list = query({
   args: { accountId: v.optional(v.id("mailAccounts")), paginationOpts: paginationOptsValidator },
@@ -23,16 +24,20 @@ export const list = query({
     const userId = await requireUser(ctx);
     await requireTeamHub(ctx, userId);
     const base = args.accountId
-      ? ctx.db.query("clientReplyQueue").withIndex("by_userId_and_accountId_and_waitingAt", q => q.eq("userId", userId).eq("accountId", args.accountId!).gt("waitingAt", 0))
-      : ctx.db.query("clientReplyQueue").withIndex("by_userId_and_waitingAt", q => q.eq("userId", userId).gt("waitingAt", 0));
+      ? ctx.db.query("clientReplyQueue").withIndex("by_userId_and_accountId_and_waitingAt", q => q.eq("userId", userId).eq("accountId", args.accountId!).gte("waitingAt", CLIENT_REPLY_START_AT))
+      : ctx.db.query("clientReplyQueue").withIndex("by_userId_and_waitingAt", q => q.eq("userId", userId).gte("waitingAt", CLIENT_REPLY_START_AT));
     const result = await base.order("asc").paginate(args.paginationOpts);
-    const page = [];
-    for (const row of result.page) {
+    const accounts = new Map(await Promise.all([...new Set(result.page.map(row => row.accountId))].map(async id => [id, await ctx.db.get(id)] as const)));
+    const rows = await Promise.all(result.page.map(async row => {
       const thread = await ctx.db.get(row.threadId);
-      const account = await ctx.db.get(row.accountId);
-      if (!thread || !account?.isActive || account.userId !== userId || thread.isTrashed || thread.isSpam || thread.labels.includes("SPAM")) continue;
-      page.push({ ...row, subject: thread.subject, snippet: thread.snippet ?? "", isRead: thread.isRead });
-    }
+      const account = accounts.get(row.accountId);
+      if (!thread || !account?.isActive || account.userId !== userId || thread.isTrashed || thread.isSpam || thread.labels.includes("SPAM")) return null;
+      if ((row.latestAt ?? 0) < CLIENT_REPLY_START_AT) return null;
+      return { ...row, subject: thread.subject, snippet: thread.snippet ?? "", isRead: thread.isRead,
+        thread: { ...thread, id: thread._id, accountColor: account.color,
+          emails: [{ fromAddress: row.sender, fromName: row.senderName, snippet: thread.snippet ?? "" }] } };
+    }));
+    const page = rows.filter(row => row !== null);
     return { ...result, page };
   },
 });
@@ -44,10 +49,21 @@ export const dismiss = mutation({
     if (!row || row.userId !== userId) throw new Error("Conversation not found");
     if (row.latestEmailId !== args.latestEmailId) throw new Error("A new message arrived. Review it before clearing this conversation.");
     await ctx.db.patch(row._id, { dismissedThrough: row.latestAt, waitingAt: undefined });
-    await scheduleClientRefresh(ctx, args.threadId);
+    // The reviewed verdict is already known. Only rescan if an incoming update
+    // is still in flight, so a newer message cannot be lost by this dismissal.
+    if (row.pending) await scheduleClientRefresh(ctx, args.threadId);
   },
 });
 const candidate = v.object({ clientId: v.string(), clientName: v.string(), sender: v.string(), senderName: v.optional(v.string()), latestAt: v.number(), latestEmailId: v.id("emails"), waitingAt: v.number() });
+export const replyNeeded = query({ args: { threadId: v.id("threads") }, handler: async (ctx, args) => {
+  const userId = await requireUser(ctx);
+  const user = await ctx.db.get(userId);
+  const workspace = user?.workspaceId ? await ctx.db.get(user.workspaceId) : null;
+  if (!workspace?.features.includes("team_hub")) return null;
+  const row = await ctx.db.query("clientReplyQueue").withIndex("by_threadId", q => q.eq("threadId", args.threadId)).unique();
+  if (!row || row.userId !== userId || !row.waitingAt || (row.latestAt ?? 0) < CLIENT_REPLY_START_AT) return null;
+  return { latestEmailId: row.latestEmailId };
+} });
 export const scanThread = internalMutation({
   args: { queueId: v.id("clientReplyQueue"), revision: v.number(), cursor: v.union(v.string(), v.null()), sentTo: v.array(v.string()), candidate: v.optional(candidate) },
   handler: async (ctx, args) => {
@@ -70,6 +86,7 @@ export const scanThread = internalMutation({
       return cache.get(email)!;
     };
     for (const email of page.page) {
+      if (email.receivedAt < CLIENT_REPLY_START_AT) { finished = true; break; }
       if (email.isDraft || !["NONE", "SENT"].includes(email.sendStatus)) continue;
       const from = email.fromAddress.trim().toLowerCase();
       if (own.has(from)) {
@@ -138,7 +155,7 @@ export const rebuild = internalMutation({
   handler: async (ctx, args) => {
     const sync = await ctx.db.query("clientDirectorySync").withIndex("by_workspaceId", q => q.eq("workspaceId", args.workspaceId)).unique();
     if (!sync || sync.version !== args.version) return;
-    // Walk the complete table in bounded pages; no age cutoff hides old mail.
+    // Walk in bounded pages; the scanner ignores messages before the baseline.
     const page = await ctx.db.query("threads").paginate({ numItems: 40, cursor: args.cursor });
     for (const thread of page.page) {
       const account = await ctx.db.get(thread.accountId);

@@ -1,4 +1,4 @@
-import { scheduleClientRefresh } from "./lib/clientQueue";
+import { scheduleClientRefresh, resolveClientReplyAfterSend } from "./lib/clientQueue";
 import { v } from "convex/values";
 import {
   mutation,
@@ -1256,6 +1256,7 @@ export const _markSent = internalMutation({
       patch.internetMessageId = internetMessageId;
     }
     await ctx.db.patch(emailId, patch);
+    await resolveClientReplyAfterSend(ctx, email);
     await scheduleClientRefresh(ctx, email.threadId);
     // Chokepoint for the denormalized Sent-folder flag: every successful
     // provider send passes through here (compose, reply, forward, drafts,

@@ -9,16 +9,28 @@ needed for the web UI; follow `electron-auto-updates.md` if distributing a nativ
 
 - Today / Clients appears in the user's own inbox. Clients lists unresolved client
   conversations, oldest unanswered message first, including read and archived mail.
+  The list reuses Today's email rows. No reply needed appears beside the latest
+  unanswered client message's date in the conversation.
+  A fixed baseline of June 11, 2026 at midnight Vancouver time excludes older
+  messages without deleting them. This is not a rolling window: eligible requests
+  remain until addressed, and new messages on older threads enter normally.
 - Matching uses the ERP's active clients, corporate domains, primary contacts, and
   exact sender links saved in the ERP. Public mail domains never match wholesale.
   Ambiguous matches require an explicit sender link.
-- Opening Clients refreshes the directory; a 15-minute cron keeps registered
+- First use initializes the directory; a 15-minute cron keeps registered
   workspaces current. Directory errors preserve the last successful snapshot and
   display an error. A complete paginated history scan runs after directory changes.
+  Toggling away keeps the list subscription and loaded pages mounted. Returning
+  does not call the ERP; the refresh button remains available. The status query
+  reads only directory state, never the high-churn pending scan queue.
 - Gmail/Microsoft ingest, thread spam/trash changes, and successful Orbi sends update
   an indexed reply queue. Drafts, failed/queued sends, forwards, and internal-only
   discussion do not clear a client request. No reply needed clears through the
   reviewed incoming message; new mail returns. Ticket creation does not clear mail.
+  Dismissal optimistically removes the matching message from cached list pages,
+  with automatic rollback on failure. It does not rescan settled threads. Successful
+  sends clear a known addressed request in the send transaction before background
+  reconciliation. The next two client conversations are prefetched.
 - Create tickets appears beside Reply all in an owned conversation. It uses the
   newest incoming email plus up to 19 earlier messages, with an explicit notice if
   older context exists. The source email is fixed throughout review and creation.

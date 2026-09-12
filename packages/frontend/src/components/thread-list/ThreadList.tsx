@@ -193,6 +193,8 @@ export function ThreadList() {
   const clientsView = useUiStore(s => s.clientsView);
   const setClientsView = useUiStore(s => s.setClientsView);
   const showingClients = clientsView && !teamViewUserId && selectedFolder === 'inbox' && !isSearching;
+  const clientsOpened = useRef(false);
+  if (showingClients) clientsOpened.current = true;
 
   const providerSearch = useMailboxSearch(debouncedSearch, (selectedAccountId ?? undefined) as Id<'mailAccounts'> | undefined, !teamViewUserId);
   const localSearch = useThreads({
@@ -903,7 +905,10 @@ export function ThreadList() {
       </div>}
 
       {/* Scheduled emails folder */}
-      {showingClients ? <ClientsList key={selectedAccountId ?? 'all'} /> : !isSearching && selectedFolder === 'scheduled' ? (
+      {clientsOpened.current && <div className={showingClients ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+        <ClientsList key={selectedAccountId ?? 'all'} active={showingClients} />
+      </div>}
+      {showingClients ? null : !isSearching && selectedFolder === 'scheduled' ? (
         <ScheduledEmailList />
       ) : !isSearching && selectedFolder === 'needs_response' ? (
         <NeedsResponseList />

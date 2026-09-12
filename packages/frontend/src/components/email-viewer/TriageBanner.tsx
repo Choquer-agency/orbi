@@ -301,6 +301,8 @@ export function SenderRuleDialog({
   onChoose,
   onSkip,
   onCancel,
+  onBlock,
+  isBlocked,
 }: {
   mode: 'allow' | 'spam';
   targetCategoryLabel: string;
@@ -308,6 +310,13 @@ export function SenderRuleDialog({
   onChoose: (kind: 'email' | 'domain') => void;
   onSkip: () => void;
   onCancel: () => void;
+  /**
+   * Spam mode only. Blocking is the harder version of the same decision —
+   * future mail is trashed on arrival instead of being filed in Spam — so it
+   * belongs in this dialog rather than behind its own toolbar icon.
+   */
+  onBlock?: (kind: 'email' | 'domain') => void;
+  isBlocked?: boolean;
 }) {
   const domain = senderAddress.split('@')[1] ?? '';
   const isAllow = mode === 'allow';
@@ -353,6 +362,43 @@ export function SenderRuleDialog({
               </span>
               <span className="text-[11px] text-text-tertiary">{domainHint}</span>
             </button>
+          )}
+          {!isAllow && onBlock && !isBlocked && (
+            <>
+              <div className="mt-1 border-t border-border pt-2 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+                Or block them outright
+              </div>
+              <button
+                onClick={() => onBlock('email')}
+                className="flex w-full flex-col items-start rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:border-red-300 hover:bg-red-50/40"
+              >
+                <span className="text-[12px] font-semibold text-red-600">
+                  Block {senderAddress}
+                </span>
+                <span className="text-[11px] text-text-tertiary">
+                  Future emails are trashed on arrival — they never reach Spam.
+                </span>
+              </button>
+              {domain && (
+                <button
+                  onClick={() => onBlock('domain')}
+                  className="flex w-full flex-col items-start rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:border-red-300 hover:bg-red-50/40"
+                >
+                  <span className="text-[12px] font-semibold text-red-600">
+                    Block anyone at @{domain}
+                  </span>
+                  <span className="text-[11px] text-text-tertiary">
+                    Trashes future mail from the whole domain on arrival.
+                  </span>
+                </button>
+              )}
+            </>
+          )}
+          {!isAllow && isBlocked && (
+            <p className="mt-1 rounded-lg bg-red-50 px-3 py-2 text-[11px] text-red-600">
+              This sender is already blocked. Manage blocks in Settings →
+              Blocked Senders.
+            </p>
           )}
           <button
             onClick={onSkip}

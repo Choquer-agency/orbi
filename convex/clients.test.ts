@@ -3,7 +3,7 @@ import { convexTest } from 'convex-test';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import schema from './schema';
 import { api, internal } from './_generated/api';
-import { scheduleClientRefresh } from './lib/clientQueue';
+import { CLIENT_REPLY_START_AT, scheduleClientRefresh } from './lib/clientQueue';
 import { patchThread } from './lib/inboxStamp';
 import type { Doc } from './_generated/dataModel';
 const modules = import.meta.glob('./**/*.ts');
@@ -26,7 +26,7 @@ async function fixture() {
   });
   const asUser = t.withIdentity({ subject: ids.userId });
   const add = async (at: number, extra: Partial<Doc<'emails'>> = {}) => t.run(async ctx => {
-    const id = await ctx.db.insert('emails', { accountId: ids.accountId, threadId: ids.threadId, providerMessageId: `message-${at}-${Math.random()}`, references: [], fromAddress: 'client@abc.test', fromName: 'Client', toAddresses: [{ email: 'alex@agency.test' }], subject: 'Website updates', bodyText: 'Please make the updates.', isRead: false, isStarred: false, isDraft: false, labels: ['INBOX'], hasAttachments: false, receivedAt: at, sendStatus: 'NONE', sendAttempts: 0, ...extra });
+    const id = await ctx.db.insert('emails', { accountId: ids.accountId, threadId: ids.threadId, providerMessageId: `message-${at}-${Math.random()}`, references: [], fromAddress: 'client@abc.test', fromName: 'Client', toAddresses: [{ email: 'alex@agency.test' }], subject: 'Website updates', bodyText: 'Please make the updates.', isRead: false, isStarred: false, isDraft: false, labels: ['INBOX'], hasAttachments: false, receivedAt: CLIENT_REPLY_START_AT + at, sendStatus: 'NONE', sendAttempts: 0, ...extra });
     await scheduleClientRefresh(ctx, ids.threadId);
     return id;
   });
@@ -35,18 +35,38 @@ async function fixture() {
   return { t, ...ids, asUser, add, settle, list };
 }
 describe('client reply queue', () => {
-  it('includes old, read and archived client mail and remembers the oldest unanswered message', async () => {
+  it('ignores pre-baseline mail without deleting it, including within an active thread', async () => {
+    const f = await fixture();
+    const old = await f.add(-1); await f.settle();
+    expect((await f.list()).page).toHaveLength(0);
+    expect(await f.t.run(ctx => ctx.db.get(old))).not.toBeNull();
+    await f.add(0); await f.settle();
+    expect((await f.list()).page).toMatchObject([{ waitingAt: CLIENT_REPLY_START_AT }]);
+    vi.setSystemTime(new Date('2027-06-11T12:00:00Z'));
+    await f.t.run(ctx => scheduleClientRefresh(ctx, f.threadId)); await f.settle();
+    expect((await f.list()).page).toHaveLength(1);
+  });
+  it('exposes the reviewed message for dismissal only to its owner', async () => {
+    const f = await fixture(); const email = await f.add(1000); await f.settle();
+    expect(await f.asUser.query(api.clients.replyNeeded, { threadId: f.threadId })).toEqual({ latestEmailId: email });
+    expect(await f.t.withIdentity({ subject: f.outsider }).query(api.clients.replyNeeded, { threadId: f.threadId })).toBeNull();
+    await f.asUser.mutation(api.clients.dismiss, { threadId: f.threadId, latestEmailId: email });
+    expect(await f.asUser.query(api.clients.replyNeeded, { threadId: f.threadId })).toBeNull();
+  });
+  it('includes eligible read and archived client mail and remembers the oldest unanswered message', async () => {
     const f = await fixture();
     await f.add(1000); await f.add(2000); await f.settle();
     await f.t.run(ctx => patchThread(ctx, f.threadId, { isRead: true, isArchived: true }));
-    expect((await f.list()).page).toMatchObject([{ clientName: 'ABC Company', waitingAt: 1000, latestAt: 2000, isRead: true }]);
+    expect((await f.list()).page).toMatchObject([{ clientName: 'ABC Company', waitingAt: CLIENT_REPLY_START_AT + 1000, latestAt: CLIENT_REPLY_START_AT + 2000, isRead: true }]);
   });
   it('clears only after a successful reply, recognizes aliases, and reopens on a new client email', async () => {
     const f = await fixture(); await f.add(1000);
     const sent = await f.add(2000, { fromAddress: 'support@agency.test', toAddresses: [{ email: 'client@abc.test' }], sendStatus: 'FAILED' });
     await f.settle(); expect((await f.list()).page).toHaveLength(1);
-    await f.t.mutation(internal.emails._markSent, { emailId: sent }); await f.settle(); expect((await f.list()).page).toHaveLength(0);
-    await f.add(3000); await f.settle(); expect((await f.list()).page).toMatchObject([{ waitingAt: 3000 }]);
+    await f.t.mutation(internal.emails._markSent, { emailId: sent });
+    expect((await f.list()).page).toHaveLength(0); // No scheduler wait after a successful send.
+    await f.settle(); expect((await f.list()).page).toHaveLength(0);
+    await f.add(3000); await f.settle(); expect((await f.list()).page).toMatchObject([{ waitingAt: CLIENT_REPLY_START_AT + 3000 }]);
   });
   it('keeps drafts, queued sends, forwards and internal discussion from clearing a client request', async () => {
     const f = await fixture(); await f.add(1000);
@@ -54,18 +74,28 @@ describe('client reply queue', () => {
     await f.add(3000, { fromAddress: 'alex@agency.test', toAddresses: [{ email: 'client@abc.test' }], isDraft: true });
     await f.add(4000, { fromAddress: 'alex@agency.test', toAddresses: [{ email: 'client@abc.test' }], sendStatus: 'PENDING_SEND' });
     await f.add(5000, { fromAddress: 'alex@agency.test', toAddresses: [{ email: 'client@abc.test' }], subject: 'Fwd: Website updates', sendStatus: 'SENT' });
-    await f.settle(); expect((await f.list()).page).toMatchObject([{ waitingAt: 1000 }]);
+    await f.settle(); expect((await f.list()).page).toMatchObject([{ waitingAt: CLIENT_REPLY_START_AT + 1000 }]);
   });
   it('dismisses through the reviewed message, and a later client message returns', async () => {
     const f = await fixture(); const original = await f.add(1000); await f.settle();
-    await f.asUser.mutation(api.clients.dismiss, { threadId: f.threadId, latestEmailId: original }); await f.settle();
+    await f.asUser.mutation(api.clients.dismiss, { threadId: f.threadId, latestEmailId: original });
     expect((await f.list()).page).toHaveLength(0);
-    await f.add(2000); await f.settle(); expect((await f.list()).page).toMatchObject([{ waitingAt: 2000 }]);
+    expect(await f.t.run(ctx => ctx.db.query('clientReplyQueue').withIndex('by_threadId', q => q.eq('threadId', f.threadId)).unique())).toMatchObject({ pending: false });
+    await f.settle();
+    expect((await f.list()).page).toHaveLength(0);
+    await f.add(2000); await f.settle(); expect((await f.list()).page).toMatchObject([{ waitingAt: CLIENT_REPLY_START_AT + 2000 }]);
     await expect(f.asUser.mutation(api.clients.dismiss, { threadId: f.threadId, latestEmailId: original })).rejects.toThrow('new message');
   });
   it('matches explicitly linked Gmail addresses without treating everyone on Gmail as a client', async () => {
     const f = await fixture(); await f.add(1000, { fromAddress: 'random@gmail.com' }); await f.settle(); expect((await f.list()).page).toHaveLength(0);
     await f.add(2000, { fromAddress: 'steve@gmail.com' }); await f.settle(); expect((await f.list()).page).toMatchObject([{ clientId: 'abc' }]);
+  });
+  it('preserves a new message whose scan is pending when the old message is dismissed', async () => {
+    const f = await fixture(); const original = await f.add(1000); await f.settle();
+    await f.add(2000);
+    await f.asUser.mutation(api.clients.dismiss, { threadId: f.threadId, latestEmailId: original });
+    await f.settle();
+    expect((await f.list()).page).toMatchObject([{ waitingAt: CLIENT_REPLY_START_AT + 2000 }]);
   });
   it('ignores automated senders, removes spam and restores it when unmarked', async () => {
     const f = await fixture(); await f.add(1000, { fromAddress: 'noreply@abc.test' }); await f.settle(); expect((await f.list()).page).toHaveLength(0);
@@ -76,7 +106,7 @@ describe('client reply queue', () => {
   it('scans long threads in pages without dropping the oldest request', async () => {
     const f = await fixture();
     for (let i = 1; i <= 61; i++) await f.add(i * 1000);
-    await f.settle(); expect((await f.list()).page).toMatchObject([{ waitingAt: 1000, latestAt: 61000 }]);
+    await f.settle(); expect((await f.list()).page).toMatchObject([{ waitingAt: CLIENT_REPLY_START_AT + 1000, latestAt: CLIENT_REPLY_START_AT + 61000 }]);
   });
   it('rejects another user trying to dismiss or extract a private conversation', async () => {
     const f = await fixture(); const email = await f.add(1000); await f.settle();

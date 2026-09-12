@@ -1,6 +1,10 @@
 import type { MutationCtx, QueryCtx } from "../_generated/server";
-import type { Id } from "../_generated/dataModel";
+import type { Doc, Id } from "../_generated/dataModel";
 import { internal } from "../_generated/api";
+
+// Fixed launch baseline: three months before September 11, 2026, Vancouver time.
+// Eligible requests stay eligible as they age; mailbox history is never deleted.
+export const CLIENT_REPLY_START_AT = Date.parse("2026-06-11T00:00:00-07:00");
 
 export function addresses(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -32,4 +36,20 @@ export async function scheduleClientRefresh(ctx: MutationCtx, threadId: Id<"thre
   const queueId = row?._id ?? await ctx.db.insert("clientReplyQueue", { workspaceId: user.workspaceId, userId: account.userId, accountId: account._id, threadId, revision, pending: true });
   if (row) await ctx.db.patch(row._id, { revision, pending: true });
   await ctx.scheduler.runAfter(0, internal.clients.scanThread, { queueId, revision, cursor: null, sentTo: [] });
+}
+
+/** Clear a known request in the successful-send transaction, before reconciliation. */
+export async function resolveClientReplyAfterSend(ctx: MutationCtx, email: Doc<"emails">) {
+  if (email.isForwarded || /^(fw|fwd):/i.test(email.subject)) return;
+  const row = await ctx.db.query("clientReplyQueue").withIndex("by_threadId", q => q.eq("threadId", email.threadId)).unique();
+  if (!row?.waitingAt || !row.clientId || (row.latestAt ?? 0) > email.receivedAt) return;
+  const sync = await ctx.db.query("clientDirectorySync").withIndex("by_workspaceId", q => q.eq("workspaceId", row.workspaceId)).unique();
+  if (!sync) return;
+  for (const recipient of new Set([...addresses(email.toAddresses), ...addresses(email.ccAddresses)])) {
+    const client = await matchClient(ctx, row.workspaceId, sync.version, recipient);
+    if (client?.erpId === row.clientId) {
+      await ctx.db.patch(row._id, { waitingAt: undefined });
+      return;
+    }
+  }
 }

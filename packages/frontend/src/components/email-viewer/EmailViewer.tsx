@@ -1,4 +1,5 @@
 import { ClientTools } from "../clients/TicketWorkflow";
+import { NoReplyNeeded } from "../clients/NoReplyNeeded";
 import { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef, lazy, Suspense, memo } from 'react';
 import {
   Archive,
@@ -27,7 +28,6 @@ import {
   FileCode,
   Presentation,
   Download,
-  ShieldBan,
   MailOpen,
   Eye,
   ChevronDown,
@@ -39,7 +39,6 @@ import {
   DollarSign,
 } from 'lucide-react';
 import * as Avatar from '@radix-ui/react-avatar';
-import * as Dialog from '@radix-ui/react-dialog';
 import * as ScrollArea from '@radix-ui/react-scroll-area';
 import { useThread, useUpdateThread } from '../../hooks/useThreads';
 import { SenderRuleDialog } from './TriageBanner';
@@ -62,7 +61,7 @@ import { ContactCard } from '../contacts/ContactCard';
 import { useContactAutocomplete, useContactNameResolver } from '../../hooks/useContacts';
 import { useThreadScheduledEmails, useSendScheduledNow, useCancelScheduledEmail } from '../../hooks/useScheduledEmails';
 import { useUndoSendStore } from '../../stores/undoSendStore';
-import { useBlockSender, useBlockedSenders, useUnblockSender } from '../../hooks/useBlockedSenders';
+import { useBlockSender, useBlockedSenders } from '../../hooks/useBlockedSenders';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { useMarkThreadNotificationsRead } from '../../hooks/useNotifications';
 import { haptic } from '../../lib/haptics';
@@ -1705,8 +1704,7 @@ function injectHighlight(html: string, text: string): string {
 }
 
 export function EmailViewer({ onBack }: EmailViewerProps) {
-  const { selectedThreadId, setSelectedThread, pendingDraft, setPendingDraft, highlightText, setHighlightText, scrollToScheduled, setScrollToScheduled, editingScheduledId, setEditingScheduledId, composingNew, setComposingNew, pendingReplyMode, setPendingReplyMode, teamViewUserId } = useUiStore();
-  const [blockOpen, setBlockOpen] = useState(false);
+  const { selectedThreadId, pendingDraft, setPendingDraft, highlightText, setHighlightText, scrollToScheduled, setScrollToScheduled, editingScheduledId, setEditingScheduledId, composingNew, setComposingNew, pendingReplyMode, setPendingReplyMode, teamViewUserId } = useUiStore();
   // Per-sender / per-domain "send to spam forever" prompt — fires from the
   // Mark-as-spam button on the email viewer toolbar. Distinct from Block
   // (which trashes future mail) because spam mail is still retrievable.
@@ -1735,7 +1733,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const markThreadNotificationsRead = useMarkThreadNotificationsRead();
   const addComment = useAddComment();
   const blockSender = useBlockSender();
-  const unblockSender = useUnblockSender();
   const { data: blockedSenders } = useBlockedSenders();
   const scheduledEmails = useThreadScheduledEmails(selectedThreadId);
   const { addPendingEmail } = useUndoSendStore();
@@ -2692,144 +2689,14 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               (b) => b.domain && b.domain.toLowerCase() === senderDomainLc,
             );
             const isBlocked = !!(addressBlock || domainBlock);
-            const runBlock = (mode: 'address' | 'domain') => {
-              const payload = mode === 'domain'
-                ? { domain: senderDomain, reason: `Blocked from thread: ${thread.subject}` }
-                : { emailAddress: senderEmail, reason: `Blocked from thread: ${thread.subject}` };
-              blockSender.mutate(payload, {
-                onSuccess: () => {
-                  toast.success(
-                    mode === 'domain'
-                      ? `Blocked all senders @${senderDomain}`
-                      : `Blocked ${senderEmail}`,
-                  );
-                  updateThread.mutate({ id: thread.id, isTrashed: true });
-                  setBlockOpen(false);
-                  setSelectedThread(null);
-                },
-                onError: (err: any) => {
-                  toast.error(err?.message ?? 'Failed to block sender');
-                },
-              });
-            };
-            const runUnblock = (id: string, label: string) => {
-              unblockSender.mutate(id, {
-                onSuccess: () => {
-                  toast.success(`Unblocked ${label}`);
-                  setBlockOpen(false);
-                },
-                onError: (err: any) => {
-                  toast.error(err?.message ?? 'Failed to unblock');
-                },
-              });
-            };
             return (
               <>
-                <Tooltip content={isBlocked ? 'Sender is blocked' : 'Block sender'}>
-                  <button
-                    onClick={() => setBlockOpen(true)}
-                    className={cn(
-                      'rounded-lg p-1.5 transition-colors',
-                      isBlocked
-                        ? 'bg-red-50 text-red-500 hover:bg-red-100'
-                        : 'text-text-tertiary hover:bg-red-50 hover:text-red-500',
-                    )}
-                    aria-label={isBlocked ? 'Sender is blocked' : 'Block sender'}
-                    aria-pressed={isBlocked}
-                  >
-                    <ShieldBan className="h-3.5 w-3.5" />
-                  </button>
-                </Tooltip>
-                <Dialog.Root open={blockOpen} onOpenChange={setBlockOpen}>
-                  <Dialog.Portal>
-                    <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 animate-in fade-in" />
-                    <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg bg-white p-6 shadow-xl animate-in fade-in slide-in-from-bottom-4">
-                      <div className="flex items-center gap-2">
-                        <ShieldBan className="h-5 w-5 text-red-500" />
-                        <Dialog.Title className="text-base font-semibold text-text-primary">
-                          {isBlocked ? 'Sender is blocked' : 'Block sender'}
-                        </Dialog.Title>
-                      </div>
-                      <Dialog.Description className="mt-2 text-sm text-text-secondary">
-                        {isBlocked
-                          ? 'This sender is currently blocked. Future emails are auto-trashed on sync.'
-                          : 'Future emails from this sender will be auto-trashed on sync.'}
-                      </Dialog.Description>
-
-                      <div className="mt-4 space-y-2">
-                        {addressBlock ? (
-                          <button
-                            onClick={() => runUnblock(addressBlock.id, senderEmail)}
-                            disabled={unblockSender.isPending}
-                            className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-red-200 bg-red-50/60 px-3 py-2.5 text-left transition-colors hover:border-red-300 disabled:opacity-50"
-                          >
-                            <span className="text-[12px] font-medium text-red-600">
-                              Unblock this address
-                            </span>
-                            <span className="text-[11px] text-text-tertiary">
-                              {senderEmail}
-                            </span>
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => runBlock('address')}
-                            disabled={blockSender.isPending}
-                            className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:border-red-300 hover:bg-red-50/40 disabled:opacity-50"
-                          >
-                            <span className="text-[12px] font-medium text-text-primary">
-                              Block this address only
-                            </span>
-                            <span className="text-[11px] text-text-tertiary">
-                              {senderEmail}
-                            </span>
-                          </button>
-                        )}
-                        {senderDomain && (
-                          domainBlock ? (
-                            <button
-                              onClick={() => runUnblock(domainBlock.id, `@${senderDomain}`)}
-                              disabled={unblockSender.isPending}
-                              className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-red-200 bg-red-50/60 px-3 py-2.5 text-left transition-colors hover:border-red-300 disabled:opacity-50"
-                            >
-                              <span className="text-[12px] font-medium text-red-600">
-                                Unblock this domain
-                              </span>
-                              <span className="text-[11px] text-text-tertiary">
-                                @{senderDomain}
-                              </span>
-                            </button>
-                          ) : (
-                            <button
-                              onClick={() => runBlock('domain')}
-                              disabled={blockSender.isPending}
-                              className="flex w-full flex-col items-start gap-0.5 rounded-lg border border-border px-3 py-2.5 text-left transition-colors hover:border-red-300 hover:bg-red-50/40 disabled:opacity-50"
-                            >
-                              <span className="text-[12px] font-medium text-text-primary">
-                                Block everyone at this domain
-                              </span>
-                              <span className="text-[11px] text-text-tertiary">
-                                @{senderDomain}
-                              </span>
-                            </button>
-                          )
-                        )}
-                      </div>
-
-                      <div className="mt-5 flex justify-end gap-2">
-                        <Dialog.Close asChild>
-                          <button className="rounded-lg px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:bg-surface">
-                            Close
-                          </button>
-                        </Dialog.Close>
-                      </div>
-                    </Dialog.Content>
-                  </Dialog.Portal>
-                </Dialog.Root>
-
-                {/* Mark as spam — opens the sender-rule dialog in spam mode.
-                    Distinct from Block (which auto-trashes future mail);
-                    this routes future mail to the Spam folder so it's
-                    still recoverable. */}
+                {/* Junk — one control for the whole "I don't want this"
+                    decision. The dialog offers Spam (recoverable) AND Block
+                    (auto-trashed on arrival), so there is no second shield
+                    icon sitting beside this one doing almost the same thing
+                    (Bryce 2026-09-11). Unblocking lives in Settings →
+                    Blocked Senders. */}
                 <Tooltip content="Send to spam">
                   <button
                     onClick={() => setSpamRuleOpen(true)}
@@ -2844,6 +2711,28 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                     mode="spam"
                     targetCategoryLabel="Spam"
                     senderAddress={senderEmail}
+                    isBlocked={isBlocked}
+                    onBlock={(kind) => {
+                      const payload =
+                        kind === 'domain'
+                          ? { domain: senderDomain, reason: `Blocked from thread: ${thread.subject}` }
+                          : { emailAddress: senderEmail, reason: `Blocked from thread: ${thread.subject}` };
+                      blockSender.mutate(payload, {
+                        onSuccess: () => {
+                          toast.success(
+                            kind === 'domain'
+                              ? `Blocked everyone at @${senderDomain}`
+                              : `Blocked ${senderEmail}`,
+                          );
+                          updateThread.mutate({ id: thread.id, isTrashed: true });
+                          setSpamRuleOpen(false);
+                          useUiStore.getState().advanceSelectionAfterRemoval(thread.id);
+                        },
+                        onError: (err: any) => {
+                          toast.error(err?.message ?? 'Failed to block sender');
+                        },
+                      });
+                    }}
                     onChoose={(kind) => {
                       const lastEmail = thread.emails?.[thread.emails.length - 1];
                       if (!lastEmail) return;
@@ -3065,7 +2954,7 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                                 toggleExpandedHeader(email.id);
                               }
                             }}
-                            className="-mx-2 flex cursor-pointer items-start justify-between rounded-lg px-2 py-1 transition-colors hover:bg-surface/60"
+                            className="-mx-2 flex flex-wrap cursor-pointer items-start justify-between gap-y-2 rounded-lg px-2 py-1 transition-colors hover:bg-surface/60"
                           >
                             <div className="flex min-w-0 items-center gap-2.5">
                               <Avatar.Root className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full">
@@ -3121,7 +3010,8 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
                                 />
                               </div>
                             </div>
-                            <div className="ml-3 flex shrink-0 items-center gap-1.5">
+                            <div className="ml-auto flex shrink-0 items-center gap-1.5 pl-3">
+                              <NoReplyNeeded threadId={thread.id} emailId={email.id} />
                               <span className="text-[11px] text-text-tertiary">
                                 {formatExactTime(email.receivedAt)}
                               </span>
