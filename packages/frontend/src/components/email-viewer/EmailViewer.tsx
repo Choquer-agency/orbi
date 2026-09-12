@@ -32,7 +32,6 @@ import {
   Eye,
   ChevronDown,
   Ban,
-  ArrowRightLeft,
   ChevronUp,
   MoreHorizontal,
   Paperclip,
@@ -67,9 +66,6 @@ import { useMarkThreadNotificationsRead } from '../../hooks/useNotifications';
 import { haptic } from '../../lib/haptics';
 import { ImageLightbox } from './ImageLightbox';
 import { TrackingInfo } from './TrackingInfo';
-import { HandoffDialog } from '../handoff/HandoffDialog';
-import { HandoffBanner } from '../handoff/HandoffBanner';
-import { useHandoffs } from '../../hooks/useHandoffs';
 import DOMPurify from 'dompurify';
 import { useMutation as useConvexMutation, useQuery as useConvexQuery, useAction } from 'convex/react';
 import { useAuthToken } from '@convex-dev/auth/react';
@@ -1582,7 +1578,7 @@ function parseAddressString(value: string | undefined): Array<{ email: string }>
     .map((email) => ({ email }));
 }
 
-// Team members for @-mentions and handoffs. This used to be a hardcoded
+// Team members for @-mentions. This used to be a hardcoded
 // mock list — the mention UI looked functional but tagged nobody real, and
 // no mention IDs reached the backend, so the access-grant + notification
 // pipeline never fired.
@@ -1752,7 +1748,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
   const [showTagMenu, setShowTagMenu] = useState(false);
   const [tagSearch, setTagSearch] = useState('');
   const [taggedMembers, setTaggedMembers] = useState<TeamMember[]>([]);
-  const [handoffOpen, setHandoffOpen] = useState(false);
 
   // "$" — start a project intake in the Choquer ERP from this thread's
   // client sender. The ERP does the heavy lifting; we just open the wizard.
@@ -1787,7 +1782,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
         })),
     [teamData],
   );
-  const myPendingHandoffs = useHandoffs('PENDING');
   const [contactCardEmail, setContactCardEmail] = useState<string | null>(null);
   const [contactCardAnchor, setContactCardAnchor] = useState<DOMRect | null>(null);
   const contactLookup = useContactAutocomplete(contactCardEmail || '');
@@ -2587,15 +2581,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
               <MailOpen className="h-3.5 w-3.5" />
             </button>
           </Tooltip>
-          <Tooltip content="Hand off to teammate">
-            <button
-              onClick={() => setHandoffOpen(true)}
-              className="rounded-lg p-1.5 text-text-tertiary transition-colors hover:bg-surface hover:text-text-primary"
-              aria-label="Hand off to teammate"
-            >
-              <ArrowRightLeft className="h-3.5 w-3.5" />
-            </button>
-          </Tooltip>
           <Tooltip content="Start project in Choquer ERP">
             <button
               onClick={() => void handleStartProject()}
@@ -2845,11 +2830,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
       <ScrollArea.Root className="min-h-0 flex-1">
         <ScrollArea.Viewport ref={scrollViewportRef} className="h-full w-full">
           <div className="bg-surface p-3">
-            {(myPendingHandoffs.data ?? [])
-              .filter((h: any) => h.threadId === selectedThreadId)
-              .map((h: any) => (
-                <HandoffBanner key={h.id} handoff={h} />
-              ))}
             {timeline.length === 0 && data?.data && (
               <BlankThreadAutoFix threadId={selectedThreadId as Id<'threads'>} />
             )}
@@ -3683,16 +3663,6 @@ export function EmailViewer({ onBack }: EmailViewerProps) {
           emailId={previewAttachment.emailId}
           attachment={previewAttachment.attachment}
           onClose={() => setPreviewAttachment(null)}
-        />
-      )}
-
-      {/* Hand off this thread to a teammate */}
-      {selectedThreadId && (
-        <HandoffDialog
-          threadId={selectedThreadId}
-          open={handoffOpen}
-          onOpenChange={setHandoffOpen}
-          teamMembers={teamMembers}
         />
       )}
 
