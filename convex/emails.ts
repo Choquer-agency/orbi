@@ -1,3 +1,4 @@
+import { scheduleClientRefresh } from "./lib/clientQueue";
 import { v } from "convex/values";
 import {
   mutation,
@@ -324,11 +325,7 @@ export const _setAttachmentStorageId = internalMutation({
  *
  * Auth: requires the calling user to own the email.
  */
-export const downloadAttachment = action({
-  args: { attachmentId: v.id("attachments") },
-  handler: async (ctx, { attachmentId }): Promise<{ url: string; filename: string; mimeType: string }> => {
-    const userId = await requireUser(ctx);
-
+export async function downloadAttachmentForUser(ctx: import("./_generated/server").ActionCtx, attachmentId: Id<"attachments">, userId: Id<"users">): Promise<{ url: string; filename: string; mimeType: string }> {
     const ctxData = (await ctx.runQuery(internal.emails._getAttachmentForDownload, {
       attachmentId,
     })) as {
@@ -408,7 +405,11 @@ export const downloadAttachment = action({
     const url = await ctx.storage.getUrl(storageId);
     if (!url) throw new Error("Storage URL unavailable after upload");
     return { url, filename: ctxData.attachment.filename, mimeType: ctxData.attachment.mimeType };
-  },
+}
+export const downloadAttachment = action({
+  args: { attachmentId: v.id("attachments") },
+  handler: async (ctx, { attachmentId }): Promise<{ url: string; filename: string; mimeType: string }> =>
+    downloadAttachmentForUser(ctx, attachmentId, await requireUser(ctx)),
 });
 
 const attachmentUpload = v.object({
@@ -1255,6 +1256,7 @@ export const _markSent = internalMutation({
       patch.internetMessageId = internetMessageId;
     }
     await ctx.db.patch(emailId, patch);
+    await scheduleClientRefresh(ctx, email.threadId);
     // Chokepoint for the denormalized Sent-folder flag: every successful
     // provider send passes through here (compose, reply, forward, drafts,
     // scheduled), so the thread is guaranteed to be marked.

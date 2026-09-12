@@ -1,307 +1,350 @@
-"use node";
+'use node';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// searchProvider.ts — Provider-side full-text search fallback.
-//
-// Why this exists: incremental sync only stores headers + snippet for emails
-// the user hasn't opened (see convex/sync/onDemandBody.ts). Local search
-// (convex/search.ts) already only looks at subject/snippet/sender — but the
-// AI chat's search_emails tool also searches bodyText, which is missing for
-// unopened mail. This action escalates to Gmail's / Graph's server-side
-// full-text indexes when local results are sparse, then imports the matches
-// into Convex so they show up in the regular reactive thread list.
-//
-// Cost profile: per-search, not per-incoming-email. Bounded to maxResults
-// per call (default 10). Imports a thin metadata stub for each new hit; the
-// body still loads lazily via the existing on-demand fetcher when the user
-// clicks the result.
-// ─────────────────────────────────────────────────────────────────────────────
+import { v } from 'convex/values';
+import { action } from './_generated/server';
+import { internal } from './_generated/api';
+import { requireUser } from './lib/auth';
+import { withRefreshOn401 } from './oauth/tokenManager';
+import type { ActionCtx } from './_generated/server';
+import type { Id } from './_generated/dataModel';
+import {
+  gmailSearchQuery,
+  microsoftSearchQuery,
+  parseSearchOperators,
+} from '../packages/shared/src/search';
 
-import { v } from "convex/values";
-import { action } from "./_generated/server";
-import { internal } from "./_generated/api";
-import { requireUser } from "./lib/auth";
-import { withRefreshOn401 } from "./oauth/tokenManager";
-import type { ActionCtx } from "./_generated/server";
-import type { Id } from "./_generated/dataModel";
-
-const DEFAULT_MAX_RESULTS = 10;
-const MAX_RESULTS_CAP = 25;
-
-// ─── Tiny header helpers (mirror gmail.ts; kept inline so we don't have to
-//     import a "use node" sibling). ──────────────────────────────────────────
-
-interface GmailHeader {
+interface Address {
+  email: string;
   name?: string;
-  value?: string;
+}
+interface SearchHit {
+  providerMessageId: string;
+  providerThreadId: string;
+  subject: string;
+  snippet: string;
+  fromAddress: string;
+  fromName?: string;
+  toAddresses: Address[];
+  ccAddresses: Address[];
+  receivedAt: number;
+  isRead: boolean;
+  isStarred: boolean;
+  isDraft: boolean;
+  hasAttachments: boolean;
+  internetMessageId?: string;
+  labels: string[];
+}
+interface SearchPage {
+  hits: SearchHit[];
+  nextCursor?: string;
+  incomplete?: boolean;
 }
 
-function getHeader(headers: GmailHeader[] | undefined, name: string) {
-  return headers?.find((h) => h.name?.toLowerCase() === name.toLowerCase())
-    ?.value;
-}
-
-function parseAddress(raw: string): { email: string; name?: string } {
+function parseAddress(raw: string): Address {
   const m = raw.match(/^(.+?)\s*<(.+?)>$/);
-  if (m) return { name: m[1].replace(/"/g, "").trim(), email: m[2].trim() };
+  if (m) return { name: m[1].replace(/^"|"$/g, '').trim(), email: m[2].trim() };
   return { email: raw.trim() };
 }
-
-function parseAddressList(raw: string | undefined) {
-  if (!raw) return [];
-  return raw.split(",").map((a) => parseAddress(a));
+function parseAddressList(raw?: string): Address[] {
+  // Commas inside display names are not recipient separators.
+  return (raw?.match(/(?:[^,"<]|"(?:\\.|[^"\\])*"|<[^>]*>)+/g) ?? []).map(parseAddress);
 }
-
-// ─── Provider HTTP helpers ──────────────────────────────────────────────────
-
-async function gmailGet<T>(url: string, token: string): Promise<T> {
-  const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) {
-    const text = await r.text();
-    const err = new Error(
-      `Gmail ${r.status}: ${text.slice(0, 300)}`,
-    ) as Error & { status: number };
-    err.status = r.status;
-    throw err;
-  }
-  return (await r.json()) as T;
-}
-
-async function graphGet<T>(url: string, token: string): Promise<T> {
+async function providerGet<T>(url: string, token: string): Promise<T> {
   const r = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json",
-      ConsistencyLevel: "eventual",
-    },
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    signal: AbortSignal.timeout(20_000),
   });
   if (!r.ok) {
-    const text = await r.text();
-    const err = new Error(
-      `Graph ${r.status}: ${text.slice(0, 300)}`,
-    ) as Error & { status: number };
+    // Do not log provider response bodies, which can contain mailbox data.
+    const err = new Error(`Mail search failed (${r.status})`) as Error & { status: number };
     err.status = r.status;
     throw err;
   }
   return (await r.json()) as T;
 }
-
-// ─── Provider search calls ──────────────────────────────────────────────────
-
-interface GmailMessageListResponse {
-  messages?: Array<{ id: string; threadId: string }>;
+interface GmailPart {
+  filename?: string;
+  parts?: GmailPart[];
 }
-
-interface GmailMetadataResponse {
-  id?: string;
+interface GmailMessage {
+  id: string;
+  threadId: string;
   snippet?: string;
   internalDate?: string;
-  threadId?: string;
   labelIds?: string[];
-  payload?: {
-    headers?: GmailHeader[];
-  };
+  payload?: GmailPart & { headers?: Array<{ name: string; value: string }> };
 }
-
-interface GraphMessageSearchResponse {
-  value?: Array<{
-    id: string;
-    conversationId?: string;
-    subject?: string;
-    bodyPreview?: string;
-    receivedDateTime?: string;
-    from?: { emailAddress?: { address?: string; name?: string } };
-    toRecipients?: Array<{ emailAddress?: { address?: string; name?: string } }>;
-    ccRecipients?: Array<{ emailAddress?: { address?: string; name?: string } }>;
-    bccRecipients?: Array<{ emailAddress?: { address?: string; name?: string } }>;
-    internetMessageId?: string;
-    isRead?: boolean;
-    isDraft?: boolean;
-    hasAttachments?: boolean;
-  }>;
+function hasFiles(part?: GmailPart): boolean {
+  return !!part?.filename || !!part?.parts?.some(hasFiles);
 }
-
 async function searchGmail(
   ctx: ActionCtx,
-  accountId: Id<"mailAccounts">,
-  query: string,
-  maxResults: number,
-): Promise<
-  Array<{
-    providerMessageId: string;
-    providerThreadId: string;
-    subject: string;
-    snippet: string;
-    fromAddress: string;
-    fromName?: string;
-    toAddresses: Array<{ email: string; name?: string }>;
-    ccAddresses: Array<{ email: string; name?: string }>;
-    receivedAt: number;
-    isRead: boolean;
-    internetMessageId?: string;
-    labels: string[];
-  }>
-> {
-  const list = await withRefreshOn401(ctx, accountId, async (token) =>
-    gmailGet<GmailMessageListResponse>(
-      `https://gmail.googleapis.com/gmail/v1/users/me/messages?q=${encodeURIComponent(query)}&maxResults=${maxResults}`,
-      token,
-    ),
+  accountId: Id<'mailAccounts'>,
+  raw: string,
+  limit: number,
+  cursor?: string,
+): Promise<SearchPage> {
+  const params = new URLSearchParams({ q: gmailSearchQuery(raw), maxResults: String(limit) });
+  if (cursor) params.set('pageToken', cursor);
+  const list = await withRefreshOn401(ctx, accountId, (token) =>
+    providerGet<{
+      messages?: Array<{ id: string }>;
+      nextPageToken?: string;
+    }>(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, token),
   );
-  const ids = (list.messages ?? []).map((m) => m.id);
-  const hits = [];
-  for (const id of ids) {
-    try {
-      const msg = await withRefreshOn401(ctx, accountId, async (token) =>
-        gmailGet<GmailMetadataResponse>(
-          `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=Message-ID`,
-          token,
-        ),
-      );
-      const headers = msg.payload?.headers ?? [];
-      const from = parseAddress(getHeader(headers, "From") || "");
-      const labels = msg.labelIds ?? [];
-      hits.push({
-        providerMessageId: msg.id ?? id,
-        providerThreadId: msg.threadId ?? id,
-        subject: getHeader(headers, "Subject") || "(no subject)",
-        snippet: msg.snippet || "",
-        fromAddress: from.email,
-        fromName: from.name,
-        toAddresses: parseAddressList(getHeader(headers, "To")),
-        ccAddresses: parseAddressList(getHeader(headers, "Cc")),
-        receivedAt: msg.internalDate ? Number(msg.internalDate) : Date.now(),
-        isRead: !labels.includes("UNREAD"),
-        internetMessageId: getHeader(headers, "Message-ID"),
-        labels,
-      });
-    } catch (err) {
-      console.warn(`[searchProvider] gmail metadata fetch failed for ${id}:`, err);
+  const hits: SearchHit[] = [];
+  let incomplete = false;
+  const ids = list.messages ?? [];
+  // Bound concurrency to avoid a serial network round trip for every result.
+  for (let i = 0; i < ids.length; i += 8) {
+    const batch = await Promise.allSettled(
+      ids.slice(i, i + 8).map(async ({ id }): Promise<SearchHit> => {
+        const fields =
+          'id,threadId,snippet,internalDate,labelIds,payload(headers,filename,parts(filename,parts(filename,parts(filename))))';
+        const msg = await withRefreshOn401(ctx, accountId, (token) =>
+          providerGet<GmailMessage>(
+            `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full&fields=${encodeURIComponent(fields)}`,
+            token,
+          ),
+        );
+        const header = (name: string) =>
+          msg.payload?.headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value;
+        const from = parseAddress(header('From') ?? '');
+        const labels = msg.labelIds ?? [];
+        return {
+          providerMessageId: msg.id,
+          providerThreadId: msg.threadId,
+          subject: header('Subject') || '(no subject)',
+          snippet: msg.snippet ?? '',
+          fromAddress: from.email,
+          fromName: from.name,
+          toAddresses: parseAddressList(header('To')),
+          ccAddresses: parseAddressList(header('Cc')),
+          receivedAt: Number(msg.internalDate) || 0,
+          isRead: !labels.includes('UNREAD'),
+          isStarred: labels.includes('STARRED'),
+          isDraft: labels.includes('DRAFT'),
+          hasAttachments: hasFiles(msg.payload),
+          internetMessageId: header('Message-ID'),
+          labels,
+        };
+      }),
+    );
+    for (const result of batch) {
+      if (result.status === 'fulfilled') hits.push(result.value);
+      else incomplete = true;
     }
   }
-  return hits;
+  return { hits, nextCursor: list.nextPageToken, incomplete };
 }
-
+interface GraphAddress {
+  emailAddress?: { address?: string; name?: string };
+}
+interface GraphMessage {
+  id: string;
+  conversationId?: string;
+  subject?: string;
+  bodyPreview?: string;
+  receivedDateTime?: string;
+  from?: GraphAddress;
+  toRecipients?: GraphAddress[];
+  ccRecipients?: GraphAddress[];
+  internetMessageId?: string;
+  isRead?: boolean;
+  isDraft?: boolean;
+  hasAttachments?: boolean;
+  flag?: { flagStatus?: string };
+  categories?: string[];
+  parentFolderId?: string;
+}
 async function searchMicrosoft(
   ctx: ActionCtx,
-  accountId: Id<"mailAccounts">,
-  query: string,
-  maxResults: number,
-): Promise<
-  Array<{
-    providerMessageId: string;
-    providerThreadId: string;
-    subject: string;
-    snippet: string;
-    fromAddress: string;
-    fromName?: string;
-    toAddresses: Array<{ email: string; name?: string }>;
-    ccAddresses: Array<{ email: string; name?: string }>;
-    receivedAt: number;
-    isRead: boolean;
-    internetMessageId?: string;
-    labels: string[];
-  }>
-> {
-  // Graph $search needs ConsistencyLevel: eventual (handled in graphGet).
-  const select =
-    "id,conversationId,subject,bodyPreview,receivedDateTime,from,toRecipients,ccRecipients,bccRecipients,internetMessageId,isRead,isDraft,hasAttachments";
-  const res = await withRefreshOn401(ctx, accountId, async (token) =>
-    graphGet<GraphMessageSearchResponse>(
-      `https://graph.microsoft.com/v1.0/me/messages?$select=${select}&$top=${maxResults}&$search="${encodeURIComponent(query)}"`,
-      token,
-    ),
+  accountId: Id<'mailAccounts'>,
+  raw: string,
+  limit: number,
+  cursor?: string,
+  cachedFolders: Array<{ folderId: string; labels: string[] }> = [],
+): Promise<SearchPage> {
+  const p = parseSearchOperators(raw);
+  const kql = microsoftSearchQuery(raw);
+  const params = new URLSearchParams({
+    $select:
+      'id,conversationId,subject,bodyPreview,receivedDateTime,from,toRecipients,ccRecipients,internetMessageId,isRead,isDraft,hasAttachments,flag,categories,parentFolderId',
+    $top: String(limit),
+  });
+  if (kql) params.set('$search', JSON.stringify(kql));
+  else params.set('$orderby', 'receivedDateTime desc');
+  let url = `https://graph.microsoft.com/v1.0/me/messages?${params}`;
+  if (cursor) {
+    const next = new URL(cursor);
+    // Cursors arrive from the client. Never forward tokens to arbitrary URLs.
+    if (
+      next.origin !== 'https://graph.microsoft.com' ||
+      next.pathname !== '/v1.0/me/messages' ||
+      next.username ||
+      next.password
+    )
+      throw new Error('Invalid search cursor');
+    url = next.href;
+  }
+  const response = await withRefreshOn401(ctx, accountId, (token) =>
+    providerGet<{
+      value?: GraphMessage[];
+      '@odata.nextLink'?: string;
+    }>(url, token),
   );
-  return (res.value ?? []).map((m) => ({
-    providerMessageId: m.id,
-    providerThreadId: m.conversationId || m.id,
-    subject: m.subject || "(no subject)",
-    snippet: m.bodyPreview || "",
-    fromAddress: m.from?.emailAddress?.address || "(unknown)",
-    fromName: m.from?.emailAddress?.name,
-    toAddresses: (m.toRecipients ?? []).map((r) => ({
-      email: r.emailAddress?.address || "",
+  let folders = cachedFolders;
+  if (!folders.length && response.value?.some((m) => m.parentFolderId)) {
+    folders = await Promise.all(
+      [
+        ['inbox', 'INBOX'],
+        ['sentitems', 'SENT'],
+        ['drafts', 'DRAFT'],
+        ['deleteditems', 'TRASH'],
+        ['junkemail', 'SPAM'],
+      ].map(async ([name, label]) => {
+        const folder = await withRefreshOn401(ctx, accountId, (token) =>
+          providerGet<{ id: string }>(
+            `https://graph.microsoft.com/v1.0/me/mailFolders/${name}?$select=id`,
+            token,
+          ),
+        );
+        return { folderId: folder.id, labels: [label] };
+      }),
+    );
+  }
+  const addresses = (items?: GraphAddress[]): Address[] =>
+    (items ?? []).map((r) => ({
+      email: r.emailAddress?.address ?? '',
       name: r.emailAddress?.name,
-    })),
-    ccAddresses: (m.ccRecipients ?? []).map((r) => ({
-      email: r.emailAddress?.address || "",
-      name: r.emailAddress?.name,
-    })),
-    receivedAt: m.receivedDateTime
-      ? new Date(m.receivedDateTime).getTime()
-      : Date.now(),
-    isRead: !!m.isRead,
-    internetMessageId: m.internetMessageId,
-    labels: [],
-  }));
+    }));
+  const hits = (response.value ?? [])
+    .filter((m) => {
+      if (p.isUnread && m.isRead) return false;
+      if (p.isRead && !m.isRead) return false;
+      if (p.isStarred && m.flag?.flagStatus !== 'flagged') return false;
+      if (p.label && !m.categories?.some((c) => c.toLowerCase() === p.label!.toLowerCase()))
+        return false;
+      return true;
+    })
+    .map(
+      (m): SearchHit => ({
+        providerMessageId: m.id,
+        providerThreadId: m.conversationId || m.id,
+        subject: m.subject || '(no subject)',
+        snippet: m.bodyPreview ?? '',
+        fromAddress: m.from?.emailAddress?.address ?? '',
+        fromName: m.from?.emailAddress?.name,
+        toAddresses: addresses(m.toRecipients),
+        ccAddresses: addresses(m.ccRecipients),
+        receivedAt: Date.parse(m.receivedDateTime ?? '') || 0,
+        isRead: !!m.isRead,
+        isDraft: !!m.isDraft,
+        isStarred: m.flag?.flagStatus === 'flagged',
+        hasAttachments: !!m.hasAttachments,
+        internetMessageId: m.internetMessageId,
+        labels: [
+          ...(folders.find((f) => f.folderId === m.parentFolderId)?.labels ?? []),
+          ...(m.categories ?? []),
+        ],
+      }),
+    );
+  return { hits, nextCursor: response['@odata.nextLink'] };
 }
-
-// ─── Public action: search via provider, import missing matches ────────────
 
 export const searchViaProvider = action({
   args: {
     query: v.string(),
-    accountId: v.optional(v.id("mailAccounts")),
+    accountId: v.optional(v.id('mailAccounts')),
     maxResults: v.optional(v.number()),
+    cursors: v.optional(v.array(v.object({ accountId: v.id('mailAccounts'), cursor: v.string() }))),
   },
   returns: v.object({
     imported: v.number(),
     matched: v.number(),
-    emailIds: v.array(v.id("emails")),
+    emailIds: v.array(v.id('emails')),
+    nextCursors: v.array(v.object({ accountId: v.id('mailAccounts'), cursor: v.string() })),
+    failedAccounts: v.number(),
+    searchedAccounts: v.number(),
   }),
-  handler: async (ctx, { query, accountId, maxResults }) => {
+  handler: async (ctx, args) => {
     const userId = await requireUser(ctx);
-    if (!query.trim()) return { imported: 0, matched: 0, emailIds: [] };
-
-    const limit = Math.min(maxResults ?? DEFAULT_MAX_RESULTS, MAX_RESULTS_CAP);
-
-    const accounts: Array<{ _id: Id<"mailAccounts">; provider: string }> =
-      await ctx.runQuery(internal.searchProviderData._listSearchableAccounts, {
-        userId,
-        accountId,
-      });
-    if (accounts.length === 0) {
-      return { imported: 0, matched: 0, emailIds: [] };
-    }
-
-    const allEmailIds: Id<"emails">[] = [];
-    let importedCount = 0;
-    let matchedCount = 0;
-
-    for (const account of accounts) {
-      let hits: Awaited<ReturnType<typeof searchGmail>> = [];
-      try {
-        if (account.provider === "GMAIL") {
-          hits = await searchGmail(ctx, account._id, query, limit);
-        } else if (account.provider === "MICROSOFT") {
-          hits = await searchMicrosoft(ctx, account._id, query, limit);
-        }
-      } catch (err) {
-        console.warn(
-          `[searchProvider] provider search failed for ${account._id}:`,
-          err,
-        );
-        continue;
-      }
-      matchedCount += hits.length;
-      if (hits.length === 0) continue;
-
-      const result: { imported: number; emailIds: Id<"emails">[] } =
-        await ctx.runMutation(internal.searchProviderData._upsertSearchHits, {
-          accountId: account._id,
-          hits,
-        });
-      importedCount += result.imported;
-      allEmailIds.push(...result.emailIds);
-    }
-
-    return {
-      imported: importedCount,
-      matched: matchedCount,
-      emailIds: allEmailIds,
+    const empty = {
+      imported: 0,
+      matched: 0,
+      emailIds: [] as Id<'emails'>[],
+      nextCursors: [] as Array<{ accountId: Id<'mailAccounts'>; cursor: string }>,
+      failedAccounts: 0,
+      searchedAccounts: 0,
     };
+    if (!args.query.trim()) return empty;
+    if (args.query.length > 2000) throw new Error('Search is too long');
+    const limit = Math.max(1, Math.min(Math.floor(args.maxResults ?? 40), 50));
+    const accounts: Array<{
+      _id: Id<'mailAccounts'>;
+      provider: string;
+      folderMap: Array<{ folderId: string; labels: string[] }>;
+    }> = await ctx.runQuery(internal.searchProviderData._listSearchableAccounts, {
+      userId,
+      accountId: args.accountId,
+    });
+    const selected = args.cursors
+      ? accounts.filter((a) => args.cursors!.some((c) => c.accountId === a._id))
+      : accounts;
+    const perAccountLimit = Math.min(
+      limit,
+      Math.max(1, Math.floor(100 / Math.max(1, selected.length))),
+    );
+    const pages = await Promise.all(
+      selected.map(async (account) => {
+        const cursor = args.cursors?.find((c) => c.accountId === account._id)?.cursor;
+        try {
+          const page =
+            account.provider === 'GMAIL'
+              ? await searchGmail(ctx, account._id, args.query, perAccountLimit, cursor)
+              : account.provider === 'MICROSOFT'
+                ? await searchMicrosoft(
+                    ctx,
+                    account._id,
+                    args.query,
+                    perAccountLimit,
+                    cursor,
+                    account.folderMap,
+                  )
+                : null;
+          if (!page) return { ...empty, failedAccounts: 1 };
+          const saved: { imported: number; emailIds: Id<'emails'>[] } = await ctx.runMutation(
+            internal.searchProviderData._upsertSearchHits,
+            { accountId: account._id, hits: page.hits },
+          );
+          return {
+            ...saved,
+            matched: page.hits.length,
+            failedAccounts: page.incomplete ? 1 : 0,
+            searchedAccounts: 1,
+            nextCursors: page.nextCursor
+              ? [{ accountId: account._id, cursor: page.nextCursor }]
+              : [],
+          };
+        } catch (error) {
+          console.warn(
+            'Mail provider search unavailable',
+            error instanceof Error ? error.message : 'Unknown error',
+          );
+          return { ...empty, failedAccounts: 1 };
+        }
+      }),
+    );
+    return pages.reduce(
+      (sum, page) => ({
+        imported: sum.imported + page.imported,
+        matched: sum.matched + page.matched,
+        emailIds: [...sum.emailIds, ...page.emailIds],
+        nextCursors: [...sum.nextCursors, ...page.nextCursors],
+        failedAccounts: sum.failedAccounts + page.failedAccounts,
+        searchedAccounts: sum.searchedAccounts + page.searchedAccounts,
+      }),
+      empty,
+    );
   },
 });
-
-// Internal helpers (queries + mutations) live in convex/searchProviderData.ts
-// because Convex disallows queries/mutations inside "use node" modules.

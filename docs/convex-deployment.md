@@ -3,10 +3,14 @@
 Production Convex deployment:
 
 ```txt
-slug: careful-warbler-543
-CONVEX_URL=https://careful-warbler-543.convex.cloud
-CONVEX_SITE_URL=https://careful-warbler-543.convex.site
+slug: hallowed-shepherd-316
+CONVEX_URL=https://hallowed-shepherd-316.convex.cloud
+CONVEX_SITE_URL=https://hallowed-shepherd-316.convex.site
 ```
+
+Verified on 2026-09-11 against the live Vercel bundle, the local deployment key's
+target, and a read-only query of the Choquer workspace. Older instructions named
+`careful-warbler-543`; that is not the backend the current app uses.
 
 ## Deploying backend changes
 
@@ -15,19 +19,18 @@ Convex deploys require `CONVEX_DEPLOY_KEY`. Do not rely on the logged-in Convex 
 Use an ignored local env file or export the key for the current shell:
 
 ```bash
-# Preferred: keep the real key only in ignored .env.local or /tmp/convex-prod.env.
+# The ignored .env.local contains the production deploy key.
 set -a
-source /tmp/convex-prod.env
+source .env.local
 set +a
 
-npx convex deploy --typecheck disable
+npx convex deploy --typecheck enable
 ```
 
-If `/tmp/convex-prod.env` is missing, search previous pi sessions for `CONVEX_DEPLOY_KEY` or the deployment slug `careful-warbler-543`. A previously provided key used the Convex deploy-key format:
-
-```txt
-CONVEX_DEPLOY_KEY=dev:careful-warbler-543|...
-```
+Before deploying, verify the key targets `hallowed-shepherd-316` without printing
+the secret. `CONVEX_DEPLOY_KEY` takes precedence over `CONVEX_DEPLOYMENT` and
+`--prod`; the local development URL in the same file is not the production target.
+If the key is missing, obtain a key for the verified production deployment.
 
 Do **not** commit the full deploy key to the repository. `.env.local` is gitignored and is safe for local machine use only.
 

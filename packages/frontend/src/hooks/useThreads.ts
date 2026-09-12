@@ -39,6 +39,7 @@ function isLikelyConvexId(value: unknown): value is string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 interface ThreadListParams {
+  enabled?: boolean;
   accountId?: Id<'mailAccounts'>;
   folder?: string;
   isArchived?: boolean;
@@ -110,7 +111,7 @@ export function useThreads(params: ThreadListParams = {}) {
     // the inbox on screen (it reads as "nothing is happening"), and closing a
     // search must NOT keep the six filtered results on screen — fall through
     // to the cached inbox snapshot instead so the close is instant.
-    const crossingSearch = prevWasSearch.current !== isSearchView;
+    const crossingSearch = isSearchView || prevWasSearch.current !== isSearchView;
     prevWasSearch.current = isSearchView;
     setStalePages((prev) => (crossingSearch ? null : pages.length > 0 ? pages : prev));
     setPage(1);
@@ -154,7 +155,7 @@ export function useThreads(params: ThreadListParams = {}) {
     ],
   );
 
-  const result = useQuery(api.threads.list, queryArgs) as
+  const result = useQuery(api.threads.list, params.enabled === false ? "skip" : queryArgs) as
     | ThreadListResponse
     | undefined;
 
@@ -175,13 +176,14 @@ export function useThreads(params: ThreadListParams = {}) {
 
   // Visible pages: prefer live; otherwise the most-recent previous view's
   // pages (so filter switches feel instant); otherwise the cached snapshot.
-  const livePages = pages.length > 0 ? pages : result ? [result] : [];
+  const keyChanged = lastParamsKey.current !== paramsKey;
+  const livePages = !keyChanged && pages.length > 0 ? pages : result ? [result] : [];
   const visiblePages =
     livePages.length > 0
       ? livePages
-      : stalePages && stalePages.length > 0
+      : !isSearchView && stalePages && stalePages.length > 0
         ? stalePages
-        : cachedPage1
+        : !keyChanged && cachedPage1
           ? [cachedPage1]
           : [];
   const latestPage = result ?? livePages.at(-1) ?? cachedPage1 ?? undefined;

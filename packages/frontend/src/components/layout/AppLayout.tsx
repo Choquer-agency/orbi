@@ -82,6 +82,15 @@ const mobileSlideTransition = { type: 'spring' as const, stiffness: 500, damping
 const reducedMotionTransition = { duration: 0.15 };
 
 export function AppLayout() {
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const threadId = url.searchParams.get('threadId');
+    if (threadId && /^[a-z0-9]{20,}$/i.test(threadId)) {
+      useUiStore.getState().setSelectedThread(threadId);
+      url.searchParams.delete('threadId');
+      window.history.replaceState(null, '', url);
+    }
+  }, []);
   // Warm the in-memory contact directory so To/Cc autocomplete is instant
   // from the first keystroke (background-refreshes itself).
   useEffect(() => {

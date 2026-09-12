@@ -1,3 +1,4 @@
+import { parseSearchOperators, type ParsedSearch, matchesSearchText } from "../packages/shared/src/search";
 import { v } from "convex/values";
 import { mutation, query, internalMutation } from "./_generated/server";
 import { internal } from "./_generated/api";
@@ -59,68 +60,6 @@ function ciIncludes(haystack: string | undefined | null, needle: string): boolea
 // ─────────────────────────────────────────────────────────────────────────────
 // Search-operator parsing (ported from Fastify route)
 // ─────────────────────────────────────────────────────────────────────────────
-
-interface ParsedSearch {
-  text: string;
-  from?: string;
-  to?: string;
-  cc?: string;
-  before?: number;
-  after?: number;
-  hasAttachment?: boolean;
-  isUnread?: boolean;
-  isStarred?: boolean;
-  isRead?: boolean;
-  label?: string;
-}
-
-const OPERATOR_RE = /(?:^|\s)(from|to|cc|before|after|has|is|label):(\S+)/gi;
-
-function parseSearchOperators(raw: string): ParsedSearch {
-  const result: ParsedSearch = { text: "" };
-  let remaining = raw;
-
-  for (const match of raw.matchAll(OPERATOR_RE)) {
-    const op = match[1].toLowerCase();
-    const val = match[2];
-    switch (op) {
-      case "from":
-        result.from = val;
-        break;
-      case "to":
-        result.to = val;
-        break;
-      case "cc":
-        result.cc = val;
-        break;
-      case "before": {
-        const d = new Date(val);
-        if (!isNaN(d.getTime())) result.before = d.getTime();
-        break;
-      }
-      case "after": {
-        const d = new Date(val);
-        if (!isNaN(d.getTime())) result.after = d.getTime();
-        break;
-      }
-      case "has":
-        if (val.toLowerCase() === "attachment") result.hasAttachment = true;
-        break;
-      case "is":
-        if (val.toLowerCase() === "unread") result.isUnread = true;
-        else if (val.toLowerCase() === "starred") result.isStarred = true;
-        else if (val.toLowerCase() === "read") result.isRead = true;
-        break;
-      case "label":
-        result.label = val;
-        break;
-    }
-    remaining = remaining.replace(match[0], " ");
-  }
-
-  result.text = remaining.replace(/\s+/g, " ").trim();
-  return result;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // list — main thread list (folder + filters + lightweight search)
@@ -423,6 +362,7 @@ export const list = query({
     // Search path: query the search indexes on threads.subject AND
     // emails.bodyText, then load the matching thread rows.
     let candidates: Doc<"threads">[];
+    const senderMatches = new Map<Id<"threads">, Doc<"emails">[]>();
     if (useSearchIndex) {
       // Body search runs against `emailSearchText` — lean capped-text rows
       // (≤40k chars) that exist for EVERY email regardless of the emailBodies
@@ -498,7 +438,7 @@ export const list = query({
       // emails.by_account_fromAddress path. Operator-free queries only —
       // "from:x" already has its own filter.
       const hasOperators = !!(
-        parsed && (parsed.from || parsed.to || parsed.cc || parsed.label ||
+        parsed && (parsed.from || parsed.to || parsed.cc || parsed.with || parsed.subject || parsed.label ||
           parsed.before !== undefined || parsed.after !== undefined ||
           parsed.hasAttachment || parsed.isUnread || parsed.isRead ||
           parsed.isStarred)
@@ -561,6 +501,20 @@ export const list = query({
         Array.from(threadIdSet).map((id) => ctx.db.get(id)),
       );
       candidates = merged.filter((t): t is Doc<"threads"> => !!t);
+    } else if (parsed?.from || fromEmail) {
+      // Sender filters must reach older mail, without scanning recent threads
+      // or assuming the sender appears among the last ten replies.
+      const sender = parsed?.from || fromEmail!;
+      const hits = await Promise.all(accountIds.map(async (aid) => {
+        const [names, addresses] = await Promise.all([
+          ctx.db.query("emails").withSearchIndex("search_fromName", q => q.search("fromName", sender).eq("accountId", aid)).take(200),
+          ctx.db.query("emails").withSearchIndex("search_fromAddress", q => q.search("fromAddress", sender).eq("accountId", aid)).take(200),
+        ]);
+        return [...names, ...addresses].filter(e => matchesSearchText(`${e.fromName ?? ""} ${e.fromAddress}`, sender));
+      }));
+      for (const e of hits.flat()) senderMatches.set(e.threadId, [...(senderMatches.get(e.threadId) ?? []), e]);
+      const ids = [...senderMatches.keys()];
+      candidates = (await Promise.all(ids.map(id => ctx.db.get(id)))).filter((t): t is Doc<"threads"> => !!t);
     } else {
       // Pull threads from each account index (fan-out then merge — Convex doesn't support `IN`).
       const isFilterSearchMode = !!(fromEmail || args.category);
@@ -708,7 +662,7 @@ export const list = query({
     // satisfied by the search index above — we deliberately skip the email
     // load there to avoid re-reading the bodies we just searched.
     const hasOperatorFilters = !!(
-      parsed && (parsed.from || parsed.to ||
+      parsed && (parsed.from || parsed.to || parsed.cc || parsed.with || parsed.subject ||
         parsed.before !== undefined || parsed.after !== undefined ||
         parsed.hasAttachment)
     );
@@ -718,7 +672,7 @@ export const list = query({
     // run for a from: filter, re-running reactively on every sync tick).
     const needsEmails = isFromFastPath || hasOperatorFilters;
 
-    if (folder === "drafts") {
+    if (folder === "drafts" && !searchTerm && !fromEmail) {
       const draftArrays = await Promise.all(
         accountIds.map((aid) =>
           ctx.db
@@ -743,18 +697,22 @@ export const list = query({
             .withIndex("by_thread_receivedAt", (q) => q.eq("threadId", t._id))
             .order("desc")
             .take(10);
-          return { thread: t, emails };
+          return { thread: t, emails: [...emails, ...(senderMatches.get(t._id) ?? [])] };
         }),
       );
 
       filtered = enriched
         .filter(({ thread, emails }) => {
           if (isFromFastPath) {
-            return emails.some((e) => e.fromAddress === fromEmail);
+            return emails.some((e) => e.fromAddress.toLowerCase() === fromEmail?.toLowerCase());
           }
           if (parsed) {
             // Email-level operator filters
             const matchesEmailFilters = emails.some((e) => {
+              if (parsed!.with && !matchesSearchText(
+                [e.fromAddress, e.fromName, ...normalizeAddressList(e.toAddresses).flatMap(a => [a.email, a.name]), ...normalizeAddressList(e.ccAddresses).flatMap(a => [a.email, a.name])].filter(Boolean).join(" "), parsed!.with
+              )) return false;
+              if (parsed!.subject && !matchesSearchText(e.subject, parsed!.subject)) return false;
               if (parsed!.from) {
                 const ok =
                   ciIncludes(e.fromAddress, parsed!.from) ||
@@ -782,6 +740,8 @@ export const list = query({
               !!parsed.from ||
               !!parsed.to ||
               !!parsed.cc ||
+              !!parsed.with ||
+              !!parsed.subject ||
               parsed.before !== undefined ||
               parsed.after !== undefined ||
               !!parsed.hasAttachment;

@@ -422,6 +422,7 @@ export default defineSchema({
     sendingStartedAt: v.optional(v.number()),
   })
     .index("by_providerMessageId", ["providerMessageId"])
+    .index("by_accountId_and_providerMessageId", ["accountId", "providerMessageId"])
     .index("by_thread_receivedAt", ["threadId", "receivedAt"])
     .index("by_account_receivedAt", ["accountId", "receivedAt"])
     // Lets drafts.count / drafts.list narrow to draft rows without dragging in
@@ -430,7 +431,9 @@ export default defineSchema({
     .index("by_account_sendStatus_receivedAt", ["accountId", "sendStatus", "receivedAt"])
     .index("by_sendStatus_undoDeadline", ["sendStatus", "undoDeadlineAt"])
     .index("by_account_fromAddress", ["accountId", "fromAddress"])
-    .index("by_account_fromName", ["accountId", "fromName"]),
+    .index("by_account_fromName", ["accountId", "fromName"])
+    .searchIndex("search_fromName", { searchField: "fromName", filterFields: ["accountId"] })
+    .searchIndex("search_fromAddress", { searchField: "fromAddress", filterFields: ["accountId"] }),
     // NOTE: the old `search_body` search index on this table is gone. It
     // indexed `bodyText`, which new ingest leaves undefined (bodies live in
     // `emailBodies`), so it silently only covered pre-migration rows. Body
@@ -495,6 +498,28 @@ export default defineSchema({
     .index("by_email", ["emailId"])
     .index("by_address_receivedAt", ["address", "receivedAt"])
     .index("by_domain_receivedAt", ["domain", "receivedAt"]),
+
+  clientDirectorySync: defineTable({
+    workspaceId: v.id("workspaces"), version: v.string(), fingerprint: v.string(),
+    syncedAt: v.number(), rebuilding: v.boolean(), actorEmail: v.string(), error: v.optional(v.string()),
+  }).index("by_workspaceId", ["workspaceId"]),
+  erpClients: defineTable({
+    workspaceId: v.id("workspaces"), version: v.string(), erpId: v.string(), name: v.string(),
+    specialistId: v.optional(v.string()),
+  }).index("by_workspaceId_and_version", ["workspaceId", "version"])
+    .index("by_workspaceId_and_version_and_erpId", ["workspaceId", "version", "erpId"]),
+  erpClientMatches: defineTable({
+    workspaceId: v.id("workspaces"), version: v.string(), key: v.string(), clientId: v.string(),
+  }).index("by_workspaceId_and_version_and_key", ["workspaceId", "version", "key"]),
+  clientReplyQueue: defineTable({
+    workspaceId: v.id("workspaces"), userId: v.id("users"), accountId: v.id("mailAccounts"), threadId: v.id("threads"),
+    revision: v.number(), pending: v.boolean(), dismissedThrough: v.optional(v.number()),
+    waitingAt: v.optional(v.number()), latestAt: v.optional(v.number()), latestEmailId: v.optional(v.id("emails")),
+    clientId: v.optional(v.string()), clientName: v.optional(v.string()), sender: v.optional(v.string()), senderName: v.optional(v.string()),
+  }).index("by_threadId", ["threadId"])
+    .index("by_userId_and_waitingAt", ["userId", "waitingAt"])
+    .index("by_userId_and_accountId_and_waitingAt", ["userId", "accountId", "waitingAt"])
+    .index("by_workspaceId_and_pending", ["workspaceId", "pending"]),
 
   // Cursor state for the participant walker (key = "participantCursor").
   erpState: defineTable({

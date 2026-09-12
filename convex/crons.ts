@@ -2,6 +2,7 @@ import { cronJobs } from "convex/server";
 import { internal } from "./_generated/api";
 
 const crons = cronJobs();
+crons.interval("refresh-erp-clients", { minutes: 15 }, internal.clientWorkflow.refreshDirectories, {});
 
 // ── Email sync ──────────────────────────────────────────────────────────────
 // Both providers do an incremental delta sync every minute, for fast mail.

@@ -1,3 +1,4 @@
+import { scheduleClientRefresh } from "./clientQueue";
 // ─────────────────────────────────────────────────────────────────────────────
 // inboxStamp.ts — the "sticker" (2026-07-10 read-cost fix).
 //
@@ -57,6 +58,9 @@ export async function patchThread(
   await ctx.db.patch(threadId, patch);
   const t = await ctx.db.get(threadId);
   if (!t) return;
+  if (patch.isTrashed !== undefined || patch.isSpam !== undefined || patch.labels !== undefined) {
+    await scheduleClientRefresh(ctx, threadId);
+  }
   const stamp = computeInboxStamp(t);
   if (
     (t.inboxAt ?? undefined) !== stamp.inboxAt ||

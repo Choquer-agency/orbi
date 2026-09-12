@@ -1,8 +1,11 @@
+import { ClientsList } from "../clients/ClientsList";
 import { useState, useMemo, useRef, useCallback, useEffect, type UIEvent } from 'react';
 import type { Id } from '../../../../../convex/_generated/dataModel';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Search, Check, Plus, X, Archive, Star, Trash2, Loader2, Mail, MailOpen, MailSearch, User, Inbox, Calendar, Paperclip, Tag, RefreshCw } from 'lucide-react';
 import { useThreads, useUpdateThread, usePrefetchAdjacentThreads, useIdleThreadPrefetch, useThreadHoverPrefetch } from '../../hooks/useThreads';
+import { useMailboxSearch } from '../../hooks/useMailboxSearch';
+import { quoteSearchValue, parseSearchOperators } from '../../../../../packages/shared/src/search';
 import { useAccounts } from '../../hooks/useAccounts';
 import { useInstantContactSearch } from '../../lib/contactDirectory';
 import { useAnyHistoricalSyncInProgress } from '../../hooks/useHistoricalSync';
@@ -70,12 +73,12 @@ export function ThreadList() {
     useUiStore();
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [searchFrom, setSearchFrom] = useState<string | undefined>(undefined);
-  const [searchPills, setSearchPills] = useState<{ operator: string; value: string }[]>([]);
+  const [searchPills, setSearchPills] = useState<{ operator: string; value: string; display?: string }[]>([]);
   const [activeOperator, setActiveOperator] = useState<string | null>(null); // operator being filled in (e.g. "from:")
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
   const isMobile = useIsMobile();
   const selectedSuggestionRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -86,6 +89,7 @@ export function ThreadList() {
   // shape this dropdown has always rendered.
   const { data: autocompleteData } = useInstantContactSearch(searchQuery);
   const suggestions = (autocompleteData?.data ?? []).map((g: any) => ({
+    id: g.id,
     email: g.primaryEmail,
     name: g.displayName,
     company: null,
@@ -93,7 +97,7 @@ export function ThreadList() {
   })).filter((c: any) => !!c.email);
 
   // Suggestions are visible as long as there's input, matches exist, and user hasn't dismissed
-  const showSuggestions = searchQuery.length >= 1 && suggestions.length > 0 && !suggestionsDismissed;
+  const showSuggestions = !teamViewUserId && (!activeOperator || ['from:', 'to:', 'cc:', 'with:'].includes(activeOperator)) && searchQuery.length >= 1 && suggestions.length > 0 && !suggestionsDismissed;
 
   // Reset suggestion index when results change — start at -1 (nothing highlighted)
   useEffect(() => {
@@ -107,15 +111,7 @@ export function ThreadList() {
       return;
     }
     setSuggestionsDismissed(false);
-    setSearchFrom(undefined);
   }, [searchQuery]);
-
-  // Clear searchFrom when from: pill is removed
-  useEffect(() => {
-    if (searchFrom && !searchPills.some((p) => p.operator === 'from:')) {
-      setSearchFrom(undefined);
-    }
-  }, [searchPills, searchFrom]);
 
   // Close suggestions on outside click
   useEffect(() => {
@@ -133,10 +129,10 @@ export function ThreadList() {
 
   // Build full search string from pills + free text
   const buildSearchString = useCallback(() => {
-    const parts = searchPills.map((p) => `${p.operator}${p.value}`);
-    if (searchQuery.trim()) parts.push(searchQuery.trim());
+    const parts = searchPills.map((p) => p.operator ? `${p.operator}${quoteSearchValue(p.value)}` : p.value);
+    if (searchQuery.trim()) parts.push(activeOperator ? `${activeOperator}${quoteSearchValue(searchQuery.trim())}` : searchQuery.trim());
     return parts.join(' ');
-  }, [searchPills, searchQuery]);
+  }, [searchPills, searchQuery, activeOperator]);
 
   // Debounce deep (server) search by 250ms — people suggestions above are
   // instant, so this delay only gates the full-mailbox query. A lone
@@ -156,7 +152,6 @@ export function ThreadList() {
     if (!searchOpen) {
       setSearchQuery('');
       setDebouncedSearch('');
-      setSearchFrom(undefined);
       setSearchPills([]);
       setActiveOperator(null);
     }
@@ -166,7 +161,6 @@ export function ThreadList() {
   useEffect(() => {
     setSearchQuery('');
     setDebouncedSearch('');
-    setSearchFrom(undefined);
     setSearchPills([]);
     setActiveOperator(null);
   }, [selectedFolder]);
@@ -174,44 +168,43 @@ export function ThreadList() {
   // Pick up contact search from contacts page navigation
   useEffect(() => {
     if (contactSearchEmail) {
-      setSearchQuery(contactSearchEmail);
-      setDebouncedSearch(contactSearchEmail);
-      setSearchFrom(contactSearchEmail);
+      setSearchQuery('');
+      setSearchPills([{ operator: 'with:', value: contactSearchEmail }]);
+      setDebouncedSearch(`with:${quoteSearchValue(contactSearchEmail)}`);
       setSearchOpen(true);
       setSuggestionsDismissed(true);
       setContactSearchEmail(null);
     }
   }, [contactSearchEmail, setContactSearchEmail]);
 
-  const isSearching = debouncedSearch.length > 0 || !!searchFrom || searchPills.length > 0;
+  const isSearching = debouncedSearch.length > 0 || searchPills.length > 0 || searchQuery.trim().length >= 2;
+  const isDebouncingSearch = isSearching && buildSearchString() !== debouncedSearch;
 
-  const selectSuggestion = (type: 'name' | 'email', contact: any) => {
-    const displayValue = type === 'name' ? (contact.name || contact.email) : contact.email;
+  const selectSuggestion = (contact: typeof suggestions[number]) => {
     selectedSuggestionRef.current = true;
-    const operator = activeOperator && ['from:', 'to:', 'cc:'].includes(activeOperator)
-      ? activeOperator
-      : 'from:';
-    setSearchPills((prev) => {
-      const without = prev.filter((p) => p.operator !== operator);
-      return [...without, { operator, value: displayValue }];
-    });
+    const operator = activeOperator && ['from:', 'to:', 'cc:', 'with:'].includes(activeOperator) ? activeOperator : 'with:';
+    setSearchPills(prev => [...prev.filter(p => p.operator !== operator), { operator, value: contact.email, display: contact.name || contact.email }]);
     setSearchQuery('');
-    setSearchFrom(operator === 'from:' ? contact.email : undefined);
     setActiveOperator(null);
     setSuggestionsDismissed(true);
+    searchInputRef.current?.focus();
   };
 
-  const { data, isLoading, isError, refetch, fetchNextPage, hasNextPage, isFetchingNextPage } = useThreads({
-    // Team Hub: account filters are the viewer's own — never applied while
-    // browsing a teammate's mailbox.
-    accountId: teamViewUserId
-      ? undefined
-      : ((selectedAccountId ?? undefined) as Id<'mailAccounts'> | undefined),
+  const clientsView = useUiStore(s => s.clientsView);
+  const setClientsView = useUiStore(s => s.setClientsView);
+  const showingClients = clientsView && !teamViewUserId && selectedFolder === 'inbox' && !isSearching;
+
+  const providerSearch = useMailboxSearch(debouncedSearch, (selectedAccountId ?? undefined) as Id<'mailAccounts'> | undefined, !teamViewUserId);
+  const localSearch = useThreads({
+    enabled: !showingClients && (!isSearching || !!teamViewUserId || providerSearch.partial),
+    accountId: teamViewUserId ? undefined : ((selectedAccountId ?? undefined) as Id<'mailAccounts'> | undefined),
     folder: isSearching ? undefined : (selectedFolder !== 'dashboard' ? selectedFolder : 'inbox'),
-    search: searchFrom ? undefined : (debouncedSearch || undefined),
-    from: searchFrom,
+    search: debouncedSearch || undefined,
     viewAsUserId: (teamViewUserId ?? undefined) as Id<'users'> | undefined,
   });
+  const searchResults = isSearching && !teamViewUserId ? providerSearch : localSearch;
+  const { data, isError, refetch, fetchNextPage, hasNextPage, isFetchingNextPage } = searchResults;
+  const isLoading = searchResults.isLoading || isDebouncingSearch;
   const { data: accountsData } = useAccounts();
   const updateThread = useUpdateThread();
   const prefetchThread = useThreadHoverPrefetch();
@@ -259,23 +252,29 @@ export function ThreadList() {
     () => data?.pages.flatMap((page) => page.data) ?? [],
     [data],
   );
+  if (isSearching && !teamViewUserId && providerSearch.partial) {
+    const merged = new Map(threads.map((t: any) => [t.id, t]));
+    for (const page of localSearch.data?.pages ?? []) for (const thread of page.data) if (!merged.has(thread.id)) merged.set(thread.id, thread);
+    threads = [...merged.values()].sort((a, b) => (b.lastReceivedAt ?? b.lastMessageAt) - (a.lastReceivedAt ?? a.lastMessageAt));
+  }
   const totalCount = data?.pages[0]?.total ?? 0;
 
   // Client-side filtering + date grouping, memoized — these rebuilt on every
   // render (each keystroke in the search box recomputed the whole grouped
   // layout for hundreds of threads).
   const filteredThreads = useMemo(() => {
+    if (isSearching) return threads;
     if (threadListFilter === 'unread') return threads.filter((t: any) => !t.isRead);
     if (threadListFilter === 'starred') return threads.filter((t: any) => t.isStarred);
     return threads;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [threads, threadListFilter]);
+  }, [threads, threadListFilter, isSearching]);
   threads = filteredThreads;
 
   const dateGroups = useMemo(
     () =>
       groupByDate(
-        selectedFolder === 'sent'
+        !isSearching && selectedFolder === 'sent'
           ? threads.map((t: any) => ({
               ...t,
               // Sent groups/sorts by when YOU last sent.
@@ -283,7 +282,7 @@ export function ThreadList() {
             }))
           : threads,
       ),
-    [threads, selectedFolder],
+    [threads, selectedFolder, isSearching],
   );
   const allThreadIds = useMemo(() => {
     const ids: string[] = [];
@@ -299,8 +298,8 @@ export function ThreadList() {
   // can advance selection to the next visible thread.
   const setVisibleThreadIds = useUiStore((s) => s.setVisibleThreadIds);
   useEffect(() => {
-    setVisibleThreadIds(allThreadIds);
-  }, [allThreadIds, setVisibleThreadIds]);
+    if (!showingClients) setVisibleThreadIds(allThreadIds);
+  }, [allThreadIds, setVisibleThreadIds, showingClients]);
 
   // Spark-style adjacency prefetch: as soon as a thread is selected, warm
   // the Convex cache for the previous and next thread so j/k navigation
@@ -394,7 +393,7 @@ export function ThreadList() {
     setDesktopScrollTop(0);
     const el = desktopViewportRef.current;
     if (el) el.scrollTop = 0;
-  }, [selectedFolder, selectedAccountId, threadListFilter, searchFrom, debouncedSearch]);
+  }, [selectedFolder, selectedAccountId, threadListFilter, debouncedSearch]);
 
   const desktopRowPositions = useMemo(() => {
     let start = 0;
@@ -603,6 +602,7 @@ export function ThreadList() {
               Compose
             </button>
             <button
+              aria-label="Open search"
               onClick={() => { setSearchOpen(true); }}
               className={cn(
                 'flex h-7 w-7 items-center justify-center rounded-lg transition-colors',
@@ -633,7 +633,7 @@ export function ThreadList() {
                 initial={{ y: -8, opacity: 0 }}
                 animate={{ y: 0, opacity: 1 }}
                 transition={{ delay: 0.05 }}
-                className="relative flex items-center gap-1.5 rounded-lg border border-border bg-surface/50 px-2.5 backdrop-blur-sm focus-within:border-primary focus-within:bg-white focus-within:ring-1 focus-within:ring-primary"
+                className="relative flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-surface/50 px-2.5 backdrop-blur-sm focus-within:border-primary focus-within:bg-white focus-within:ring-1 focus-within:ring-primary"
               >
                 <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
                 {/* Committed operator pills */}
@@ -643,18 +643,14 @@ export function ThreadList() {
                     className="flex shrink-0 items-center gap-0.5 rounded-md bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium text-primary"
                   >
                     <span className="text-primary/60">{pill.operator}</span>
-                    {pill.value}
+                    <button type="button" title={pill.value} onClick={() => { setSearchPills(prev => prev.filter((_, j) => j !== i)); setActiveOperator(pill.operator); setSearchQuery(pill.value); searchInputRef.current?.focus(); }} className="max-w-[180px] truncate">{pill.display || pill.value}</button>
                     <button
                       type="button"
                       onClick={() => {
                         setSearchPills((prev) => prev.filter((_, j) => j !== i));
-                        // The from: pill carries a hidden person-filter —
-                        // removing the pill must remove the filter too, or
-                        // the list stays filtered with nothing on screen
-                        // saying so (Bryce 2026-07-28).
-                        if (pill.operator === 'from:') setSearchFrom(undefined);
                         searchInputRef.current?.focus();
                       }}
+                      aria-label={`Remove ${pill.operator} ${pill.display || pill.value}`}
                       className="ml-0.5 rounded-full p-0.5 hover:bg-primary/20"
                     >
                       <X className="h-2.5 w-2.5" />
@@ -674,32 +670,14 @@ export function ThreadList() {
                   onChange={(e) => {
                     const val = e.target.value;
                     if (activeOperator) {
-                      // Typing inside an active operator — space commits the value
-                      if (val.endsWith(' ') && val.trim().length > 0) {
-                        const value = val.trim();
-                        setSearchPills((prev) => [
-                          ...prev.filter((p) => p.operator !== activeOperator),
-                          { operator: activeOperator, value },
-                        ]);
-                        setSearchQuery('');
-                        setActiveOperator(null);
-                        return;
-                      }
                       setSearchQuery(val);
                       return;
                     }
                     // Detect if user manually typed an operator prefix
-                    const operatorMatch = val.match(/^(from:|to:|cc:|before:|after:|has:|is:|label:)(\S*)\s?$/);
+                    const operatorMatch = val.match(/^(from:|to:|cc:|with:|subject:|before:|after:|has:|is:|label:)(\S*)\s?$/);
                     if (operatorMatch) {
                       const [, op, value] = operatorMatch;
-                      if (value && val.endsWith(' ')) {
-                        // Full operator typed with value and space — commit as pill (replacing existing)
-                        setSearchPills((prev) => [
-                          ...prev.filter((p) => p.operator !== op),
-                          { operator: op, value },
-                        ]);
-                        setSearchQuery('');
-                      } else if (!value) {
+                      if (!value) {
                         // Just the operator prefix typed — activate it as a pill label
                         setActiveOperator(op);
                         setSearchQuery('');
@@ -712,11 +690,11 @@ export function ThreadList() {
                   }}
                   onKeyDown={(e) => {
                     // Enter commits active operator value
-                    if (e.key === 'Enter' && activeOperator && searchQuery.trim() && !showSuggestions) {
+                    if (e.key === 'Enter' && activeOperator && searchQuery.trim() && suggestionIndex < 0) {
                       e.preventDefault();
                       const value = searchQuery.trim();
                       setSearchPills((prev) => [
-                        ...prev.filter((p) => p.operator !== activeOperator),
+                        ...prev.filter((p) => p.operator !== activeOperator || (activeOperator === 'is:' && p.value !== value && (p.value === 'starred' || value === 'starred'))),
                         { operator: activeOperator, value },
                       ]);
                       setSearchQuery('');
@@ -743,7 +721,6 @@ export function ThreadList() {
                       } else {
                         setSearchQuery('');
                         setDebouncedSearch('');
-                        setSearchFrom(undefined);
                         setSearchPills([]);
                         setActiveOperator(null);
                         setSearchOpen(false);
@@ -751,7 +728,7 @@ export function ThreadList() {
                       return;
                     }
                     if (showSuggestions && suggestions.length > 0) {
-                      const totalItems = suggestions.reduce((acc: number, c: any) => acc + (c.name ? 2 : 1), 0);
+                      const totalItems = suggestions.length;
                       if (e.key === 'ArrowDown') {
                         e.preventDefault();
                         setSuggestionIndex((i) => Math.min(i + 1, totalItems - 1));
@@ -761,15 +738,8 @@ export function ThreadList() {
                       } else if (e.key === 'Enter') {
                         if (suggestionIndex >= 0) {
                           e.preventDefault();
-                          let idx = 0;
-                          for (const contact of suggestions) {
-                            if (contact.name) {
-                              if (idx === suggestionIndex) { selectSuggestion('name', contact); return; }
-                              idx++;
-                            }
-                            if (idx === suggestionIndex) { selectSuggestion('email', contact); return; }
-                            idx++;
-                          }
+                          selectSuggestion(suggestions[suggestionIndex]);
+                          return;
                         } else {
                           setSuggestionsDismissed(true);
                         }
@@ -786,13 +756,19 @@ export function ThreadList() {
                     setSuggestionsDismissed(true);
                   }}
                   autoFocus
-                  placeholder={activeOperator ? `Type ${activeOperator.replace(':', '')} value...` : searchPills.length > 0 ? '' : 'Search sender, subject, body…'}
+                  placeholder={activeOperator ? (['before:', 'after:'].includes(activeOperator) ? 'YYYY-MM-DD' : 'Name or value · Enter to apply') : searchPills.length > 0 ? 'Add words…' : 'Search people or anything in your mail…'}
+                  aria-label="Search mail"
+                  role="combobox"
+                  aria-expanded={showSuggestions}
+                  aria-controls={showSuggestions ? 'mail-search-people' : undefined}
+                  aria-activedescendant={showSuggestions && suggestionIndex >= 0 ? `mail-search-person-${suggestionIndex}` : undefined}
+                  autoComplete="off"
                   className={cn(
                     'flex-1 bg-transparent py-1.5 pr-2 text-xs text-text-primary outline-none placeholder:text-text-tertiary',
                     activeOperator ? 'min-w-[80px] rounded-l-none -ml-1 bg-primary/5 pl-1' : searchPills.length > 0 ? 'min-w-[20px]' : 'min-w-[80px]',
                   )}
                 />
-                {searchQuery && searchQuery !== debouncedSearch && !showSuggestions && (
+                {isSearching && (isDebouncingSearch || providerSearch.isFetching) && (
                   <Loader2 className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
                 )}
                 <motion.button
@@ -800,11 +776,11 @@ export function ThreadList() {
                   onClick={() => {
                     setSearchQuery('');
                     setDebouncedSearch('');
-                    setSearchFrom(undefined);
                     setSearchPills([]);
                     setActiveOperator(null);
                     setSearchOpen(false);
                   }}
+                  aria-label="Close search"
                   initial={{ scale: 0, rotate: -90 }}
                   animate={{ scale: 1, rotate: 0 }}
                   whileHover={{ scale: 1.1 }}
@@ -816,56 +792,23 @@ export function ThreadList() {
                 </motion.button>
               </motion.div>
 
-              {/* Search suggestions dropdown */}
-              {showSuggestions && suggestions.length > 0 ? (
-                <div
-                  ref={suggestionsRef}
-                  className="absolute left-3 right-3 top-full z-50 mt-1 rounded-lg border border-border bg-white py-1 shadow-lg"
-                >
-                  {(() => {
-                    let flatIdx = 0;
-                    return suggestions.map((contact: any) => {
-                      const rows: React.ReactNode[] = [];
-
-                      if (contact.name) {
-                        const idx = flatIdx++;
-                        rows.push(
-                          <button
-                            key={`${contact.id}-name`}
-                            onClick={() => selectSuggestion('name', contact)}
-                            className={cn(
-                              'flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors',
-                              idx === suggestionIndex ? 'bg-selected' : 'hover:bg-surface',
-                            )}
-                          >
-                            <User className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-                            <span className="truncate text-xs text-text-primary">{contact.name}</span>
-                          </button>,
-                        );
-                      }
-
-                      {
-                        const idx = flatIdx++;
-                        rows.push(
-                          <button
-                            key={`${contact.id}-email`}
-                            onClick={() => selectSuggestion('email', contact)}
-                            className={cn(
-                              'flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors',
-                              idx === suggestionIndex ? 'bg-selected' : 'hover:bg-surface',
-                            )}
-                          >
-                            <Mail className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-                            <span className="truncate text-xs text-text-secondary">{contact.email}</span>
-                          </button>,
-                        );
-                      }
-
-                      return rows;
-                    });
-                  })()}
+              {showSuggestions ? (
+                <div ref={suggestionsRef} id="mail-search-people" role="listbox" aria-label="People" className="absolute left-3 right-3 top-full z-50 mt-1 overflow-hidden rounded-xl border border-border bg-white py-1 shadow-lg">
+                  <div className="px-3 py-2 text-[10px] font-medium text-text-tertiary">{activeOperator === 'from:' ? 'Mail from' : activeOperator === 'to:' ? 'Mail sent to' : activeOperator === 'cc:' ? 'Copied on mail' : 'Mail involving'} a person</div>
+                  {suggestions.map((contact, index) => (
+                    <button key={contact.id} id={`mail-search-person-${index}`} role="option" aria-selected={index === suggestionIndex} onMouseDown={e => e.preventDefault()} onClick={() => selectSuggestion(contact)} className={cn('flex w-full items-center gap-2.5 px-3 py-2 text-left transition-colors', index === suggestionIndex ? 'bg-selected' : 'hover:bg-surface')}>
+                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary"><User className="h-3.5 w-3.5" /></span>
+                      <span className="min-w-0"><span className="block truncate text-xs font-medium text-text-primary">{contact.name || contact.email}</span><span className="block truncate text-[11px] text-text-tertiary">{contact.email}</span></span>
+                    </button>
+                  ))}
+                  <div className="border-t border-border px-3 py-2 text-[10px] text-text-tertiary">Press Enter to search your words · ↓ to choose a person</div>
                 </div>
-              ) : !searchQuery && !activeOperator && (
+              ) : null}
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <span className="text-[10px] text-text-tertiary">{activeOperator ? 'Spaces are welcome. Enter applies the filter.' : 'Names, recipients, subjects and message text'}</span>
+                <button type="button" onClick={() => setShowFilters(v => !v)} aria-expanded={showFilters} className="shrink-0 rounded-md px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/5">{showFilters ? 'Hide filters' : '+ Filters'}</button>
+              </div>
+              {showFilters && (
                 <div className="mt-2 rounded-xl border border-border/70 bg-white/70 p-2 shadow-sm">
                   <div className="mb-1.5 flex items-center justify-between px-0.5">
                     <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-text-tertiary">Refine search</span>
@@ -873,6 +816,7 @@ export function ThreadList() {
                   </div>
                   <div className="grid grid-cols-3 gap-1">
                     {[
+                      { label: 'with:', hint: 'any participant', icon: User, needsValue: true, tone: 'bg-blue-50 text-blue-700 hover:bg-blue-100' },
                       { label: 'from:', hint: 'sender', icon: User, needsValue: true, tone: 'bg-blue-50 text-blue-700 hover:bg-blue-100' },
                       { label: 'to:', hint: 'recipient', icon: Mail, needsValue: true, tone: 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100' },
                       { label: 'cc:', hint: 'copied', icon: MailSearch, needsValue: true, tone: 'bg-amber-50 text-amber-700 hover:bg-amber-100' },
@@ -884,7 +828,7 @@ export function ThreadList() {
                       { label: 'label:', hint: 'label', icon: Tag, needsValue: true, tone: 'bg-surface text-text-tertiary hover:bg-border hover:text-text-secondary' },
                     ].map((op) => {
                       const alreadyActive = searchPills.some((p) =>
-                        p.operator === (op.operator ?? op.label),
+                        p.operator === (op.operator ?? op.label) && (!op.value || p.value === op.value),
                       );
                       if (alreadyActive) return null;
                       return (
@@ -893,7 +837,9 @@ export function ThreadList() {
                           type="button"
                           onClick={() => {
                             if (op.needsValue) {
+                              if (searchQuery.trim()) setSearchPills(prev => [...prev, { operator: '', value: searchQuery.trim() }]);
                               setActiveOperator(op.label);
+                              setShowFilters(false);
                               setSearchQuery('');
                               searchInputRef.current?.focus();
                             } else {
@@ -922,7 +868,7 @@ export function ThreadList() {
       {/* Filter tabs — only render when there's actually something to show */}
       {!isMobile && isSearching && (
         <div className="flex items-center border-b border-border px-3 py-2">
-          <span className="text-xs text-text-tertiary">Searching all mail</span>
+          <span className="text-xs text-text-tertiary">{providerSearch.isFetching || isDebouncingSearch ? 'Searching your mailbox…' : `${threads.length}${hasNextPage ? '+' : ''} conversation${threads.length === 1 ? '' : 's'}`} · {selectedAccountId && !teamViewUserId ? 'This account' : 'All accounts'}</span>
         </div>
       )}
       {!isMobile && !isSearching && inboxFilterMode === 'standard' && (
@@ -944,10 +890,22 @@ export function ThreadList() {
         </div>
       )}
 
+      {isSearching && !teamViewUserId && (providerSearch.partial || providerSearch.capped) && (
+        <div role="status" className="flex items-center justify-between gap-2 border-b border-border bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+          <span>{providerSearch.capped ? 'Showing 2,000 matches. Add a person or date to narrow your search.' : 'Mailbox search is incomplete. Showing available matches.'}</span>
+          {providerSearch.partial && <button type="button" onClick={() => void providerSearch.refetch()} className="shrink-0 font-semibold underline">Retry</button>}
+        </div>
+      )}
+
+      {!isSearching && !teamViewUserId && selectedFolder === 'inbox' && <div className="flex items-center gap-2 border-b border-border px-4 py-2">
+        <button aria-pressed={!clientsView} onClick={() => setClientsView(false)} className={cn('rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors', !clientsView ? 'bg-white text-text-primary shadow-sm' : 'text-text-tertiary hover:text-text-primary')}>Today</button>
+        <button role="switch" aria-checked={clientsView} onClick={() => setClientsView(!clientsView)} className={cn('flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors', clientsView ? 'bg-primary/10 text-primary' : 'text-text-secondary hover:bg-white')}><span className={cn('flex h-3.5 w-6 items-center rounded-full p-0.5 transition-colors', clientsView ? 'bg-primary' : 'bg-gray-300')}><span className={cn('h-2.5 w-2.5 rounded-full bg-white transition-transform', clientsView && 'translate-x-2.5')} /></span>Clients</button>
+      </div>}
+
       {/* Scheduled emails folder */}
-      {selectedFolder === 'scheduled' ? (
+      {showingClients ? <ClientsList key={selectedAccountId ?? 'all'} /> : !isSearching && selectedFolder === 'scheduled' ? (
         <ScheduledEmailList />
-      ) : selectedFolder === 'needs_response' ? (
+      ) : !isSearching && selectedFolder === 'needs_response' ? (
         <NeedsResponseList />
       ) : /* Thread list */
       isLoading ? (
@@ -976,10 +934,12 @@ export function ThreadList() {
           {isSearching ? (
             <>
               <Search className="h-8 w-8 text-text-tertiary" />
-              <p className="mt-3 text-sm font-medium text-text-primary">No results found</p>
+              <p className="mt-3 text-sm font-medium text-text-primary">{providerSearch.partial ? 'Search incomplete' : hasNextPage ? 'No matches on this page' : 'No results found'}</p>
               <p className="mt-1 text-xs text-text-tertiary">
-                No threads match &ldquo;{debouncedSearch}&rdquo;
+                {providerSearch.partial ? 'Some accounts could not be searched. Results may be incomplete.' : `No conversations match “${debouncedSearch}”.`}
               </p>
+              {hasNextPage && <button type="button" onClick={() => void fetchNextPage()} className="mt-3 text-xs font-medium text-primary">Keep searching older mail</button>}
+              {parseSearchOperators(debouncedSearch).from && <button type="button" onClick={() => { const person = parseSearchOperators(debouncedSearch).from!; setSearchPills([]); setActiveOperator(null); setSearchQuery(person); }} className="mt-3 text-xs font-medium text-primary">Search this person anywhere</button>}
             </>
           ) : (
             <>

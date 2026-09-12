@@ -11,7 +11,7 @@ Convex agent skills for common tasks can be installed by running
 `npx convex ai-files install`.
 
 For production deploys, use `docs/convex-deployment.md`. The production deployment is
-`careful-warbler-543`; deploys require `CONVEX_DEPLOY_KEY` and should not rely on the
+`hallowed-shepherd-316`; deploys require `CONVEX_DEPLOY_KEY` and should not rely on the
 logged-in Convex account on this machine.
 
 <!-- convex-ai-end -->

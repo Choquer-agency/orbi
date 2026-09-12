@@ -1,3 +1,4 @@
+import { scheduleClientRefresh } from "../lib/clientQueue";
 // ─────────────────────────────────────────────────────────────────────────────
 // gmailData.ts — V8-runtime data layer for Gmail sync.
 //
@@ -382,6 +383,7 @@ export const _getEmailFingerprint = internalQuery({
       threadId: e.threadId,
       isRead: e.isRead,
       isStarred: e.isStarred,
+      isDraft: e.isDraft,
       labels: e.labels,
     };
   },
@@ -448,14 +450,20 @@ export const _upsertEmail = internalMutation({
         existing.threadId === args.threadId &&
         existing.isRead === args.isRead &&
         existing.isStarred === args.isStarred &&
+        existing.isDraft === args.isDraft &&
         sameStringArray(existing.labels, args.labels);
       if (same) return { emailId: existing._id, isNew: false };
       await ctx.db.patch(existing._id, {
         threadId: args.threadId,
         isRead: args.isRead,
         isStarred: args.isStarred,
+        isDraft: args.isDraft,
         labels: args.labels,
       });
+      if (existing.threadId !== args.threadId || existing.isDraft !== args.isDraft || !sameStringArray(existing.labels, args.labels)) {
+        await scheduleClientRefresh(ctx, args.threadId);
+        if (existing.threadId !== args.threadId) await scheduleClientRefresh(ctx, existing.threadId);
+      }
       return { emailId: existing._id, isNew: false };
     }
 
@@ -521,6 +529,7 @@ export const _upsertEmail = internalMutation({
         });
       }
     }
+    await scheduleClientRefresh(ctx, args.threadId);
     return { emailId, isNew: true };
   },
 });

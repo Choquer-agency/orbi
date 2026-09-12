@@ -102,9 +102,24 @@ export function AiChatPanel() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const isMobile = useIsMobile();
-
-  // Auto-switch scope: mobile always uses 'all', desktop follows thread selection
+  const ticketScopeThread = useRef<string | null>(null);
+  const ticketChatPrompt = useUiStore(s => s.ticketChatPrompt);
   useEffect(() => {
+    if (!ticketChatPrompt || isLoading || ticketChatPrompt.threadId !== selectedThreadId) return;
+    clearChat();
+    useAiChatStore.getState().setAnchorThreadId(ticketChatPrompt.threadId);
+    ticketScopeThread.current = ticketChatPrompt.threadId;
+    setScope('thread');
+    setInput(ticketChatPrompt.text);
+    useUiStore.getState().setTicketChatPrompt(null);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [ticketChatPrompt, selectedThreadId, isLoading, clearChat]);
+
+
+  // Ticket handoffs retain the originating thread, including on mobile.
+  useEffect(() => {
+    if (ticketScopeThread.current && ticketScopeThread.current === selectedThreadId) { setScope('thread'); return; }
+    ticketScopeThread.current = null;
     if (isMobile) {
       setScope('all');
     } else if (selectedThreadId) {

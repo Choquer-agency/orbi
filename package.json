@@ -32,15 +32,21 @@
     "package:mac:universal": "npm run build:electron-frontend && npm run make -w packages/electron -- --platform=darwin --arch=universal",
     "ship": "bash scripts/ship.sh",
     "typecheck": "tsc -p convex/tsconfig.json --noEmit && cd packages/frontend && tsc -p tsconfig.app.json --noEmit",
-    "release": "bash scripts/release.sh"
+    "release": "bash scripts/release.sh",
+    "test:search": "vitest run"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@testing-library/react": "^16.3.3",
     "@typescript-eslint/eslint-plugin": "^8.24.0",
     "@typescript-eslint/parser": "^8.24.0",
     "concurrently": "^9.1.2",
+    "convex-test": "^0.0.56",
     "eslint": "^9.20.0",
+    "jsdom": "^26.1.0",
     "prettier": "^3.5.3",
     "tsx": "^4.19.3",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "vitest": "^5.0.0"
   }
 }

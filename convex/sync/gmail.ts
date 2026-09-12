@@ -424,6 +424,7 @@ async function persistGmailThread(
         threadId: Id<"threads">;
         isRead: boolean;
         isStarred: boolean;
+        isDraft: boolean;
         labels: string[];
       } | null;
       if (
@@ -431,6 +432,7 @@ async function persistGmailThread(
         fingerprint.threadId === threadId &&
         fingerprint.isRead === isRead &&
         fingerprint.isStarred === isStarred &&
+        fingerprint.isDraft === labels.includes("DRAFT") &&
         fingerprint.labels.length === labels.length &&
         fingerprint.labels.every((l, i) => l === labels[i])
       ) {

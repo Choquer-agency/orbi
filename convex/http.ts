@@ -10,6 +10,7 @@ import { addAttachmentHttpRoutes } from "./attachmentsHttp";
 
 const http = httpRouter();
 
+
 auth.addHttpRoutes(http);
 addAiHttpRoutes(http);
 addOAuthHttpRoutes(http);

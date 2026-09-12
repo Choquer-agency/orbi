@@ -61,7 +61,7 @@ const StyledTableCell = TableCell.extend({
     return { ...this.parent?.(), ...keepStyle };
   },
 });
-import { marked } from 'marked';
+import { pasteMarkdown } from '../../lib/composePaste';
 import { haptic } from '../../lib/haptics';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { MobileFormatToolbar } from './MobileFormatToolbar';
@@ -200,20 +200,6 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     };
   }, []);
 
-  // Detect whether pasted plain text actually looks like Markdown (so we
-  // don't surprise the user by transforming a casual paragraph that happens
-  // to contain a stray asterisk).
-  const looksLikeMarkdown = (txt: string): boolean => {
-    if (!txt || txt.length < 4) return false;
-    return (
-      /(^|\n)\s*(?:[-*•]|\d+\.)\s+\S/.test(txt) || // list item
-      /\*\*[^*\n]+\*\*/.test(txt) ||                // **bold**
-      /(^|\n)#{1,6}\s+\S/.test(txt) ||              // # heading
-      /\[[^\]]+\]\([^)]+\)/.test(txt) ||            // [text](url)
-      /(^|\n)>\s+\S/.test(txt)                       // > blockquote
-    );
-  };
-
   // TipTap rich text editor
   const initialDraftKey = `${initialDraft?.to ?? ''}|${initialDraft?.subject ?? ''}|${initialDraft?.bodyHtml ?? ''}|${initialDraft?.body ?? ''}`;
 
@@ -297,33 +283,15 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
           }
         }
 
-        // Markdown-only paste (no HTML on the clipboard): when the plaintext
-        // looks like Markdown (typical of pasted LLM output), convert it to
-        // HTML so bold/lists/headings actually render. If real HTML is also
-        // on the clipboard we let Tiptap's default handler use that.
-        if (clipboardText && !clipboardHtml && looksLikeMarkdown(clipboardText)) {
-          try {
-            const html = marked.parse(clipboardText, {
-              async: false,
-              gfm: true,
-              breaks: true,
-            }) as string;
+        // Plain-text LLM output can contain Markdown. Insert the parsed
+        // editor nodes; real clipboard HTML uses Tiptap's default handling.
+        try {
+          if (clipboardText && pasteMarkdown(view, clipboardText, clipboardHtml)) {
             event.preventDefault();
-            const editorAPI = (view as unknown as { editor?: typeof editor }).editor;
-            if (editorAPI) {
-              editorAPI.commands.insertContent(html, { parseOptions: { preserveWhitespace: false } });
-            } else {
-              // Fallback path: write the HTML directly into the doc.
-              const parser = new DOMParser();
-              const doc = parser.parseFromString(html, 'text/html');
-              const fragment = doc.body.innerHTML;
-              const tr = view.state.tr.insertText(fragment);
-              view.dispatch(tr);
-            }
             return true;
-          } catch {
-            // If marked blows up, fall through to default paste.
           }
+        } catch {
+          // Leave the clipboard available to the default paste handler.
         }
 
         return false;
@@ -353,7 +321,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
   }, [initialDraftKey, editor]);
 
   // Auto-save drafts
-  const { draftId, saveDraft: saveDraftFn, deleteDraft: deleteDraftFn, markSent, isSaving: isDraftSaving, lastSavedAt } = useAutoSaveDraft({
+  const { draftId, saveDraft: saveDraftFn, deleteDraft: deleteDraftFn, markSent, prepareForSend, resumeAfterSendFailure, isSaving: isDraftSaving, lastSavedAt } = useAutoSaveDraft({
     accountId: sendingAccountId || accountId || '',
     threadId,
     mode,
@@ -616,8 +584,9 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
     }
   };
 
+  const sendInFlightRef = useRef(false);
   const handleSend = async () => {
-    if (!body.trim()) return;
+    if (!body.trim() || sendInFlightRef.current) return;
 
     // Validate email addresses for compose/forward mode
     if (mode !== 'reply') {
@@ -646,6 +615,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
       ? bccRecipients
       : (showBcc ? bcc.split(',').map((e) => e.trim()).filter(Boolean).map((e) => ({ email: e })) : []);
 
+    sendInFlightRef.current = true;
     // Cancel any pending autosave before we touch the draft row.
     if (autoSaveTimerRef.current) {
       clearTimeout(autoSaveTimerRef.current);
@@ -654,6 +624,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
 
     setSending(true);
     try {
+      const savedDraftId = await prepareForSend();
       await submitAiLearn();
       const selectedSig = selectedSignatureId ? signatures?.find((s) => s.id === selectedSignatureId) : null;
       const messageHtml = editor?.getHTML() || '';
@@ -695,7 +666,7 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         // Retire the autosaved draft, same as the immediate-send path —
         // otherwise it lingers and reopens pre-filled, one Cmd+Enter from a
         // duplicate send.
-        markSent();
+        if (!(await markSent())) toast.error('Message queued, but its old draft could not be removed.');
         clearComposeStash();
         onClose();
         return;
@@ -703,38 +674,29 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
 
       let res: { data: any };
 
-      // If we have a saved draft, send via draft endpoint. If anything goes
-      // wrong with that path (stale row, already converted, deleted), fall
-      // through to the fresh-send path below — the email must always go out.
-      if (draftId) {
-        const latestHtml = selectedSig
-          ? `${messageHtml}<div class="email-signature" style="margin-top:16px">${selectedSig.bodyHtml}</div>`
-          : messageHtml;
-        try {
-          const upd = await updateDraftMutation({
-            draftId: draftId as Id<'emails'>,
-            subject: subject || '(no subject)',
-            bodyHtml: latestHtml,
-            bodyText: body,
-            toAddresses: mode === 'reply'
-              ? recipients.map((r) => ({ email: r.email, name: r.name }))
-              : to.split(',').map((e) => ({ email: e.trim() })),
-          });
-          if (!(upd as { stale?: boolean } | undefined)?.stale) {
-            res = await sendDraftMutation.mutateAsync({
-              draftId,
-              undoWindowSeconds: UNDO_WINDOW_SECONDS,
-            });
-            if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
-            markSent();
-        clearComposeStash();
-            haptic.success();
-            registerUndo(res);
-            onClose();
-            return;
-          }
-        } catch (err) {
-          console.warn('Draft send path failed, falling back to fresh send:', err);
+      // Consume the saved row when this endpoint can carry the complete
+      // message. Attachments/CC/BCC use the fresh-send path and then discard
+      // only this composer's saved draft.
+      if (savedDraftId && attachments.length === 0 && ccArray.length === 0 && bccArray.length === 0) {
+        const upd = await updateDraftMutation({
+          draftId: savedDraftId as Id<'emails'>,
+          subject: subject || '(no subject)', bodyHtml, bodyText: body,
+          toAddresses: mode === 'reply'
+            ? recipients.map((r) => ({ email: r.email, name: r.name }))
+            : to.split(',').map((e) => ({ email: e.trim() })).filter(a => a.email),
+        });
+        if (upd.stale || !upd.data) {
+          throw new Error('This draft was changed or already sent. Reopen the conversation before sending again.');
+        }
+        if (upd.data.accountId === (sendingAccountId || accountId)) {
+          // Do not fall back to a second send after an ambiguous send error.
+          res = await sendDraftMutation.mutateAsync({ draftId: savedDraftId, undoWindowSeconds: UNDO_WINDOW_SECONDS });
+          if (!(await markSent())) toast.error('Message queued, but its old draft could not be removed.');
+          clearComposeStash();
+          haptic.success();
+          registerUndo(res);
+          onClose();
+          return;
         }
       }
 
@@ -788,16 +750,18 @@ export function ComposeInline({ threadId, lastEmailId, accountId, mode, onClose,
         throw new Error(`Could not send (mode=${mode}, accountId=${activeAccountId ? 'set' : 'missing'}).`);
       }
 
-      markSent();
-        clearComposeStash();
+      if (!(await markSent())) toast.error('Message queued, but its old draft could not be removed.');
+      clearComposeStash();
       haptic.success();
       registerUndo(res!);
       onClose();
     } catch (err: any) {
+      resumeAfterSendFailure();
       console.error('Send failed:', err);
       haptic.error();
       toast.error(err?.message || 'Failed to send');
     } finally {
+      sendInFlightRef.current = false;
       setSending(false);
     }
   };

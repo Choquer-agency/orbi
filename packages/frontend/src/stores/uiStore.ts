@@ -25,6 +25,10 @@ export interface PendingDraft {
 }
 
 interface UiState {
+  clientsView: boolean;
+  ticketChatPrompt: { threadId: string; text: string } | null;
+  setClientsView: (value: boolean) => void;
+  setTicketChatPrompt: (value: { threadId: string; text: string } | null) => void;
   threadListWidth: number;
   aiChatOpen: boolean;
   aiChatWidth: number;
@@ -106,6 +110,10 @@ export const useUiStore = create<UiState>()(
   persist(
     (set, get) => ({
       threadListWidth: 20,
+      clientsView: false,
+      ticketChatPrompt: null,
+      setClientsView: (value) => set({ clientsView: value, selectedThreadIds: new Set<string>() }),
+      setTicketChatPrompt: (value) => set({ ticketChatPrompt: value, ...(value ? { aiChatOpen: true, selectedThreadId: value.threadId, mobileActiveView: 'chat' as const } : {}) }),
       aiChatOpen: true,
       aiChatWidth: 27,
       navDropdownOpen: false,
